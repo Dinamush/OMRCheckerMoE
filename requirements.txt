@@ -1,9 +1,7 @@
-os-sys
-logging
-requests
-jsonlib-python3
+fastapi
+uvicorn
+jinja2
 beautifulsoup4
-selenium #for selenium, chrome driver is also needed
-concurrentloghandler
-threading
-
+selenium
+yt-dlp
+requests
