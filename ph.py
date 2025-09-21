@@ -147,7 +147,10 @@ def download_videos_parallel(cookie_file, playlist_url, max_workers=4):
 def main():
     # The favorites URL for user burninglove999.
     playlist_url = "https://www.pornhub.com/users/burninglove999/videos/favorites"
-    cookie_file = "pornhub_cookies.txt"
+    cookie_file = "logs/pornhub_cookies.txt"
+    
+    # Ensure logs directory exists
+    os.makedirs("logs", exist_ok=True)
     
     driver = setup_driver()
     try:

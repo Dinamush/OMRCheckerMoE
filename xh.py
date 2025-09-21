@@ -21,7 +21,9 @@ import requests
 # ----------------------------- Configuration ----------------------------- #
 
 # Logging configuration
-LOG_FILE = 'video_downloader.log'
+LOG_FILE = 'logs/video_downloader.log'
+# Ensure logs directory exists
+os.makedirs('logs', exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -34,7 +36,7 @@ logging.basicConfig(
 # Constants
 BASE_URL = 'https://xhamster.com'
 FAVORITES_URL = f'{BASE_URL}/my/favorites/videos'
-DOWNLOAD_DIR = "downloaded_videos"
+DOWNLOAD_DIR = "downloads"
 
 # Selenium WebDriver settings
 HEADLESS = False  # Set to True to run headlessly
