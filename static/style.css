@@ -6,17 +6,25 @@ body {
 
 .container {
     width: 100%;
-    max-width: 500px;
-    margin: 80px auto;
+    max-width: 600px;
+    margin: 40px auto;
     padding: 40px;
     background-color: #ffffff;
     box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    border-radius: 8px;
 }
 
 h1 {
     color: #333;
     text-align: center;
-    margin-bottom: 40px;
+    margin-bottom: 10px;
+}
+
+.subtitle {
+    text-align: center;
+    color: #666;
+    margin-bottom: 30px;
+    font-size: 14px;
 }
 
 form .form-group {
@@ -31,19 +39,29 @@ label {
 
 input[type="url"],
 input[type="text"],
-input[type="password"] {
+input[type="password"],
+select {
     width: 100%;
     padding: 12px;
     border: 1px solid #ccc;
     border-radius: 4px;
     box-sizing: border-box;
+    font-size: 14px;
 }
 
 input[type="url"]:focus,
 input[type="text"]:focus,
-input[type="password"]:focus {
+input[type="password"]:focus,
+select:focus {
     border-color: #4CAF50;
     outline: none;
+}
+
+.help-text {
+    display: block;
+    margin-top: 5px;
+    color: #666;
+    font-size: 12px;
 }
 
 .checkbox-group {
@@ -53,6 +71,78 @@ input[type="password"]:focus {
 
 .checkbox-group input[type="checkbox"] {
     margin-right: 10px;
+    width: auto;
+}
+
+.radio-group {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.radio-option {
+    display: flex;
+    align-items: center;
+    padding: 10px;
+    border: 1px solid #e9ecef;
+    border-radius: 4px;
+    background-color: #f8f9fa;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.radio-option:hover {
+    background-color: #e9ecef;
+    border-color: #4CAF50;
+}
+
+.radio-option input[type="radio"] {
+    margin-right: 10px;
+    width: auto;
+}
+
+.radio-option input[type="radio"]:checked + label {
+    font-weight: 600;
+    color: #4CAF50;
+}
+
+.radio-option:has(input[type="radio"]:checked) {
+    background-color: #e8f5e8;
+    border-color: #4CAF50;
+}
+
+.info-box {
+    background-color: #f8f9fa;
+    border: 1px solid #e9ecef;
+    border-radius: 4px;
+    padding: 15px;
+    margin: 20px 0;
+}
+
+.info-box h3 {
+    margin-top: 0;
+    margin-bottom: 10px;
+    color: #333;
+    font-size: 16px;
+}
+
+.info-box ul {
+    margin: 0;
+    padding-left: 20px;
+}
+
+.info-box li {
+    margin-bottom: 5px;
+    font-size: 13px;
+    line-height: 1.4;
+}
+
+.info-box code {
+    background-color: #e9ecef;
+    padding: 2px 4px;
+    border-radius: 3px;
+    font-family: 'Courier New', monospace;
+    font-size: 12px;
 }
 
 button[type="submit"] {
@@ -64,8 +154,14 @@ button[type="submit"] {
     border: none;
     border-radius: 4px;
     cursor: pointer;
+    font-weight: 500;
 }
 
 button[type="submit"]:hover {
     background-color: #45a049;
+}
+
+button[type="submit"]:disabled {
+    background-color: #cccccc;
+    cursor: not-allowed;
 }

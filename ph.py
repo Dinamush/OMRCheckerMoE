@@ -60,7 +60,7 @@ def extract_video_urls(cookie_file, playlist_url):
     Returns a list of URLs.
     """
     command = [
-        "yt-dlp",
+        "python", "-m", "yt_dlp",
         "--cookies", cookie_file,
         "--flat-playlist",
         "--print", "url",
@@ -89,7 +89,7 @@ def download_video(video_url, cookie_file):
     """
     # Determine expected filename using yt-dlp's --get-filename.
     get_filename_cmd = [
-        "yt-dlp",
+        "python", "-m", "yt_dlp",
         "--cookies", cookie_file,
         "--get-filename",
         "-o", "downloads/%(title)s.%(ext)s",
@@ -107,7 +107,7 @@ def download_video(video_url, cookie_file):
         return
 
     command = [
-        "yt-dlp",
+        "python", "-m", "yt_dlp",
         "--cookies", cookie_file,
         "-o", "downloads/%(title)s.%(ext)s",
         # Format selection: best video (with height <= 1080) + best audio,

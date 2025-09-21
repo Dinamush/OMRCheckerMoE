@@ -14,6 +14,7 @@ from selenium.common.exceptions import (
     WebDriverException,
 )
 from urllib.parse import urljoin
+from webdriver_manager.chrome import ChromeDriverManager
 import yt_dlp
 import requests
 
@@ -36,7 +37,6 @@ FAVORITES_URL = f'{BASE_URL}/my/favorites/videos'
 DOWNLOAD_DIR = "downloaded_videos"
 
 # Selenium WebDriver settings
-CHROME_DRIVER_PATH = r"C:\chromedriver.exe"  # Path to ChromeDriver executable
 HEADLESS = False  # Set to True to run headlessly
 
 # Concurrency settings
@@ -69,9 +69,19 @@ def setup_selenium() -> webdriver.Chrome:
     options.add_argument("--disable-extensions")
     options.add_argument("--disable-popup-blocking")
     options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option('useAutomationExtension', False)
+    
     try:
-        service = Service(CHROME_DRIVER_PATH)
+        # Use webdriver-manager to automatically download and manage ChromeDriver
+        service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=options)
+        
+        # Execute script to remove webdriver property
+        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        
         logging.info("Selenium WebDriver initialized successfully.")
         return driver
     except WebDriverException as e:

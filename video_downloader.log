@@ -10361,3 +10361,98 @@ Stacktrace:
 2025-04-07 17:48:30,131 - INFO - Successfully downloaded: downloaded_videos\CUCKOLD_33.mp4
 2025-04-07 17:48:30,139 - INFO - All videos downloaded successfully.
 2025-04-07 17:48:32,928 - INFO - Selenium WebDriver has been closed.
+2025-09-21 13:32:39,933 - INFO - Download directory is set to: downloaded_videos
+2025-09-21 13:32:42,983 - ERROR - Selenium WebDriver initialization failed: Message: session not created: This version of ChromeDriver only supports Chrome version 133
+Current browser version is 140.0.7339.128 with binary path C:\Program Files\Google\Chrome\Application\chrome.exe; For documentation on this error, please visit: https://www.selenium.dev/documentation/webdriver/troubleshooting/errors#sessionnotcreatedexception
+Stacktrace:
+	GetHandleVerifier [0x00007FF666EC2EC5+28789]
+	(No symbol) [0x00007FF666E2F870]
+	(No symbol) [0x00007FF666CC8F9A]
+	(No symbol) [0x00007FF666D0CDDB]
+	(No symbol) [0x00007FF666D0BE1B]
+	(No symbol) [0x00007FF666D062C6]
+	(No symbol) [0x00007FF666D01556]
+	(No symbol) [0x00007FF666D5544B]
+	(No symbol) [0x00007FF666D54A20]
+	(No symbol) [0x00007FF666D46FF3]
+	(No symbol) [0x00007FF666D0FF0E]
+	(No symbol) [0x00007FF666D11193]
+	GetHandleVerifier [0x00007FF66720D5FD+3479469]
+	GetHandleVerifier [0x00007FF6672271A3+3584851]
+	GetHandleVerifier [0x00007FF66721C44D+3540477]
+	GetHandleVerifier [0x00007FF666F88B6A+838938]
+	(No symbol) [0x00007FF666E3A4EF]
+	(No symbol) [0x00007FF666E36954]
+	(No symbol) [0x00007FF666E36AF6]
+	(No symbol) [0x00007FF666E26499]
+	BaseThreadInitThunk [0x00007FFCC3E9E8D7+23]
+	RtlUserThreadStart [0x00007FFCC5408D9C+44]
+
+2025-09-21 13:32:42,983 - CRITICAL - Failed to initialize Selenium WebDriver: Message: session not created: This version of ChromeDriver only supports Chrome version 133
+Current browser version is 140.0.7339.128 with binary path C:\Program Files\Google\Chrome\Application\chrome.exe; For documentation on this error, please visit: https://www.selenium.dev/documentation/webdriver/troubleshooting/errors#sessionnotcreatedexception
+Stacktrace:
+	GetHandleVerifier [0x00007FF666EC2EC5+28789]
+	(No symbol) [0x00007FF666E2F870]
+	(No symbol) [0x00007FF666CC8F9A]
+	(No symbol) [0x00007FF666D0CDDB]
+	(No symbol) [0x00007FF666D0BE1B]
+	(No symbol) [0x00007FF666D062C6]
+	(No symbol) [0x00007FF666D01556]
+	(No symbol) [0x00007FF666D5544B]
+	(No symbol) [0x00007FF666D54A20]
+	(No symbol) [0x00007FF666D46FF3]
+	(No symbol) [0x00007FF666D0FF0E]
+	(No symbol) [0x00007FF666D11193]
+	GetHandleVerifier [0x00007FF66720D5FD+3479469]
+	GetHandleVerifier [0x00007FF6672271A3+3584851]
+	GetHandleVerifier [0x00007FF66721C44D+3540477]
+	GetHandleVerifier [0x00007FF666F88B6A+838938]
+	(No symbol) [0x00007FF666E3A4EF]
+	(No symbol) [0x00007FF666E36954]
+	(No symbol) [0x00007FF666E36AF6]
+	(No symbol) [0x00007FF666E26499]
+	BaseThreadInitThunk [0x00007FFCC3E9E8D7+23]
+	RtlUserThreadStart [0x00007FFCC5408D9C+44]
+
+2025-09-21 13:33:34,705 - INFO - Download directory is set to: downloaded_videos
+2025-09-21 13:33:34,706 - INFO - ====== WebDriver manager ======
+2025-09-21 13:33:35,264 - INFO - Get LATEST chromedriver version for google-chrome
+2025-09-21 13:33:35,584 - INFO - Get LATEST chromedriver version for google-chrome
+2025-09-21 13:33:35,921 - INFO - There is no [win64] chromedriver "140.0.7339.185" for browser google-chrome "140.0.7339" in cache
+2025-09-21 13:33:35,921 - INFO - Get LATEST chromedriver version for google-chrome
+2025-09-21 13:33:36,688 - INFO - WebDriver version 140.0.7339.185 selected
+2025-09-21 13:33:36,691 - INFO - Modern chrome version https://storage.googleapis.com/chrome-for-testing-public/140.0.7339.185/win32/chromedriver-win32.zip
+2025-09-21 13:33:36,691 - INFO - About to download new driver from https://storage.googleapis.com/chrome-for-testing-public/140.0.7339.185/win32/chromedriver-win32.zip
+2025-09-21 13:33:37,025 - INFO - Driver downloading response is 200
+2025-09-21 13:33:37,620 - INFO - Get LATEST chromedriver version for google-chrome
+2025-09-21 13:33:38,773 - INFO - Driver has been saved in cache [C:\Users\Dinamush\.wdm\drivers\chromedriver\win64\140.0.7339.185]
+2025-09-21 13:33:40,970 - INFO - Selenium WebDriver initialized successfully.
+2025-09-21 13:33:42,662 - INFO - Navigated to login page. Please log in manually in the browser window.
+2025-09-21 13:33:57,533 - INFO - User confirmed login.
+2025-09-21 13:33:57,533 - INFO - Processing page 1: https://xhamster.com/my/favorites/videos
+2025-09-21 13:34:00,852 - INFO - Navigated to https://xhamster.com/my/favorites/videos
+2025-09-21 13:34:02,867 - INFO - Reached the bottom of the page.
+2025-09-21 13:34:02,914 - INFO - Parsed 57 video links from the page.
+2025-09-21 13:34:02,914 - INFO - Total unique videos collected so far: 57
+2025-09-21 13:34:03,239 - INFO - Found next page URL: https://xhamster.com/my/favorites/videos/2
+2025-09-21 13:34:03,239 - INFO - Processing page 2: https://xhamster.com/my/favorites/videos/2
+2025-09-21 13:34:06,380 - INFO - Navigated to https://xhamster.com/my/favorites/videos/2
+2025-09-21 13:34:08,393 - INFO - Reached the bottom of the page.
+2025-09-21 13:34:08,436 - INFO - Parsed 58 video links from the page.
+2025-09-21 13:34:08,436 - INFO - Total unique videos collected so far: 115
+2025-09-21 13:34:08,797 - INFO - Found next page URL: https://xhamster.com/my/favorites/videos/3
+2025-09-21 13:34:08,797 - INFO - Processing page 3: https://xhamster.com/my/favorites/videos/3
+2025-09-21 13:34:11,820 - INFO - Navigated to https://xhamster.com/my/favorites/videos/3
+2025-09-21 13:34:13,833 - INFO - Reached the bottom of the page.
+2025-09-21 13:34:13,878 - INFO - Parsed 56 video links from the page.
+2025-09-21 13:34:13,878 - INFO - Total unique videos collected so far: 171
+2025-09-21 13:34:14,253 - INFO - Found next page URL: https://xhamster.com/my/favorites/videos/4
+2025-09-21 13:34:14,254 - INFO - Processing page 4: https://xhamster.com/my/favorites/videos/4
+2025-09-21 13:34:17,292 - INFO - Navigated to https://xhamster.com/my/favorites/videos/4
+2025-09-21 13:34:19,305 - INFO - Reached the bottom of the page.
+2025-09-21 13:34:19,348 - INFO - Parsed 55 video links from the page.
+2025-09-21 13:34:19,348 - INFO - Total unique videos collected so far: 226
+2025-09-21 13:34:19,573 - INFO - Found next page URL: https://xhamster.com/my/favorites/videos/5
+2025-09-21 13:34:19,573 - INFO - Processing page 5: https://xhamster.com/my/favorites/videos/5
+2025-09-21 13:34:22,474 - INFO - Navigated to https://xhamster.com/my/favorites/videos/5
+2025-09-21 13:34:23,677 - WARNING - Retrying (Retry(total=2, connect=None, read=None, redirect=None, status=None)) after connection broken by 'ConnectionResetError(10054, 'An existing connection was forcibly closed by the remote host', None, 10054, None)': /session/282ee7236ee302ae83a6997c69251f87

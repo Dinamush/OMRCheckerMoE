@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Video Downloader</title>
+    <title>Unified Video Downloader</title>
     <link rel="stylesheet" href="/static/style.css">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -10,27 +10,43 @@
 </head>
 <body>
     <div class="container">
-        <h1>Video Downloader</h1>
+        <h1>Unified Video Downloader</h1>
+        <p class="subtitle">Download videos from PornHub and xHamster</p>
+        
         <form action="/download" method="post" id="downloadForm">
             <div class="form-group">
-                <label for="base_url">Base URL:</label>
-                <input type="url" id="base_url" name="base_url" placeholder="https://xhamster.com" required>
-            </div>
-
-            <div class="form-group">
-                <label for="favorites_url">Favorites URL:</label>
-                <input type="url" id="favorites_url" name="favorites_url" placeholder="https://xhamster.com/my/favorites/videos" required>
+                <label>Select Site:</label>
+                <div class="radio-group">
+                    <div class="radio-option">
+                        <input type="radio" id="pornhub" name="site" value="pornhub" required>
+                        <label for="pornhub">PornHub</label>
+                    </div>
+                    <div class="radio-option">
+                        <input type="radio" id="xhamster" name="site" value="xhamster" required>
+                        <label for="xhamster">xHamster</label>
+                    </div>
+                </div>
             </div>
 
             <div class="form-group checkbox-group">
                 <input type="checkbox" id="headless" name="headless">
-                <label for="headless">Run Headlessly</label>
+                <label for="headless">Run Headlessly (Browser won't be visible)</label>
+            </div>
+
+            <div class="info-box">
+                <h3>Instructions:</h3>
+                <ul>
+                    <li><strong>PornHub:</strong> Downloads from your favorites playlist (requires login)</li>
+                    <li><strong>xHamster:</strong> Downloads from your favorites page (requires login)</li>
+                    <li>You'll need to log in manually in the browser window that opens</li>
+                    <li>Videos will be downloaded to the <code>downloaded_videos</code> folder</li>
+                    <li>Make sure you're logged into the selected site before starting</li>
+                </ul>
             </div>
 
             <button type="submit">Start Download</button>
         </form>
     </div>
 
-    <script src="/static/script.js"></script>
 </body>
 </html>

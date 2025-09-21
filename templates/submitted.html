@@ -1,14 +1,79 @@
-<!-- templates/submitted.html -->
-
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+    <meta charset="UTF-8">
     <title>Download Started</title>
     <link rel="stylesheet" href="/static/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
 </head>
 <body>
-    <h1>Download Started</h1>
-    <p>Your download has been initiated. You can check the logs <a href="/download/log/{{ timestamp }}">here</a>.</p>
-    <p><a href="/">Go Back</a></p>
+    <div class="container">
+        <h1>Download Started</h1>
+        <div class="success-message">
+            <p>Your download has been initiated for <strong>{{ site.title() }}</strong>.</p>
+            <p>The browser will open shortly for you to log in manually.</p>
+        </div>
+        
+        <div class="info-box">
+            <h3>What happens next:</h3>
+            <ul>
+                <li>A browser window will open for you to log in</li>
+                <li>After logging in, the download process will begin automatically</li>
+                <li>Videos will be saved to the <code>downloaded_videos</code> folder</li>
+                <li>You can monitor progress by checking the log file</li>
+            </ul>
+        </div>
+        
+        <div class="action-buttons">
+            <a href="/download/log/{{ timestamp }}" class="btn btn-primary">View Logs</a>
+            <a href="/" class="btn btn-secondary">Start New Download</a>
+        </div>
+    </div>
+    
+    <style>
+        .success-message {
+            background-color: #d4edda;
+            border: 1px solid #c3e6cb;
+            color: #155724;
+            padding: 15px;
+            border-radius: 4px;
+            margin: 20px 0;
+        }
+        
+        .action-buttons {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+        }
+        
+        .btn {
+            flex: 1;
+            padding: 12px;
+            text-align: center;
+            text-decoration: none;
+            border-radius: 4px;
+            font-weight: 500;
+        }
+        
+        .btn-primary {
+            background-color: #007bff;
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            background-color: #0056b3;
+        }
+        
+        .btn-secondary {
+            background-color: #6c757d;
+            color: white;
+        }
+        
+        .btn-secondary:hover {
+            background-color: #545b62;
+        }
+    </style>
 </body>
 </html>

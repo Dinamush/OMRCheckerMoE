@@ -3,5 +3,6 @@ uvicorn
 jinja2
 beautifulsoup4
 selenium
+webdriver-manager
 yt-dlp
 requests
