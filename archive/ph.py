@@ -11,6 +11,7 @@ This script performs the following:
 """
 
 import os
+import sys
 import time
 import subprocess
 import concurrent.futures
@@ -20,6 +21,13 @@ from selenium.webdriver.firefox.options import Options
 from selenium.webdriver.common.by import By
 from selenium.common.exceptions import NoSuchElementException
 from bs4 import BeautifulSoup
+
+# Allow importing check_requirements from repo root when run as script
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.normpath(os.path.join(_SCRIPT_DIR, ".."))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 
 def setup_driver():
     """Set up the Firefox webdriver (make sure geckodriver is in PATH)."""
@@ -186,13 +194,18 @@ def download_video(video_url, cookie_file):
         print(f"File already exists, skipping download: {expected_filename}")
         return
 
+    # Prefer non-HLS (MP4 / get_media) to avoid 404/412 on time-limited HLS segments.
+    # Fall back to HLS if that's all that's available.
+    format_spec = (
+        "bestvideo[height<=1080][protocol!=m3u8_native][protocol!=m3u8]+bestaudio[protocol!=m3u8_native][protocol!=m3u8]/"
+        "best[height<=1080][protocol!=m3u8_native][protocol!=m3u8]/"
+        "bestvideo[height<=1080]+bestaudio/best[height<=1080]"
+    )
     command = [
         "python", "-m", "yt_dlp",
         "--cookies", cookie_file,
         "-o", "downloads/%(title)s.%(ext)s",
-        # Format selection: best video (with height <= 1080) + best audio,
-        # or best overall with height <= 1080.
-        "-f", "bestvideo[height<=1080]+bestaudio/best[height<=1080]",
+        "-f", format_spec,
         video_url
     ]
     print(f"Downloading video: {video_url}")
@@ -230,7 +243,13 @@ def main():
     
     # Ensure logs directory exists
     os.makedirs("logs", exist_ok=True)
-    
+
+    # Ensure required package versions from requirements.txt; update if missing or outdated.
+    from check_requirements import check_and_update_requirements
+    req_path = os.path.join(_REPO_ROOT, "requirements.txt")
+    if not check_and_update_requirements(req_path):
+        print("Warning: some dependencies could not be updated. Continuing anyway.")
+
     driver = setup_driver()
     try:
         login(driver)

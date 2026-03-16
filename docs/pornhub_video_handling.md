@@ -57,9 +57,9 @@ Both rely on **yt-dlp** with a **Netscape cookie file** for the actual video dow
      `python -m yt_dlp --cookies <cookie_file> --get-filename -o "downloads/%(title)s.%(ext)s" <video_url>`  
      If that fails, no skip-by-filename; else if file exists, skip.
    - **Download:**  
-     `python -m yt_dlp --cookies <cookie_file> -o "downloads/%(title)s.%(ext)s" -f "bestvideo[height<=1080]+bestaudio/best[height<=1080]" <video_url>`
+     yt-dlp with cookies and a **format spec that prefers non-HLS** (MP4/get_media) to reduce 404/412 on time-limited HLS segments; fallback to `bestvideo[height<=1080]+bestaudio/best[height<=1080]` if only HLS is available.
    - So: **Netscape cookie file** + **single video page URL** (`view_video.php?viewkey=...`) → yt-dlp does format selection and download.  
-   - **404 on “fragment”:** If you see `[download] Got error: HTTP Error 404: Not Found. Retrying fragment 1 (2/10)...`, that is **yt-dlp** failing on a **media fragment** (e.g. HLS/DASH segment) while downloading a **single** video. That can be transient, geo-restriction, or expired segment; it is separate from the playlist 404.
+   - **404 on “fragment”:** If you see `[download] Got error: HTTP Error 404: Not Found. Retrying fragment 1 (2/10)...`, that is **yt-dlp** failing on a **media fragment** (e.g. HLS/DASH segment) while downloading a **single** video. PornHub's HLS segment URLs are time-limited and often expire (412 Gone). **Mitigation:** update yt-dlp (`pip install -U yt-dlp`) and use ph.py's format preference for non-HLS (MP4/get_media) when available.
 
 5. **Parallel**
    - **`download_videos_parallel(cookie_file, video_urls, max_workers=4)`**  

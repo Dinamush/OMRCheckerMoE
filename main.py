@@ -881,6 +881,10 @@ def get_progress_json(session_id: str):
 
 if __name__ == "__main__":
     try:
+        from check_requirements import check_and_update_requirements
+        req_path = os.path.join(BASE_DIR, "requirements.txt")
+        if not check_and_update_requirements(req_path):
+            print("Warning: some dependencies could not be updated. Continuing anyway.")
         import uvicorn
         uvicorn.run(app, host="0.0.0.0", port=8001)
     except Exception as e:
