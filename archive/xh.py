@@ -325,13 +325,14 @@ def find_next_page(driver: webdriver.Chrome) -> Optional[str]:
 def main() -> None:
     """Main function to orchestrate the scraping and downloading process."""
     ensure_download_dir()
+    driver = None
 
     # Initialize Selenium WebDriver within a context manager to ensure proper cleanup
     try:
         driver = setup_selenium()
     except Exception as e:
         logging.critical(f"Failed to initialize Selenium WebDriver: {e}")
-        return
+        raise
 
     try:
         # Step 1: Let the user log in manually
@@ -382,7 +383,7 @@ def main() -> None:
                 session = create_authenticated_session(driver)
             except Exception as e:
                 logging.critical(f"Failed to create authenticated session: {e}")
-                return
+                raise
 
             # Step 5: Fetch all video titles
             video_info_list: List[Tuple[str, str]] = []
@@ -408,11 +409,17 @@ def main() -> None:
         logging.critical(f"An unexpected error occurred in the main workflow: {e}")
     finally:
         # Ensure the driver is closed
-        try:
-            driver.quit()
-            logging.info("Selenium WebDriver has been closed.")
-        except Exception as e:
-            logging.error(f"Error closing Selenium WebDriver: {e}")
+        if driver is not None:
+            try:
+                driver.quit()
+                logging.info("Selenium WebDriver has been closed.")
+            except Exception as e:
+                logging.error(f"Error closing Selenium WebDriver: {e}")
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        logging.exception("Fatal error")
+        input("\nPress Enter to exit...")
+        raise

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Unified Video Downloader - FastAPI Application
-Supports both PornHub (ph.py) and xHamster (xh.py) video downloading
+Download favorites from PornHub and xHamster via a web UI.
 """
 
 import os
@@ -881,5 +881,11 @@ def get_progress_json(session_id: str):
         return {"error": "Progress file not found."}
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    try:
+        import uvicorn
+        uvicorn.run(app, host="0.0.0.0", port=8001)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        input("\nPress Enter to exit...")
+        raise
