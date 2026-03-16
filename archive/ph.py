@@ -11,12 +11,15 @@ This script performs the following:
 """
 
 import os
+import re
 import sys
 import time
 import subprocess
 import concurrent.futures
-from urllib.parse import urljoin
+from http.cookiejar import MozillaCookieJar
+from urllib.parse import urljoin, urlparse, parse_qs
 from selenium import webdriver
+import requests
 from selenium.webdriver.firefox.options import Options
 from selenium.webdriver.common.by import By
 from selenium.common.exceptions import NoSuchElementException
@@ -168,68 +171,254 @@ def extract_video_urls_selenium(driver, playlist_url, base_url="https://www.porn
     print(f"Extracted {len(result)} video URLs in total.")
     return result
 
-def download_video(video_url, cookie_file):
-    """
-    Downloads a single video using yt-dlp.
-    Before downloading, uses --get-filename to determine the expected output file name
-    and skips the download if that file already exists.
-    The output template saves videos in the "downloads" folder with quality limited to 1080p.
-    """
-    # Determine expected filename using yt-dlp's --get-filename.
-    get_filename_cmd = [
-        "python", "-m", "yt_dlp",
-        "--cookies", cookie_file,
-        "--get-filename",
-        "-o", "downloads/%(title)s.%(ext)s",
-        video_url
-    ]
-    try:
-        result = subprocess.run(get_filename_cmd, capture_output=True, text=True, check=True)
-        expected_filename = result.stdout.strip()
-    except subprocess.CalledProcessError as e:
-        print(f"Error getting filename for video {video_url}: {e}")
-        expected_filename = None
 
-    if expected_filename and os.path.exists(expected_filename):
-        print(f"File already exists, skipping download: {expected_filename}")
+def _session_with_cookies(cookie_file):
+    """Load Netscape cookie file into a requests session."""
+    session = requests.Session()
+    jar = MozillaCookieJar(cookie_file)
+    jar.load(ignore_discard=True, ignore_expires=True)
+    session.cookies = jar
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; rv:109.0) Gecko/20100101 Firefox/115.0",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+    })
+    return session
+
+
+def _find_matching_bracket(html, start_pos, open_c, close_c):
+    """Find the position of the matching close_c, skipping strings. start_pos is the index of open_c."""
+    depth = 1
+    i = start_pos + 1
+    while i < len(html) and depth:
+        if html[i] == '"':
+            # Skip string (handle \")
+            i += 1
+            while i < len(html):
+                if html[i] == "\\" and i + 1 < len(html):
+                    i += 2
+                    continue
+                if html[i] == '"':
+                    i += 1
+                    break
+                i += 1
+            continue
+        if html[i] == open_c:
+            depth += 1
+        elif html[i] == close_c:
+            depth -= 1
+        i += 1
+    return i - 1 if depth == 0 else -1
+
+
+def _extract_flashvars_block(html):
+    """
+    Find the flashvars_<id> = {...}; block as in ph-video.html (the specific actual part).
+    Returns the inner {...} string or None.
+    """
+    # Pattern: var flashvars_<digits> = {
+    m = re.search(r"var\s+flashvars_\d+\s*=\s*\{", html)
+    if not m:
+        return None
+    start_brace = m.end() - 1  # index of the opening {
+    end_brace = _find_matching_bracket(html, start_brace, "{", "}")
+    if end_brace == -1:
+        return None
+    return html[start_brace : end_brace + 1]
+
+
+def _extract_media_from_page(html, video_url):
+    """
+    Extract the best stream URL and video title from a PornHub video page HTML.
+    Uses the same structure as website-code/ph-video.html: flashvars_<id>.mediaDefinitions.
+    Prefer get_media (MP4) to avoid HLS segment 404s; fall back to HLS.
+    Returns (media_url, format, title, viewkey) or None. format is "mp4" or "hls".
+    """
+    parsed = urlparse(video_url)
+    qs = parse_qs(parsed.query)
+    viewkey = qs.get("viewkey", [None])[0] or "unknown"
+
+    # Restrict to the flashvars block (the actual part that contains mediaDefinitions in ph-video.html)
+    flashvars = _extract_flashvars_block(html)
+    if not flashvars:
+        return None
+
+    # Find "mediaDefinitions":[ inside the flashvars block
+    md_start = flashvars.find('"mediaDefinitions":[')
+    if md_start == -1:
+        return None
+    start = md_start + len('"mediaDefinitions":[')
+    end_bracket = _find_matching_bracket(flashvars, start - 1, "[", "]")
+    if end_bracket == -1:
+        return None
+    array_str = flashvars[start : end_bracket]
+
+    # Parse each definition object: {"group":1,...,"format":"hls","videoUrl":"https:\/\/..."}
+    definitions = []
+    pos = 0
+    while pos < len(array_str):
+        obj_start = array_str.find("{", pos)
+        if obj_start == -1:
+            break
+        end_brace = _find_matching_bracket(array_str, obj_start, "{", "}")
+        if end_brace == -1:
+            break
+        block = array_str[obj_start : end_brace + 1]
+        pos = end_brace + 1
+        fmt = None
+        url = None
+        fm = re.search(r'"format"\s*:\s*"([^"]+)"', block)
+        if fm:
+            fmt = fm.group(1).strip()
+        vm = re.search(r'"videoUrl"\s*:\s*"((?:[^"\\]|\\.)*)"', block)
+        if vm:
+            url = vm.group(1).replace("\\/", "/")
+        if fmt and url:
+            definitions.append((fmt, url))
+
+    if not definitions:
+        return None
+
+    # Prefer get_media (MP4); then HLS
+    media_url = None
+    chosen_fmt = None
+    for fmt, url in definitions:
+        if "get_media" in url:
+            media_url = url
+            chosen_fmt = "mp4"
+            break
+    if not media_url and definitions:
+        for fmt, url in definitions:
+            if "m3u8" in url or fmt == "hls":
+                media_url = url
+                chosen_fmt = "hls"
+                break
+        if not media_url:
+            media_url = definitions[0][1]
+            chosen_fmt = definitions[0][0]
+
+    # video_title is in the same flashvars block
+    title = None
+    tt = re.search(r'"video_title"\s*:\s*"((?:[^"\\]|\\.)*)"', flashvars)
+    if tt:
+        title = tt.group(1).replace("\\/", "/").replace('\\"', '"')
+    if not title:
+        title = viewkey
+
+    return (media_url, chosen_fmt, title, viewkey)
+
+
+def _sanitize_filename(s, max_len=180):
+    """Replace invalid path chars and limit length."""
+    s = re.sub(r'[<>:"/\\|?*]', "_", s)
+    s = s.strip().strip(".") or "video"
+    return s[:max_len] if len(s) > max_len else s
+
+
+def _download_from_media_url(media_url, fmt, output_path, cookie_file):
+    """Download from a direct stream URL (get_media or m3u8) using cookies."""
+    if fmt == "mp4" or "get_media" in media_url:
+        session = _session_with_cookies(cookie_file)
+        try:
+            r = session.get(media_url, stream=True, timeout=60)
+            r.raise_for_status()
+            with open(output_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=1 << 20):
+                    if chunk:
+                        f.write(chunk)
+            return True
+        except Exception as e:
+            print(f"  Request download failed: {e}")
+            return False
+    else:
+        # HLS: use yt-dlp with the direct URL; merge to mp4 so output path is correct
+        cmd = [
+            sys.executable, "-m", "yt_dlp",
+            "--cookies", cookie_file,
+            "-o", output_path,
+            "--merge-output-format", "mp4",
+            "--no-warnings",
+            media_url,
+        ]
+        r = subprocess.run(cmd)
+        return r.returncode == 0
+
+
+def _get_video_page_html(video_url, cookie_file, driver=None):
+    """
+    Get HTML of a PornHub video page (the same structure as website-code/ph-video.html).
+    If driver is provided, use Selenium to open the URL and return page_source.
+    Otherwise use requests with the cookie file.
+    """
+    if driver is not None:
+        try:
+            driver.get(video_url)
+            time.sleep(2.5)
+            return driver.page_source
+        except Exception as e:
+            print(f"Error loading video page in browser: {video_url} -> {e}")
+            return None
+    session = _session_with_cookies(cookie_file)
+    try:
+        r = session.get(video_url, timeout=30)
+        r.raise_for_status()
+        return r.text
+    except Exception as e:
+        print(f"Error fetching video page {video_url}: {e}")
+        return None
+
+
+def download_video(video_url, cookie_file, driver=None):
+    """
+    Opens the video page (with Selenium if driver given, else requests), finds the
+    actual stream URL inside the page per website-code/ph-video.html (flashvars_.mediaDefinitions),
+    then downloads from that URL. Skips if the output file already exists.
+    """
+    html = _get_video_page_html(video_url, cookie_file, driver=driver)
+    if not html:
         return
 
-    # Prefer non-HLS (MP4 / get_media) to avoid 404/412 on time-limited HLS segments.
-    # Fall back to HLS if that's all that's available.
-    format_spec = (
-        "bestvideo[height<=1080][protocol!=m3u8_native][protocol!=m3u8]+bestaudio[protocol!=m3u8_native][protocol!=m3u8]/"
-        "best[height<=1080][protocol!=m3u8_native][protocol!=m3u8]/"
-        "bestvideo[height<=1080]+bestaudio/best[height<=1080]"
-    )
-    command = [
-        "python", "-m", "yt_dlp",
-        "--cookies", cookie_file,
-        "-o", "downloads/%(title)s.%(ext)s",
-        "-f", format_spec,
-        video_url
-    ]
-    print(f"Downloading video: {video_url}")
-    result = subprocess.run(command)
-    if result.returncode != 0:
-        print(f"Error downloading video: {video_url}")
-    else:
-        print(f"Successfully downloaded video: {video_url}")
+    extracted = _extract_media_from_page(html, video_url)
+    if not extracted:
+        print(f"Could not extract media URL from page (no flashvars/mediaDefinitions): {video_url}")
+        return
 
-def download_videos_parallel(cookie_file, video_urls, max_workers=4):
+    media_url, fmt, title, viewkey = extracted
+    safe_title = _sanitize_filename(title)
+    output_path = os.path.join("downloads", f"{safe_title}_{viewkey}.mp4")
+
+    if os.path.exists(output_path):
+        print(f"File already exists, skipping: {output_path}")
+        return
+
+    print(f"Downloading: {title[:60]}{'...' if len(title) > 60 else ''} ({video_url})")
+    ok = _download_from_media_url(media_url, fmt, output_path, cookie_file)
+    if ok:
+        print(f"Successfully downloaded: {output_path}")
+    else:
+        print(f"Error downloading video: {video_url}")
+
+
+def download_videos_parallel(cookie_file, video_urls, max_workers=4, driver=None):
     """
-    Downloads the given video URLs in parallel using yt-dlp and the cookie file.
-    max_workers controls the number of parallel downloads.
+    Download each video: open its page (with driver if given), extract the real
+    stream URL from the page (mediaDefinitions in flashvars), then download.
+    If driver is provided, pages are opened in the browser one by one (sequential).
+    If not, pages are fetched with requests in parallel.
     """
     if not video_urls:
         print("No video URLs to download. Exiting.")
         return
 
-    # Ensure the output directory exists.
     os.makedirs("downloads", exist_ok=True)
 
-    # Use ThreadPoolExecutor to download videos in parallel.
+    if driver is not None:
+        for url in video_urls:
+            download_video(url, cookie_file, driver=driver)
+        return
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(download_video, url, cookie_file) for url in video_urls]
+        futures = [executor.submit(download_video, url, cookie_file, None) for url in video_urls]
         for future in concurrent.futures.as_completed(futures):
             try:
                 future.result()
@@ -257,17 +446,18 @@ def main():
         save_cookies(driver, cookie_file)
         # Extract video URLs from the favorites page HTML (yt-dlp returns 404 on this URL).
         video_urls = extract_video_urls_selenium(driver, playlist_url)
+
+        if not video_urls:
+            print("No video URLs extracted. Exiting.")
+            return
+
+        # Open each video page in the browser (same as ph-video.html), find the real
+        # stream URL inside the page (flashvars.mediaDefinitions), then download.
+        print("Starting downloads: each video page will open in the browser to get the stream URL.")
+        download_videos_parallel(cookie_file, video_urls, max_workers=1, driver=driver)
     finally:
-        print("Closing browser. Downloads will continue in the terminal.")
-        input("Press Enter to close the browser and start downloading...")
+        print("Closing browser.")
         driver.quit()
-
-    if not video_urls:
-        print("No video URLs extracted. Exiting.")
-        return
-
-    # Download videos in parallel (adjust max_workers as needed).
-    download_videos_parallel(cookie_file, video_urls, max_workers=4)
 
 if __name__ == "__main__":
     main()

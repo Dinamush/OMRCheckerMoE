@@ -52,14 +52,15 @@ Both rely on **yt-dlp** with a **Netscape cookie file** for the actual video dow
    - **Previously:** URL extraction used **`extract_video_urls(cookie_file, playlist_url)`** with `yt-dlp --cookies ... --flat-playlist --print url <playlist_url>`. yt-dlp often returns **HTTP 404** on the favorites playlist URL, so that path was replaced by Selenium + HTML parsing.
 
 4. **Download (per video)**
-   - **`download_video(video_url, cookie_file)`**
-   - **Filename:**  
-     `python -m yt_dlp --cookies <cookie_file> --get-filename -o "downloads/%(title)s.%(ext)s" <video_url>`  
-     If that fails, no skip-by-filename; else if file exists, skip.
-   - **Download:**  
-     yt-dlp with cookies and a **format spec that prefers non-HLS** (MP4/get_media) to reduce 404/412 on time-limited HLS segments; fallback to `bestvideo[height<=1080]+bestaudio/best[height<=1080]` if only HLS is available.
-   - So: **Netscape cookie file** + **single video page URL** (`view_video.php?viewkey=...`) → yt-dlp does format selection and download.  
-   - **404 on “fragment”:** If you see `[download] Got error: HTTP Error 404: Not Found. Retrying fragment 1 (2/10)...`, that is **yt-dlp** failing on a **media fragment** (e.g. HLS/DASH segment) while downloading a **single** video. PornHub's HLS segment URLs are time-limited and often expire (412 Gone). **Mitigation:** update yt-dlp (`pip install -U yt-dlp`) and use ph.py's format preference for non-HLS (MP4/get_media) when available.
+   - **`download_video(video_url, cookie_file)`**  
+     Does **not** pass the view_video URL directly to yt-dlp (that often leads to 404 on the actual stream). Instead:
+   - **Step 1 – get real stream URL:**  
+     Fetch the video page HTML with **requests** and the Netscape cookie file. Parse the page for **`flashvars_<id>.mediaDefinitions`** (see [pornhub_website_video_storage.md](pornhub_website_video_storage.md)) and pick the best **videoUrl**: prefer **get_media** (MP4), then HLS (m3u8). Also read **video_title** from flashvars for the output filename.
+   - **Step 2 – download from that URL:**  
+     - If the URL is **get_media** (MP4): **requests** with the same cookies, stream response to `downloads/<title>_<viewkey>.mp4`.  
+     - If the URL is **HLS** (m3u8): **yt-dlp** with `--cookies` and that URL, `--merge-output-format mp4`, output to the same path pattern.  
+   - **Skip if exists:** If `downloads/<title>_<viewkey>.mp4` already exists, the video is skipped.  
+   - So: **Netscape cookie file** + **video page URL** → fetch page → **mediaDefinitions** → **direct stream URL** → download with cookies. This avoids 404s caused by using the view_video URL directly with yt-dlp.
 
 5. **Parallel**
    - **`download_videos_parallel(cookie_file, video_urls, max_workers=4)`**  
@@ -107,7 +108,7 @@ Both rely on **yt-dlp** with a **Netscape cookie file** for the actual video dow
 | Cookie file       | Netscape (Selenium)   | Netscape (Selenium)      |
 | URL extraction    | yt-dlp --flat-playlist on playlist URL (404-prone) | Selenium + HTML parse (view_video/viewkey links) |
 | Video URL shape   | view_video.php?viewkey=... | Same                |
-| Download          | yt-dlp + cookies      | yt-dlp + cookies, bestvideo[height<=1080]+bestaudio/best[height<=1080] |
+| Download          | yt-dlp + cookies      | Fetch each video page → parse mediaDefinitions → download get_media (requests) or HLS (yt-dlp) with cookies |
 | Fix for playlist 404 | Use Selenium + HTML parse of favorites page → list of view_video URLs → existing yt-dlp download | Implemented in ph.py |
 
 This document reflects the code as of the last update; any change in main.py or ph.py should be reflected here when modifying PornHub handling.
