@@ -3,8 +3,8 @@
 This script performs the following:
 1. Launches Firefox via Selenium for manual login to Pornhub.
 2. Extracts your session cookies into a Netscape‑formatted file.
-3. Uses yt-dlp with --flat-playlist to extract individual video URLs
-   from your favorites playlist.
+3. Loads your favorites page, scrolls to trigger lazy load, clicks "Load More"
+   until no more, and parses all video URLs from the HTML (yt-dlp returns 404 on the favorites URL).
 4. Downloads each video in parallel with quality limited to 1080p maximum.
 5. Saves the downloaded videos in the "downloads" folder.
 6. Skips downloading any video if the expected output file already exists.
@@ -14,8 +14,12 @@ import os
 import time
 import subprocess
 import concurrent.futures
+from urllib.parse import urljoin
 from selenium import webdriver
 from selenium.webdriver.firefox.options import Options
+from selenium.webdriver.common.by import By
+from selenium.common.exceptions import NoSuchElementException
+from bs4 import BeautifulSoup
 
 def setup_driver():
     """Set up the Firefox webdriver (make sure geckodriver is in PATH)."""
@@ -54,31 +58,107 @@ def save_cookies(driver, cookie_file):
             f.write(f"{domain}\t{flag}\t{path}\t{secure}\t{expiry}\t{name}\t{value}\n")
     print(f"Cookies have been saved to {cookie_file}")
 
-def extract_video_urls(cookie_file, playlist_url):
+def parse_video_links_pornhub(html, base_url="https://www.pornhub.com"):
     """
-    Uses yt-dlp with --flat-playlist to extract video URLs from the favorites playlist.
-    Returns a list of URLs.
+    Parse PornHub video links from HTML (view_video.php?viewkey=...).
+    Used because yt-dlp --flat-playlist returns 404 on the favorites playlist URL.
     """
-    command = [
-        "python", "-m", "yt_dlp",
-        "--cookies", cookie_file,
-        "--flat-playlist",
-        "--print", "url",
-        playlist_url
-    ]
-    print("Extracting video URLs with command:")
-    print(" ".join(command))
-    
-    result = subprocess.run(command, capture_output=True, text=True)
-    if result.returncode != 0:
-        print("Error extracting video URLs. Log output:")
-        print(result.stderr)
-        return []
-    
-    # Each line in the stdout output should be a video URL.
-    urls = result.stdout.strip().splitlines()
-    print(f"Extracted {len(urls)} video URLs.")
-    return urls
+    soup = BeautifulSoup(html, "html.parser")
+    video_links = []
+    seen = set()
+    for anchor in soup.select('a[href*="view_video"], a[href*="viewkey="]'):
+        href = anchor.get("href")
+        if not href or "viewkey=" not in href:
+            continue
+        video_url = urljoin(base_url, href)
+        if video_url in seen:
+            continue
+        seen.add(video_url)
+        video_links.append(video_url)
+    return video_links
+
+
+def scroll_to_bottom(driver, pause_time=2.0, max_scrolls=20):
+    """
+    Scroll to the bottom of the page to trigger lazy-loaded content (#moreData).
+    Stops when scroll height stops increasing or after max_scrolls.
+    """
+    try:
+        last_height = driver.execute_script("return document.body.scrollHeight")
+        scrolls = 0
+        while scrolls < max_scrolls:
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(pause_time)
+            new_height = driver.execute_script("return document.body.scrollHeight")
+            if new_height == last_height:
+                break
+            last_height = new_height
+            scrolls += 1
+    except Exception as e:
+        print(f"Error during scroll: {e}")
+
+
+def try_click_load_more(driver):
+    """
+    Click the 'Load More' button (#moreDataBtn) if present.
+    Returns True if clicked, False if not found or not clickable.
+    """
+    try:
+        btn = driver.find_element(By.ID, "moreDataBtn")
+        if btn.is_displayed() and btn.is_enabled():
+            driver.execute_script("arguments[0].click();", btn)
+            return True
+    except NoSuchElementException:
+        pass
+    except Exception as e:
+        print(f"Error clicking Load More: {e}")
+    return False
+
+
+def extract_video_urls_selenium(driver, playlist_url, base_url="https://www.pornhub.com"):
+    """
+    Load the favorites page, scroll to trigger lazy load, click 'Load More'
+    until no more, and extract all video URLs. Returns a list of full video page URLs.
+    """
+    print(f"Loading playlist page: {playlist_url}")
+    driver.get(playlist_url)
+    time.sleep(2)
+
+    all_urls = set()
+    load_more_attempts = 0
+    max_load_more = 200  # safety limit
+    clicked_load_more = False
+
+    while load_more_attempts < max_load_more:
+        # Scroll to bottom to trigger lazy load and reveal any "Load More" button
+        scroll_to_bottom(driver, pause_time=2.0)
+        time.sleep(1)
+
+        html = driver.page_source
+        new_urls = parse_video_links_pornhub(html, base_url)
+        before = len(all_urls)
+        all_urls.update(new_urls)
+        added = len(all_urls) - before
+
+        print(f"  Total video URLs so far: {len(all_urls)} (this pass: +{added})")
+
+        # If we clicked Load More last time and got no new URLs, we're done
+        if clicked_load_more and added == 0:
+            print("  No new videos after last 'Load More'; finished.")
+            break
+
+        # Try to click "Load More" for the next batch
+        clicked_load_more = try_click_load_more(driver)
+        if not clicked_load_more:
+            print("  No 'Load More' button (or no more pages).")
+            break
+        load_more_attempts += 1
+        print(f"  Clicked 'Load More', waiting for new content...")
+        time.sleep(3)
+
+    result = list(all_urls)
+    print(f"Extracted {len(result)} video URLs in total.")
+    return result
 
 def download_video(video_url, cookie_file):
     """
@@ -122,14 +202,13 @@ def download_video(video_url, cookie_file):
     else:
         print(f"Successfully downloaded video: {video_url}")
 
-def download_videos_parallel(cookie_file, playlist_url, max_workers=4):
+def download_videos_parallel(cookie_file, video_urls, max_workers=4):
     """
-    Extracts video URLs from the playlist and downloads them in parallel.
+    Downloads the given video URLs in parallel using yt-dlp and the cookie file.
     max_workers controls the number of parallel downloads.
     """
-    video_urls = extract_video_urls(cookie_file, playlist_url)
     if not video_urls:
-        print("No video URLs extracted. Exiting.")
+        print("No video URLs to download. Exiting.")
         return
 
     # Ensure the output directory exists.
@@ -157,11 +236,19 @@ def main():
         login(driver)
         time.sleep(5)  # Wait a few seconds to ensure cookies are fully set.
         save_cookies(driver, cookie_file)
+        # Extract video URLs from the favorites page HTML (yt-dlp returns 404 on this URL).
+        video_urls = extract_video_urls_selenium(driver, playlist_url)
     finally:
+        print("Closing browser. Downloads will continue in the terminal.")
+        input("Press Enter to close the browser and start downloading...")
         driver.quit()
-    
+
+    if not video_urls:
+        print("No video URLs extracted. Exiting.")
+        return
+
     # Download videos in parallel (adjust max_workers as needed).
-    download_videos_parallel(cookie_file, playlist_url, max_workers=4)
+    download_videos_parallel(cookie_file, video_urls, max_workers=4)
 
 if __name__ == "__main__":
     main()

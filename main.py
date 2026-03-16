@@ -584,7 +584,6 @@ def pornhub_workflow(playlist_url: str, download_dir: str, headless: bool, log_f
         time.sleep(5)  # Wait for cookies to be set
         save_cookies_netscape(driver, cookie_file)
         
-        # Extract video URLs
         video_urls = extract_video_urls_ytdlp(cookie_file, playlist_url)
         if not video_urls:
             logging.error("No video URLs extracted.")
