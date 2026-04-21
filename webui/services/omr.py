@@ -9,6 +9,7 @@ and tidy them up afterwards.
 from __future__ import annotations
 
 import csv
+import json
 import logging
 import shutil
 import threading
@@ -52,9 +53,30 @@ def _stage_json_files(batch_root: Path) -> list[Path]:
         if not src.exists():
             continue
         dst = inputs_dir / name
-        shutil.copy2(src, dst)
+        if name == "config.json":
+            _write_non_interactive_config(src, dst)
+        else:
+            shutil.copy2(src, dst)
         staged.append(dst)
     return staged
+
+
+def _write_non_interactive_config(src: Path, dst: Path) -> None:
+    """Copy config while forcing non-interactive processing in web runs.
+
+    The core engine uses ``outputs.show_image_level`` to decide whether to open
+    OpenCV windows and block on ``waitKey``. In API/background usage this can
+    hang processing, so we always override it to 0 for staged run config.
+    """
+    with src.open("r", encoding="utf-8") as fh:
+        content = json.load(fh)
+    outputs = content.get("outputs")
+    if not isinstance(outputs, dict):
+        outputs = {}
+    outputs["show_image_level"] = 0
+    content["outputs"] = outputs
+    with dst.open("w", encoding="utf-8") as fh:
+        json.dump(content, fh, indent=2, sort_keys=True)
 
 
 def _unstage_json_files(staged: list[Path]) -> None:

@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from webui.services.omr import _write_non_interactive_config
 
 def _create_batch(client: TestClient, name: str = "Integration Test") -> str:
     response = client.post("/api/v1/batches", json={"name": name})
@@ -201,3 +202,19 @@ def test_ui_pages_render(
     assert response.status_code == 200
     assert "HTML test" in response.text
     assert "template.json" in response.text
+
+
+def test_staged_config_forces_non_interactive(tmp_path: Path) -> None:
+    src = tmp_path / "config.json"
+    dst = tmp_path / "staged_config.json"
+    src.write_text(
+        '{"dimensions":{"display_height":2480},"outputs":{"show_image_level":5}}',
+        encoding="utf-8",
+    )
+
+    _write_non_interactive_config(src, dst)
+
+    import json
+
+    data = json.loads(dst.read_text(encoding="utf-8"))
+    assert data["outputs"]["show_image_level"] == 0
