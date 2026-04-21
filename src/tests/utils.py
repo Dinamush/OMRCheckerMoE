@@ -10,8 +10,17 @@ FROZEN_TIMESTAMP = "1970-01-01"
 
 
 def setup_mocker_patches(mocker):
+    mock_get_window_property = mocker.patch("cv2.getWindowProperty")
+    mock_get_window_property.return_value = 1
+
+    mock_named_window = mocker.patch("cv2.namedWindow")
+    mock_named_window.return_value = True
+
     mock_imshow = mocker.patch("cv2.imshow")
     mock_imshow.return_value = True
+
+    mock_move_window = mocker.patch("cv2.moveWindow")
+    mock_move_window.return_value = True
 
     mock_destroy_all_windows = mocker.patch("cv2.destroyAllWindows")
     mock_destroy_all_windows.return_value = True

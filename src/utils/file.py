@@ -1,8 +1,8 @@
 import argparse
 import json
 import os
+import time
 from csv import QUOTE_NONNUMERIC
-from time import localtime, strftime
 
 import pandas as pd
 
@@ -68,9 +68,9 @@ def setup_outputs_for_template(paths, template):
     ] + template.output_columns
     ns.OUTPUT_SET = []
     ns.files_obj = {}
-    TIME_NOW_HRS = strftime("%I%p", localtime())
+    time_now_hrs = time.strftime("%I%p", time.localtime())
     ns.filesMap = {
-        "Results": os.path.join(paths.results_dir, f"Results_{TIME_NOW_HRS}.csv"),
+        "Results": os.path.join(paths.results_dir, f"Results_{time_now_hrs}.csv"),
         "MultiMarked": os.path.join(paths.manual_dir, "MultiMarkedFiles.csv"),
         "Errors": os.path.join(paths.manual_dir, "ErrorFiles.csv"),
     }

@@ -17,9 +17,7 @@ from src.tests.utils import (
 FROZEN_TIMESTAMP = "1970-01-01"
 CURRENT_DIR = Path("src/tests")
 BASE_SAMPLE_PATH = CURRENT_DIR.joinpath("test_samples", "sample2")
-BASE_RESULTS_CSV_PATH = os.path.join(
-    "outputs", BASE_SAMPLE_PATH, "Results", "Results_05AM.csv"
-)
+BASE_RESULTS_DIR = Path("outputs").joinpath(BASE_SAMPLE_PATH, "Results")
 BASE_MULTIMARKED_CSV_PATH = os.path.join(
     "outputs", BASE_SAMPLE_PATH, "Manual", "MultiMarkedFiles.csv"
 )
@@ -34,6 +32,19 @@ def run_sample(mocker, input_path):
 def extract_output_data(path):
     output_data = pd.read_csv(path, keep_default_na=False)
     return output_data
+
+
+def get_results_csv_path():
+    result_files = sorted(BASE_RESULTS_DIR.glob("Results_*.csv"))
+    if not result_files:
+        return BASE_RESULTS_DIR.joinpath("Results_05AM.csv")
+
+    return result_files[0]
+
+
+def remove_results_csv_files():
+    for result_file in BASE_RESULTS_DIR.glob("Results_*.csv"):
+        remove_file(result_file)
 
 
 write_jsons_and_run = generate_write_jsons_and_run(
@@ -56,12 +67,12 @@ def test_config_low_dimensions(mocker):
 
 def test_different_bubble_dimensions(mocker):
     # Prevent appending to output csv:
-    remove_file(BASE_RESULTS_CSV_PATH)
+    remove_results_csv_files()
     remove_file(BASE_MULTIMARKED_CSV_PATH)
 
     exception = write_jsons_and_run(mocker)
     assert str(exception) == "No Error"
-    original_output_data = extract_output_data(BASE_RESULTS_CSV_PATH)
+    original_output_data = extract_output_data(get_results_csv_path())
 
     def modify_template(template):
         # Incorrect global bubble size
@@ -71,12 +82,12 @@ def test_different_bubble_dimensions(mocker):
         # Incorrect bubble size for MCQBlock1a11
         template["fieldBlocks"]["MCQBlock1a11"]["bubbleDimensions"] = [10, 10]
 
-    remove_file(BASE_RESULTS_CSV_PATH)
+    remove_results_csv_files()
     remove_file(BASE_MULTIMARKED_CSV_PATH)
     exception = write_jsons_and_run(mocker, modify_template=modify_template)
     assert str(exception) == "No Error"
 
-    results_output_data = extract_output_data(BASE_RESULTS_CSV_PATH)
+    results_output_data = extract_output_data(get_results_csv_path())
 
     assert results_output_data.empty
 

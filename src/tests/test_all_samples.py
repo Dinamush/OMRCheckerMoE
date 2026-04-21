@@ -1,6 +1,7 @@
 import os
 import shutil
 from glob import glob
+from pathlib import Path
 
 from src.tests.utils import run_entry_point, setup_mocker_patches
 
@@ -16,9 +17,8 @@ def run_sample(mocker, sample_path):
     input_path = os.path.join("samples", sample_path)
     output_dir = os.path.join("outputs", sample_path)
     if os.path.exists(output_dir):
-        print(
-            f"Warning: output directory already exists: {output_dir}. This may affect the test execution."
-        )
+        print(f"Note: removing existing output directory: {output_dir}")
+        shutil.rmtree(output_dir)
 
     run_entry_point(input_path, output_dir)
 
@@ -33,11 +33,21 @@ def run_sample(mocker, sample_path):
 EXT = "*.csv"
 
 
+def normalize_output_path(relative_path):
+    normalized_path = Path(relative_path).as_posix()
+    path_obj = Path(normalized_path)
+
+    if path_obj.name.startswith("Results_") and path_obj.suffix == ".csv":
+        return path_obj.with_name("Results_05AM.csv").as_posix()
+
+    return normalized_path
+
+
 def extract_sample_outputs(output_dir):
     sample_outputs = {}
     for _dir, _subdir, _files in os.walk(output_dir):
         for file in glob(os.path.join(_dir, EXT)):
-            relative_path = os.path.relpath(file, output_dir)
+            relative_path = normalize_output_path(os.path.relpath(file, output_dir))
             sample_outputs[relative_path] = read_file(file)
     return sample_outputs
 
