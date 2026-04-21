@@ -11,13 +11,17 @@ shared ``conftest.py``.
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
-from webui.services.omr import _write_non_interactive_config
+from webui.services.omr import (
+    _compute_dynamic_dimensions,
+    _write_non_interactive_config,
+)
 
 def _create_batch(client: TestClient, name: str = "Integration Test") -> str:
     response = client.post("/api/v1/batches", json={"name": name})
@@ -168,9 +172,16 @@ def test_full_process_flow_produces_results(
 
     response = client.post(f"/api/v1/batches/{batch_id}/process")
     assert response.status_code == 202, response.text
+    assert response.json()["status"] == "queued"
 
     final = _wait_for_status(client, batch_id)
     assert final["status"] == "done", final
+    assert final["processed_files"] == len(adrian_images)
+    assert final["total_files"] == len(adrian_images)
+    assert final["latest_processed_file"] == adrian_images[-1].name
+    assert final["latest_dynamic_dimensions"] == _compute_dynamic_dimensions(
+        adrian_images[-1]
+    )
 
     response = client.get(f"/api/v1/batches/{batch_id}/results")
     assert response.status_code == 200
@@ -185,6 +196,21 @@ def test_full_process_flow_produces_results(
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/csv")
     assert len(response.content) > 0
+
+    response = client.get(f"/api/v1/batches/{batch_id}/config")
+    assert response.status_code == 200
+    persisted_config = response.json()
+    expected_dimensions = _compute_dynamic_dimensions(adrian_images[-1])
+    assert persisted_config["dimensions"]["display_height"] == expected_dimensions["display_height"]
+    assert persisted_config["dimensions"]["display_width"] == expected_dimensions["display_width"]
+    assert (
+        persisted_config["dimensions"]["processing_height"]
+        == expected_dimensions["processing_height"]
+    )
+    assert (
+        persisted_config["dimensions"]["processing_width"]
+        == expected_dimensions["processing_width"]
+    )
 
 
 def test_ui_pages_render(
@@ -202,6 +228,9 @@ def test_ui_pages_render(
     assert response.status_code == 200
     assert "HTML test" in response.text
     assert "template.json" in response.text
+    assert "Template parameter help" in response.text
+    assert "origin" in response.text
+    assert "bubblesGap" in response.text
 
 
 def test_staged_config_forces_non_interactive(tmp_path: Path) -> None:
@@ -214,7 +243,42 @@ def test_staged_config_forces_non_interactive(tmp_path: Path) -> None:
 
     _write_non_interactive_config(src, dst)
 
-    import json
-
     data = json.loads(dst.read_text(encoding="utf-8"))
     assert data["outputs"]["show_image_level"] == 0
+
+
+def test_directory_import_processes_with_dynamic_dimensions(
+    client: TestClient,
+    adrian_images: list[Path],
+    sample_template_body: dict,
+    sample_config_body: dict,
+) -> None:
+    batch_id = _create_batch(client, "Dynamic directory batch")
+    source_dir = adrian_images[0].parent
+
+    response = client.post(
+        f"/api/v1/batches/{batch_id}/files/import",
+        json={"source_dir": str(source_dir), "copy": True},
+    )
+    assert response.status_code == 201, response.text
+
+    client.put(f"/api/v1/batches/{batch_id}/template", json=sample_template_body)
+    client.put(f"/api/v1/batches/{batch_id}/config", json=sample_config_body)
+
+    response = client.post(f"/api/v1/batches/{batch_id}/process")
+    assert response.status_code == 202, response.text
+
+    final = _wait_for_status(client, batch_id)
+    assert final["status"] == "done", final
+    assert final["processed_files"] == len(adrian_images)
+    assert final["total_files"] == len(adrian_images)
+
+    latest_expected = _compute_dynamic_dimensions(adrian_images[-1])
+    assert final["latest_dynamic_dimensions"] == latest_expected
+
+    response = client.get(f"/api/v1/batches/{batch_id}/config")
+    assert response.status_code == 200
+    persisted_config = response.json()
+    assert persisted_config["dimensions"]["processing_width"] == latest_expected["processing_width"]
+    assert persisted_config["dimensions"]["processing_height"] == latest_expected["processing_height"]
+    assert persisted_config["outputs"]["show_image_level"] == sample_config_body["outputs"]["show_image_level"]

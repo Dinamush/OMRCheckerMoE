@@ -223,6 +223,27 @@ Configuration lives in `webui/settings.py` and can be overridden with environmen
 - `OMR_WEBUI_ALLOW_DIRECTORY_IMPORT` – enables the "import from a server-side directory" endpoint and UI control. Keep this on for local use; turn it off before hosting to avoid arbitrary filesystem reads.
 - `OMR_WEBUI_CORS_ORIGINS` – comma-free JSON list of CORS allow-origins for external frontends.
 
+For local-directory batch marking, the intended flow is:
+
+1. Create a batch.
+2. Use "Import from directory" to pull all supported images from a local folder into the batch `inputs/` directory.
+3. Save or upload `template.json` and, optionally, `config.json` / `evaluation.json`.
+4. Run OMR once for the batch.
+
+During web/API processing, OMRChecker now computes dimensions per image instead of assuming one static size for the entire batch:
+
+- `processing_width` / `processing_height` are derived from the actual image size and clamped to the engine's default processing bounds while preserving aspect ratio.
+- `display_width` / `display_height` are derived the same way for consistency.
+- The runtime config always forces `outputs.show_image_level = 0` so background processing never blocks on OpenCV windows.
+
+Because `config.json` is schema-validated, only the latest computed `dimensions` block is written back to the batch `config.json`. Per-file autosizing details are stored in `metadata.json` and are surfaced by `GET /api/v1/batches/{id}/status` as `latest_dynamic_dimensions`, `latest_processed_file`, `processed_files`, and `total_files`.
+
+This means:
+
+- multiple sheets from a local directory can be processed in one batch without manually tuning dimensions for each file
+- the batch `config.json` remains valid for future runs
+- API clients can poll status and see what dimensions were used most recently
+
 Processing is handled in-process via FastAPI `BackgroundTasks`, which is fine for local use. For hosted deployments, keep the service layer as-is and replace the task handoff with a real queue (RQ, Arq, or Celery with Redis); no engine changes required.
 
 Tests for the web UI live in `webui/tests/` and run as part of the standard `pytest` invocation.

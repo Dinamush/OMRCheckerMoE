@@ -250,6 +250,21 @@ def list_files(batch_id: str, settings: Settings | None = None) -> list[FileRef]
     ]
 
 
+def list_input_image_paths(
+    batch_id: str, settings: Settings | None = None
+) -> list[Path]:
+    """Return on-disk paths for input images in a batch."""
+    settings = settings or get_settings()
+    inputs = _inputs_dir(settings, batch_id)
+    if not inputs.exists():
+        raise BatchNotFound(batch_id)
+    return [
+        child
+        for child in sorted(inputs.iterdir())
+        if child.is_file() and child.suffix.lower() in IMAGE_EXTENSIONS
+    ]
+
+
 def save_uploaded_file(
     batch_id: str,
     filename: str,
@@ -386,6 +401,28 @@ def save_json_document(
     meta = _load_metadata(settings, batch_id)
     meta["updated_at"] = _now().isoformat()
     _save_metadata(settings, batch_id, meta)
+
+
+def get_batch_metadata(
+    batch_id: str, settings: Settings | None = None
+) -> dict[str, Any]:
+    """Return raw metadata.json content for a batch."""
+    settings = settings or get_settings()
+    return _load_metadata(settings, batch_id)
+
+
+def update_batch_metadata(
+    batch_id: str,
+    updates: dict[str, Any],
+    settings: Settings | None = None,
+) -> dict[str, Any]:
+    """Merge arbitrary keys into metadata.json and return the new payload."""
+    settings = settings or get_settings()
+    meta = _load_metadata(settings, batch_id)
+    meta.update(updates)
+    meta["updated_at"] = _now().isoformat()
+    _save_metadata(settings, batch_id, meta)
+    return meta
 
 
 def find_results_csv(batch_id: str, settings: Settings | None = None) -> Path | None:

@@ -68,6 +68,16 @@
 <section class="panel">
     <h2>Template / config / evaluation</h2>
     <p class="muted small">All three are optional JSON files. Only <code>template.json</code> is required before running.</p>
+    <details class="template-help">
+        <summary>Template parameter help</summary>
+        <ul class="template-help-list">
+            <li><code>origin</code> = first bubble in the block</li>
+            <li><code>bubblesGap</code> = option-to-option spacing</li>
+            <li><code>labelsGap</code> = question-to-question spacing</li>
+            <li><code>bubbleDimensions</code> = one bubble's size</li>
+            <li><code>pageDimensions</code> = normalized canvas size after crop</li>
+        </ul>
+    </details>
     <div class="json-grid">
         {% for doc_name, doc in [("template", template_doc), ("config", config_doc), ("evaluation", evaluation_doc)] %}
         <div class="json-box" data-doc="{{ doc_name }}">

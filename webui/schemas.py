@@ -91,6 +91,17 @@ class ProcessAccepted(BaseModel):
     status: BatchStatus
 
 
+class DynamicDimensions(BaseModel):
+    """Derived dimensions used for a single processed image."""
+
+    source_height: int
+    source_width: int
+    display_height: int
+    display_width: int
+    processing_height: int
+    processing_width: int
+
+
 class BatchStatusResponse(BaseModel):
     """Polled status payload."""
 
@@ -99,6 +110,10 @@ class BatchStatusResponse(BaseModel):
     last_error: str | None = None
     file_count: int
     updated_at: datetime
+    processed_files: int = 0
+    total_files: int = 0
+    latest_processed_file: str | None = None
+    latest_dynamic_dimensions: DynamicDimensions | None = None
 
 
 class ResultsRow(BaseModel):

@@ -9,12 +9,16 @@ and tidy them up afterwards.
 from __future__ import annotations
 
 import csv
+import copy
 import json
 import logging
 import shutil
 import threading
 from pathlib import Path
 
+import cv2
+
+from src.defaults.config import CONFIG_DEFAULTS
 from webui.schemas import (
     BatchStatus,
     ResultsPayload,
@@ -26,6 +30,8 @@ from webui.settings import Settings, get_settings
 logger = logging.getLogger(__name__)
 
 _COPIED_JSON_FILES = ("template.json", "config.json", "evaluation.json")
+_RUNTIME_DIR_NAME = "_runtime"
+_DISPLAY_KEYS = ("display_height", "display_width", "processing_height", "processing_width")
 
 _batch_locks: dict[str, threading.Lock] = {}
 _locks_guard = threading.Lock()
@@ -40,25 +46,104 @@ def _lock_for(batch_id: str) -> threading.Lock:
         return lock
 
 
-def _stage_json_files(batch_root: Path) -> list[Path]:
-    """Copy template/config/evaluation into ``inputs/`` for the engine.
+def _discover_input_images(batch_id: str, settings: Settings) -> list[Path]:
+    """Return all processable images for a batch."""
+    return batches_service.list_input_image_paths(batch_id, settings)
 
-    Returns the list of files that were actually copied so the caller can
-    remove them after the run finishes.
-    """
-    staged: list[Path] = []
-    inputs_dir = batch_root / "inputs"
-    for name in _COPIED_JSON_FILES:
+
+def _scale_dimensions(
+    source_width: int,
+    source_height: int,
+    max_width: int,
+    max_height: int,
+) -> tuple[int, int]:
+    """Scale dimensions down to fit within a bounding box without upscaling."""
+    scale = min(max_width / source_width, max_height / source_height, 1.0)
+    width = max(1, int(round(source_width * scale)))
+    height = max(1, int(round(source_height * scale)))
+    return width, height
+
+
+def _compute_dynamic_dimensions(image_path: Path) -> dict[str, int]:
+    """Compute per-image display and processing dimensions."""
+    image = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+    if image is None:
+        raise ValueError(f"Could not read image: {image_path.as_posix()}")
+
+    source_height, source_width = image.shape[:2]
+    display_width, display_height = _scale_dimensions(
+        source_width,
+        source_height,
+        int(CONFIG_DEFAULTS.dimensions.display_width),
+        int(CONFIG_DEFAULTS.dimensions.display_height),
+    )
+    processing_width, processing_height = _scale_dimensions(
+        source_width,
+        source_height,
+        int(CONFIG_DEFAULTS.dimensions.processing_width),
+        int(CONFIG_DEFAULTS.dimensions.processing_height),
+    )
+
+    return {
+        "source_height": int(source_height),
+        "source_width": int(source_width),
+        "display_height": int(display_height),
+        "display_width": int(display_width),
+        "processing_height": int(processing_height),
+        "processing_width": int(processing_width),
+    }
+
+
+def _merge_dimensions_into_config(
+    config: dict | None, dynamic_dimensions: dict[str, int]
+) -> dict:
+    """Merge computed dimensions into an existing config payload."""
+    merged = copy.deepcopy(config) if isinstance(config, dict) else {}
+    dimensions = merged.get("dimensions")
+    if not isinstance(dimensions, dict):
+        dimensions = {}
+    for key in _DISPLAY_KEYS:
+        dimensions[key] = int(dynamic_dimensions[key])
+    merged["dimensions"] = dimensions
+    return merged
+
+
+def _write_runtime_config(config: dict, dst: Path) -> None:
+    """Write staged config while forcing non-interactive web execution."""
+    staged = copy.deepcopy(config)
+    outputs = staged.get("outputs")
+    if not isinstance(outputs, dict):
+        outputs = {}
+    outputs["show_image_level"] = 0
+    staged["outputs"] = outputs
+    with dst.open("w", encoding="utf-8") as fh:
+        json.dump(staged, fh, indent=2, sort_keys=True)
+
+
+def _prepare_runtime_dir(
+    batch_root: Path,
+    image_path: Path,
+    runtime_config: dict,
+    index: int,
+) -> Path:
+    """Build an isolated single-image runtime directory for engine execution."""
+    runtime_root = batch_root / _RUNTIME_DIR_NAME / f"{index:04d}_{image_path.stem}"
+    if runtime_root.exists():
+        shutil.rmtree(runtime_root)
+    runtime_root.mkdir(parents=True, exist_ok=True)
+
+    shutil.copy2(image_path, runtime_root / image_path.name)
+    for name in ("template.json", "evaluation.json"):
         src = batch_root / name
-        if not src.exists():
-            continue
-        dst = inputs_dir / name
-        if name == "config.json":
-            _write_non_interactive_config(src, dst)
-        else:
-            shutil.copy2(src, dst)
-        staged.append(dst)
-    return staged
+        if src.exists():
+            shutil.copy2(src, runtime_root / name)
+    _write_runtime_config(runtime_config, runtime_root / "config.json")
+    return runtime_root
+
+
+def _cleanup_runtime_dir(runtime_dir: Path | None) -> None:
+    if runtime_dir and runtime_dir.exists():
+        shutil.rmtree(runtime_dir, ignore_errors=True)
 
 
 def _write_non_interactive_config(src: Path, dst: Path) -> None:
@@ -78,15 +163,6 @@ def _write_non_interactive_config(src: Path, dst: Path) -> None:
     with dst.open("w", encoding="utf-8") as fh:
         json.dump(content, fh, indent=2, sort_keys=True)
 
-
-def _unstage_json_files(staged: list[Path]) -> None:
-    for path in staged:
-        try:
-            path.unlink()
-        except OSError:
-            logger.exception("Failed to remove staged file %s", path)
-
-
 def run_batch_sync(batch_id: str, settings: Settings | None = None) -> None:
     """Run OMR processing for a single batch synchronously.
 
@@ -101,17 +177,14 @@ def run_batch_sync(batch_id: str, settings: Settings | None = None) -> None:
         logger.info("Batch %s is already processing; skipping duplicate run", batch_id)
         return
 
-    staged: list[Path] = []
+    runtime_dir: Path | None = None
     try:
         batch_root = batches_service.get_batch_root(batch_id, settings)
-        inputs_dir = batch_root / "inputs"
         outputs_dir = batch_root / "outputs"
         outputs_dir.mkdir(parents=True, exist_ok=True)
+        input_images = _discover_input_images(batch_id, settings)
 
-        if not any(
-            p.is_file() and p.suffix.lower() in batches_service.IMAGE_EXTENSIONS
-            for p in inputs_dir.iterdir()
-        ):
+        if not input_images:
             batches_service.update_status(
                 batch_id,
                 BatchStatus.failed,
@@ -133,16 +206,61 @@ def run_batch_sync(batch_id: str, settings: Settings | None = None) -> None:
             return
 
         batches_service.update_status(batch_id, BatchStatus.running, settings=settings)
-        staged = _stage_json_files(batch_root)
+        batches_service.update_batch_metadata(
+            batch_id,
+            {
+                "processed_files": 0,
+                "total_files": len(input_images),
+                "latest_processed_file": None,
+                "latest_dynamic_dimensions": None,
+                "dynamic_dimensions_by_file": {},
+            },
+            settings,
+        )
 
-        args = {
-            "input_paths": [str(inputs_dir)],
-            "output_dir": str(outputs_dir),
-            "debug": False,
-            "autoAlign": False,
-            "setLayout": False,
-        }
-        entry_point_for_args(args)
+        base_config = batches_service.get_json_document(batch_id, "config", settings) or {}
+        dynamic_dimensions_by_file: dict[str, dict[str, int]] = {}
+        latest_persisted_config = copy.deepcopy(base_config)
+
+        for index, image_path in enumerate(input_images, start=1):
+            dynamic_dimensions = _compute_dynamic_dimensions(image_path)
+            dynamic_dimensions_by_file[image_path.name] = dynamic_dimensions
+            latest_persisted_config = _merge_dimensions_into_config(
+                base_config, dynamic_dimensions
+            )
+            runtime_dir = _prepare_runtime_dir(
+                batch_root,
+                image_path,
+                latest_persisted_config,
+                index,
+            )
+
+            args = {
+                "input_paths": [str(runtime_dir)],
+                "output_dir": str(outputs_dir),
+                "debug": False,
+                "autoAlign": False,
+                "setLayout": False,
+            }
+            entry_point_for_args(args)
+            _cleanup_runtime_dir(runtime_dir)
+            runtime_dir = None
+
+            batches_service.update_batch_metadata(
+                batch_id,
+                {
+                    "processed_files": index,
+                    "total_files": len(input_images),
+                    "latest_processed_file": image_path.name,
+                    "latest_dynamic_dimensions": dynamic_dimensions,
+                    "dynamic_dimensions_by_file": dynamic_dimensions_by_file,
+                },
+                settings,
+            )
+
+        batches_service.save_json_document(
+            batch_id, "config", latest_persisted_config, settings
+        )
 
         batches_service.update_status(batch_id, BatchStatus.done, settings=settings)
     except Exception as exc:
@@ -154,7 +272,7 @@ def run_batch_sync(batch_id: str, settings: Settings | None = None) -> None:
             settings=settings,
         )
     finally:
-        _unstage_json_files(staged)
+        _cleanup_runtime_dir(runtime_dir)
         lock.release()
 
 

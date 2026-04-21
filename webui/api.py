@@ -23,6 +23,7 @@ from fastapi.responses import FileResponse
 from webui.schemas import (
     Batch,
     BatchCreate,
+    BatchStatus,
     BatchStatusResponse,
     DirectoryImportRequest,
     FileRef,
@@ -207,7 +208,7 @@ async def process_batch(
         )
     omr_service.queue_run(batch_id, settings)
     background_tasks.add_task(omr_service.run_batch_sync, batch_id, settings)
-    return ProcessAccepted(batch_id=batch_id, status=batch.status)
+    return ProcessAccepted(batch_id=batch_id, status=BatchStatus.queued)
 
 
 @router.get(
@@ -219,12 +220,17 @@ async def batch_status(
     batch_id: str, settings: Settings = Depends(get_settings)
 ) -> BatchStatusResponse:
     batch = batches_service.get_batch(batch_id, settings)
+    metadata = batches_service.get_batch_metadata(batch_id, settings)
     return BatchStatusResponse(
         id=batch.id,
         status=batch.status,
         last_error=batch.last_error,
         file_count=batch.file_count,
         updated_at=batch.updated_at,
+        processed_files=metadata.get("processed_files", 0),
+        total_files=metadata.get("total_files", batch.file_count),
+        latest_processed_file=metadata.get("latest_processed_file"),
+        latest_dynamic_dimensions=metadata.get("latest_dynamic_dimensions"),
     )
 
 
