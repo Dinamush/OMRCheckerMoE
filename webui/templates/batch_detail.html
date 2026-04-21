@@ -1,0 +1,127 @@
+{% extends "base.html" %}
+{% block title %}{{ batch.name }} &middot; OMRChecker{% endblock %}
+{% block content %}
+<nav class="breadcrumbs"><a href="/">&larr; All batches</a></nav>
+
+<section class="panel" data-batch-id="{{ batch.id }}">
+    <div class="panel-head flex-between">
+        <div>
+            <h1>{{ batch.name }}</h1>
+            <p class="muted mono">{{ batch.id }}</p>
+        </div>
+        <div class="status-block">
+            <span id="status-pill" class="pill status-{{ batch.status.value }}">{{ batch.status.value }}</span>
+            {% if batch.last_error %}
+                <p id="last-error" class="error">{{ batch.last_error }}</p>
+            {% else %}
+                <p id="last-error" class="error" hidden></p>
+            {% endif %}
+        </div>
+    </div>
+
+    <div class="actions">
+        <button id="run-btn" class="btn primary" type="button">Run OMR</button>
+        <a id="download-csv" class="btn" href="/api/v1/batches/{{ batch.id }}/results/download">Download CSV</a>
+    </div>
+</section>
+
+<section class="panel">
+    <h2>Input files</h2>
+
+    <form id="upload-form" class="stack">
+        <label class="file-picker">
+            <input id="file-input" type="file" name="files" multiple accept="image/png,image/jpeg" />
+            <span>Select images (PNG / JPG / JPEG) &mdash; you can select several at once.</span>
+        </label>
+        <button type="submit" class="btn primary">Upload</button>
+        <div id="upload-feedback" class="feedback" hidden></div>
+    </form>
+
+    {% if allow_directory_import %}
+    <form id="import-form" class="stack">
+        <label for="source-dir">Or import from a server-side directory</label>
+        <div class="form-inline">
+            <input id="source-dir" name="source_dir" placeholder="/absolute/path/to/scans" />
+            <button type="submit" class="btn">Import</button>
+        </div>
+        <p class="muted small">Only PNG/JPG/JPEG files are imported; other files are skipped.</p>
+        <div id="import-feedback" class="feedback" hidden></div>
+    </form>
+    {% endif %}
+
+    <h3>Files in this batch <span class="muted small" id="file-count">({{ files|length }})</span></h3>
+    {% if files %}
+    <ul class="file-list" id="file-list">
+        {% for file in files %}
+        <li>
+            <span class="mono">{{ file.name }}</span>
+            <span class="muted small">{{ (file.size_bytes / 1024)|round(1) }} KB</span>
+            <button class="btn danger small" type="button" data-delete-file="{{ file.name }}">Remove</button>
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <p class="muted" id="no-files-msg">No files uploaded yet.</p>
+    {% endif %}
+</section>
+
+<section class="panel">
+    <h2>Template / config / evaluation</h2>
+    <p class="muted small">All three are optional JSON files. Only <code>template.json</code> is required before running.</p>
+    <div class="json-grid">
+        {% for doc_name, doc in [("template", template_doc), ("config", config_doc), ("evaluation", evaluation_doc)] %}
+        <div class="json-box" data-doc="{{ doc_name }}">
+            <div class="flex-between">
+                <h3>{{ doc_name }}.json</h3>
+                <span class="muted small" data-doc-status>{% if doc %}present{% else %}empty{% endif %}</span>
+            </div>
+            <textarea
+                data-doc-textarea
+                spellcheck="false"
+                rows="12"
+                placeholder='{"example": true}'>{% if doc %}{{ doc | tojson(indent=2) }}{% endif %}</textarea>
+            <div class="actions">
+                <button class="btn primary small" type="button" data-save-doc>Save</button>
+                <button class="btn small" type="button" data-clear-doc>Clear</button>
+            </div>
+            <div class="feedback" data-doc-feedback hidden></div>
+        </div>
+        {% endfor %}
+    </div>
+</section>
+
+<section class="panel">
+    <h2>Results</h2>
+    <div id="results-container">
+        {% if results.rows %}
+        <table class="table">
+            <thead>
+                <tr>
+                    {% for col in results.columns %}<th>{{ col }}</th>{% endfor %}
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in results.rows %}
+                <tr>
+                    {% for col in results.columns %}
+                        {% if col == "file_id" %}<td class="mono">{{ row.file_id or "" }}</td>
+                        {% elif col == "input_path" %}<td class="mono small">{{ row.input_path or "" }}</td>
+                        {% elif col == "output_path" %}<td class="mono small">{{ row.output_path or "" }}</td>
+                        {% elif col == "score" %}<td>{{ row.score or "" }}</td>
+                        {% else %}<td>{{ row.responses.get(col, "") }}</td>
+                        {% endif %}
+                    {% endfor %}
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <p class="muted" id="no-results-msg">No results yet. Run the batch to generate results.</p>
+        {% endif %}
+    </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/batch.js" defer></script>
+{% endblock %}

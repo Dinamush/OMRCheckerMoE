@@ -1,0 +1,71 @@
+"""Jinja2 HTML views for the OMRChecker Web UI.
+
+These handlers are intentionally thin: they read from the service layer
+and render templates. Every mutation is performed by the browser via
+``fetch`` against ``/api/v1/*``.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
+
+from webui.services import batches as batches_service
+from webui.services import omr as omr_service
+from webui.services.batches import BatchNotFound
+from webui.settings import Settings, get_settings
+
+TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
+templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+
+router = APIRouter(tags=["ui"])
+
+
+@router.get("/", response_class=HTMLResponse)
+async def index(
+    request: Request, settings: Settings = Depends(get_settings)
+) -> HTMLResponse:
+    all_batches = batches_service.list_batches(settings)
+    return templates.TemplateResponse(
+        request,
+        "index.html",
+        {
+            "batches": all_batches,
+            "allow_directory_import": settings.allow_directory_import,
+        },
+    )
+
+
+@router.get("/batches/{batch_id}", response_class=HTMLResponse)
+async def batch_detail(
+    batch_id: str,
+    request: Request,
+    settings: Settings = Depends(get_settings),
+) -> HTMLResponse:
+    try:
+        batch = batches_service.get_batch(batch_id, settings)
+    except BatchNotFound:
+        raise HTTPException(status_code=404, detail=f"Batch not found: {batch_id}")
+
+    files = batches_service.list_files(batch_id, settings)
+    template_doc = batches_service.get_json_document(batch_id, "template", settings)
+    config_doc = batches_service.get_json_document(batch_id, "config", settings)
+    evaluation_doc = batches_service.get_json_document(batch_id, "evaluation", settings)
+    results = omr_service.read_results(batch_id, settings)
+
+    return templates.TemplateResponse(
+        request,
+        "batch_detail.html",
+        {
+            "batch": batch,
+            "files": files,
+            "template_doc": template_doc,
+            "config_doc": config_doc,
+            "evaluation_doc": evaluation_doc,
+            "results": results,
+            "allow_directory_import": settings.allow_directory_import,
+        },
+    )

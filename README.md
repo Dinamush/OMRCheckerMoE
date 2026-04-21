@@ -199,6 +199,34 @@ Alternatively you can also use `python3 main.py -i ./samples/sample1`.
 
 Each example in the samples folder demonstrates different ways in which OMRChecker can be used.
 
+### Web UI and JSON API
+
+A thin FastAPI wrapper around the same engine is available for batch-style workflows. It serves both a minimal HTML UI and a JSON API from a single process.
+
+Start it with:
+
+```bash
+uvicorn webui.app:app --reload
+```
+
+Then open:
+
+- `http://127.0.0.1:8000/` – HTML UI for creating batches, uploading scans, editing `template.json` / `config.json` / `evaluation.json`, running OMR, and viewing results.
+- `http://127.0.0.1:8000/docs` – auto-generated Swagger UI for the `/api/v1/*` endpoints.
+- `http://127.0.0.1:8000/openapi.json` – OpenAPI schema for machine consumption.
+
+Each batch is stored as a self-contained directory under `webui/storage/batches/<id>/`, mirroring the layout the CLI already expects (`inputs/`, `outputs/`, `template.json`, `config.json`, `evaluation.json`). That means a batch created via the UI can still be processed with `python main.py -i <batch>/inputs -o <batch>/outputs` as a fallback.
+
+Configuration lives in `webui/settings.py` and can be overridden with environment variables (prefix `OMR_WEBUI_`) or a `.env` file. Key flags:
+
+- `OMR_WEBUI_STORAGE_ROOT` – where batches are stored.
+- `OMR_WEBUI_ALLOW_DIRECTORY_IMPORT` – enables the "import from a server-side directory" endpoint and UI control. Keep this on for local use; turn it off before hosting to avoid arbitrary filesystem reads.
+- `OMR_WEBUI_CORS_ORIGINS` – comma-free JSON list of CORS allow-origins for external frontends.
+
+Processing is handled in-process via FastAPI `BackgroundTasks`, which is fine for local use. For hosted deployments, keep the service layer as-is and replace the task handoff with a real queue (RQ, Arq, or Celery with Redis); no engine changes required.
+
+Tests for the web UI live in `webui/tests/` and run as part of the standard `pytest` invocation.
+
 ### Common Issues
 
 <details>

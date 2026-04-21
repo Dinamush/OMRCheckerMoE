@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}Batches &middot; OMRChecker{% endblock %}
+{% block content %}
+<section class="panel">
+    <div class="panel-head">
+        <h1>Batches</h1>
+        <p class="muted">Create a batch, upload scans, point it at a template, and run OMR.</p>
+    </div>
+
+    <form id="create-batch-form" class="form-inline">
+        <label class="sr-only" for="batch-name">Batch name</label>
+        <input id="batch-name" name="name" placeholder="New batch name (e.g. Math Finals 2026)" required />
+        <button type="submit" class="btn primary">Create batch</button>
+    </form>
+
+    <div id="create-feedback" class="feedback" hidden></div>
+</section>
+
+<section class="panel">
+    {% if batches %}
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Status</th>
+                    <th>Files</th>
+                    <th>Template</th>
+                    <th>Created</th>
+                    <th aria-label="Actions"></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for batch in batches %}
+                <tr>
+                    <td><a href="/batches/{{ batch.id }}">{{ batch.name }}</a></td>
+                    <td><span class="pill status-{{ batch.status.value }}">{{ batch.status.value }}</span></td>
+                    <td>{{ batch.file_count }}</td>
+                    <td>{% if batch.has_template %}yes{% else %}&mdash;{% endif %}</td>
+                    <td><time datetime="{{ batch.created_at.isoformat() }}">{{ batch.created_at.strftime('%Y-%m-%d %H:%M') }}</time></td>
+                    <td class="row-actions">
+                        <button class="btn danger small" data-delete-batch="{{ batch.id }}" type="button">Delete</button>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    {% else %}
+        <p class="muted center">No batches yet. Create your first one above.</p>
+    {% endif %}
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/app.js" defer></script>
+{% endblock %}

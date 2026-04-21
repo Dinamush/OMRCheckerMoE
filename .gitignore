@@ -7,6 +7,9 @@
 inputs/*
 outputs/*
 
+# Web UI batches storage (user data)
+webui/storage/
+
 # Misc
 **/.DS_Store
 **/__pycache__
