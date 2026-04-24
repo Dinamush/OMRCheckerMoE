@@ -30,6 +30,7 @@ from webui.schemas import (
     ImportResult,
     ProcessAccepted,
     ResultsPayload,
+    TemplateAssetRef,
 )
 from webui.services import batches as batches_service
 from webui.services import omr as omr_service
@@ -159,6 +160,65 @@ async def delete_file(
     batches_service.delete_file(batch_id, filename, settings)
 
 
+@router.get(
+    "/batches/{batch_id}/assets",
+    response_model=list[TemplateAssetRef],
+)
+@_handle_errors
+async def list_template_assets(
+    batch_id: str, settings: Settings = Depends(get_settings)
+) -> list[TemplateAssetRef]:
+    return batches_service.list_template_assets(batch_id, settings)
+
+
+@router.post(
+    "/batches/{batch_id}/assets",
+    response_model=list[TemplateAssetRef],
+    status_code=status.HTTP_201_CREATED,
+)
+@_handle_errors
+async def upload_template_assets(
+    batch_id: str,
+    files: list[UploadFile] = File(...),
+    settings: Settings = Depends(get_settings),
+) -> list[TemplateAssetRef]:
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided")
+    stored: list[TemplateAssetRef] = []
+    for upload in files:
+        data = await upload.read()
+        if len(data) > settings.max_upload_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"File {upload.filename!r} exceeds max_upload_bytes "
+                    f"({settings.max_upload_bytes} bytes)"
+                ),
+            )
+        stored.append(
+            batches_service.save_template_asset(
+                batch_id,
+                upload.filename or "asset",
+                data,
+                settings,
+            )
+        )
+    return stored
+
+
+@router.delete(
+    "/batches/{batch_id}/assets/{filename}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+@_handle_errors
+async def delete_template_asset(
+    batch_id: str,
+    filename: str,
+    settings: Settings = Depends(get_settings),
+) -> None:
+    batches_service.delete_template_asset(batch_id, filename, settings)
+
+
 def _make_json_endpoints(doc_name: str) -> None:
     """Attach GET/PUT routes for each optional JSON document."""
 
@@ -187,6 +247,27 @@ for _doc in ("template", "config", "evaluation"):
     _make_json_endpoints(_doc)
 
 
+def _assert_batch_ready_to_run(batch: Batch, settings: Settings) -> None:
+    """Fail fast with a clear message if anything would block a run."""
+    if batch.file_count == 0:
+        raise HTTPException(status_code=400, detail="Batch has no input images.")
+    if not batch.has_template:
+        raise HTTPException(
+            status_code=400,
+            detail="Batch is missing template.json; upload one before processing.",
+        )
+    missing = batches_service.missing_template_assets(batch.id, settings)
+    if missing:
+        names = ", ".join(missing)
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"template.json references missing asset(s): {names}. "
+                "Upload them under Template assets before running."
+            ),
+        )
+
+
 @router.post(
     "/batches/{batch_id}/process",
     response_model=ProcessAccepted,
@@ -199,13 +280,46 @@ async def process_batch(
     settings: Settings = Depends(get_settings),
 ) -> ProcessAccepted:
     batch = batches_service.get_batch(batch_id, settings)
-    if batch.file_count == 0:
-        raise HTTPException(status_code=400, detail="Batch has no input images.")
-    if not batch.has_template:
+    _assert_batch_ready_to_run(batch, settings)
+    omr_service.queue_run(batch_id, settings)
+    background_tasks.add_task(omr_service.run_batch_sync, batch_id, settings)
+    return ProcessAccepted(batch_id=batch_id, status=BatchStatus.queued)
+
+
+@router.post(
+    "/batches/{batch_id}/cancel",
+    response_model=ProcessAccepted,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+@_handle_errors
+async def cancel_batch(
+    batch_id: str,
+    settings: Settings = Depends(get_settings),
+) -> ProcessAccepted:
+    next_status = omr_service.request_cancel(batch_id, settings)
+    return ProcessAccepted(batch_id=batch_id, status=next_status)
+
+
+@router.post(
+    "/batches/{batch_id}/restart",
+    response_model=ProcessAccepted,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+@_handle_errors
+async def restart_batch(
+    batch_id: str,
+    background_tasks: BackgroundTasks,
+    settings: Settings = Depends(get_settings),
+) -> ProcessAccepted:
+    batch = batches_service.get_batch(batch_id, settings)
+    if batch.status in {BatchStatus.queued, BatchStatus.running}:
         raise HTTPException(
-            status_code=400,
-            detail="Batch is missing template.json; upload one before processing.",
+            status_code=409,
+            detail="Stop the current run before restarting this batch.",
         )
+    _assert_batch_ready_to_run(batch, settings)
+
+    batches_service.reset_batch_runtime_state(batch_id, settings)
     omr_service.queue_run(batch_id, settings)
     background_tasks.add_task(omr_service.run_batch_sync, batch_id, settings)
     return ProcessAccepted(batch_id=batch_id, status=BatchStatus.queued)
@@ -231,6 +345,8 @@ async def batch_status(
         total_files=metadata.get("total_files", batch.file_count),
         latest_processed_file=metadata.get("latest_processed_file"),
         latest_dynamic_dimensions=metadata.get("latest_dynamic_dimensions"),
+        cancel_requested=bool(metadata.get("cancel_requested", False)),
+        preprocess_failures=list(metadata.get("preprocess_failures", [])),
     )
 
 

@@ -96,6 +96,34 @@ TEMPLATE_SCHEMA = {
                                         "min_matching_threshold": {"type": "number"},
                                         "relativePath": {"type": "string"},
                                         "sheetToMarkerWidthRatio": {"type": "number"},
+                                        "markerCorners": {
+                                            "type": "array",
+                                            "minItems": 4,
+                                            "maxItems": 4,
+                                            "items": {
+                                                "type": "array",
+                                                "minItems": 4,
+                                                "maxItems": 4,
+                                                "items": {"type": "number"},
+                                            },
+                                            "description": "Optional per-corner search windows in [[y0, y1, x0, x1], ...] order (top-left, top-right, bottom-left, bottom-right). When set, marker matching is restricted to these windows instead of the default 50/50 quadrant split.",
+                                        },
+                                        "preserveFullImage": {
+                                            "type": "boolean",
+                                            "description": "When true, compute a homography from the detected marker centres to referenceMarkerCenters and warp the full processing canvas instead of cropping to the marker rectangle. Use this when the answer grid extends beyond the marker rectangle.",
+                                        },
+                                        "referenceMarkerCenters": {
+                                            "type": "array",
+                                            "minItems": 4,
+                                            "maxItems": 4,
+                                            "items": {
+                                                "type": "array",
+                                                "minItems": 2,
+                                                "maxItems": 2,
+                                                "items": {"type": "number"},
+                                            },
+                                            "description": "Expected marker centres on the processing canvas in [[x, y], ...] order (top-left, top-right, bottom-left, bottom-right). Required when preserveFullImage is true.",
+                                        },
                                     },
                                     "required": ["relativePath"],
                                 }

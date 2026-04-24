@@ -54,7 +54,10 @@ async def batch_detail(
     template_doc = batches_service.get_json_document(batch_id, "template", settings)
     config_doc = batches_service.get_json_document(batch_id, "config", settings)
     evaluation_doc = batches_service.get_json_document(batch_id, "evaluation", settings)
+    template_assets = batches_service.list_template_assets(batch_id, settings)
     results = omr_service.read_results(batch_id, settings)
+    metadata = batches_service.get_batch_metadata(batch_id, settings)
+    preprocess_failures = list(metadata.get("preprocess_failures", []))
 
     return templates.TemplateResponse(
         request,
@@ -65,7 +68,9 @@ async def batch_detail(
             "template_doc": template_doc,
             "config_doc": config_doc,
             "evaluation_doc": evaluation_doc,
+            "template_assets": template_assets,
             "results": results,
+            "preprocess_failures": preprocess_failures,
             "allow_directory_import": settings.allow_directory_import,
         },
     )

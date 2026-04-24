@@ -18,10 +18,13 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from webui.schemas import BatchStatus
+from webui.services import batches as batches_service
 from webui.services.omr import (
     _compute_dynamic_dimensions,
     _write_non_interactive_config,
 )
+from webui.settings import get_settings
 
 def _create_batch(client: TestClient, name: str = "Integration Test") -> str:
     response = client.post("/api/v1/batches", json={"name": name})
@@ -231,6 +234,7 @@ def test_ui_pages_render(
     assert "Template parameter help" in response.text
     assert "origin" in response.text
     assert "bubblesGap" in response.text
+    assert "Template assets" in response.text
 
 
 def test_staged_config_forces_non_interactive(tmp_path: Path) -> None:
@@ -245,6 +249,181 @@ def test_staged_config_forces_non_interactive(tmp_path: Path) -> None:
 
     data = json.loads(dst.read_text(encoding="utf-8"))
     assert data["outputs"]["show_image_level"] == 0
+
+
+_MARKER_TEMPLATE = {
+    "pageDimensions": [300, 400],
+    "bubbleDimensions": [25, 25],
+    "fieldBlocks": {
+        "MCQ_Block_1": {
+            "fieldType": "QTYPE_MCQ4",
+            "origin": [65, 60],
+            "fieldLabels": ["q1..2"],
+            "labelsGap": 52,
+            "bubblesGap": 41,
+        }
+    },
+    "preProcessors": [
+        {
+            "name": "CropOnMarkers",
+            "options": {
+                "relativePath": "omr_marker.jpg",
+                "sheetToMarkerWidthRatio": 17,
+            },
+        }
+    ],
+}
+
+
+def test_missing_template_asset_blocks_processing_with_clear_error(
+    client: TestClient, adrian_images: list[Path]
+) -> None:
+    batch_id = _create_batch(client, "Missing marker asset")
+    _upload_image(client, batch_id, adrian_images[0])
+    client.put(f"/api/v1/batches/{batch_id}/template", json=_MARKER_TEMPLATE)
+
+    response = client.post(f"/api/v1/batches/{batch_id}/process")
+    assert response.status_code == 400, response.text
+    detail = response.json()["detail"]
+    assert "omr_marker.jpg" in detail
+    assert "Template assets" in detail
+
+    response = client.get(f"/api/v1/batches/{batch_id}/status")
+    assert response.json()["status"] == "created"
+
+
+def test_list_template_assets_reports_missing_required_asset(
+    client: TestClient, adrian_images: list[Path]
+) -> None:
+    batch_id = _create_batch(client, "Assets listing")
+    _upload_image(client, batch_id, adrian_images[0])
+    client.put(f"/api/v1/batches/{batch_id}/template", json=_MARKER_TEMPLATE)
+
+    response = client.get(f"/api/v1/batches/{batch_id}/assets")
+    assert response.status_code == 200
+    assets = response.json()
+    assert len(assets) == 1
+    assert assets[0]["name"] == "omr_marker.jpg"
+    assert assets[0]["required"] is True
+    assert assets[0]["present"] is False
+
+
+def test_upload_template_asset_satisfies_preflight(
+    client: TestClient, adrian_images: list[Path]
+) -> None:
+    batch_id = _create_batch(client, "Upload asset")
+    _upload_image(client, batch_id, adrian_images[0])
+    client.put(f"/api/v1/batches/{batch_id}/template", json=_MARKER_TEMPLATE)
+
+    response = client.post(f"/api/v1/batches/{batch_id}/process")
+    assert response.status_code == 400
+
+    fake_marker_bytes = b"\xff\xd8\xff\xe0" + b"0" * 64
+    response = client.post(
+        f"/api/v1/batches/{batch_id}/assets",
+        files=[("files", ("omr_marker.jpg", fake_marker_bytes, "image/jpeg"))],
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body[0]["name"] == "omr_marker.jpg"
+    assert body[0]["present"] is True
+
+    response = client.get(f"/api/v1/batches/{batch_id}/assets")
+    assets = response.json()
+    assert assets[0]["present"] is True
+    assert assets[0]["size_bytes"] == len(fake_marker_bytes)
+
+    settings = get_settings()
+    missing = batches_service.missing_template_assets(batch_id, settings)
+    assert missing == []
+
+    response = client.delete(
+        f"/api/v1/batches/{batch_id}/assets/omr_marker.jpg"
+    )
+    assert response.status_code == 204
+
+    response = client.get(f"/api/v1/batches/{batch_id}/assets")
+    assert response.json()[0]["present"] is False
+
+    response = client.post(f"/api/v1/batches/{batch_id}/process")
+    assert response.status_code == 400
+    assert "omr_marker.jpg" in response.json()["detail"]
+
+
+def test_asset_upload_rejects_bad_filenames(
+    client: TestClient, adrian_images: list[Path]
+) -> None:
+    batch_id = _create_batch(client, "Bad asset upload")
+    _upload_image(client, batch_id, adrian_images[0])
+
+    response = client.post(
+        f"/api/v1/batches/{batch_id}/assets",
+        files=[("files", ("notes.txt", b"hello", "text/plain"))],
+    )
+    assert response.status_code == 400
+
+    response = client.post(
+        f"/api/v1/batches/{batch_id}/assets",
+        files=[("files", ("template.json", b"{}", "application/json"))],
+    )
+    assert response.status_code == 400
+
+
+def test_cancel_endpoint_cancels_queued_batch(
+    client: TestClient, adrian_images: list[Path], sample_template_body: dict
+) -> None:
+    batch_id = _create_batch(client, "Queued cancel")
+    _upload_image(client, batch_id, adrian_images[0])
+    client.put(f"/api/v1/batches/{batch_id}/template", json=sample_template_body)
+
+    settings = get_settings()
+    batches_service.update_status(batch_id, BatchStatus.queued, settings=settings)
+
+    response = client.post(f"/api/v1/batches/{batch_id}/cancel")
+    assert response.status_code == 202, response.text
+    assert response.json()["status"] == "cancelled"
+
+    response = client.get(f"/api/v1/batches/{batch_id}/status")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "cancelled"
+    assert payload["cancel_requested"] is True
+
+
+def test_restart_endpoint_requeues_non_running_batch(
+    client: TestClient, adrian_images: list[Path], sample_template_body: dict, monkeypatch
+) -> None:
+    batch_id = _create_batch(client, "Restart me")
+    _upload_image(client, batch_id, adrian_images[0])
+    client.put(f"/api/v1/batches/{batch_id}/template", json=sample_template_body)
+
+    settings = get_settings()
+    batches_service.update_status(
+        batch_id,
+        BatchStatus.failed,
+        last_error="Synthetic failure",
+        settings=settings,
+    )
+
+    from webui.services import omr as omr_service
+
+    def fake_run(batch_id_arg, settings_arg=None):
+        batches_service.update_status(
+            batch_id_arg,
+            BatchStatus.done,
+            settings=settings_arg or settings,
+        )
+
+    monkeypatch.setattr(omr_service, "run_batch_sync", fake_run)
+
+    response = client.post(f"/api/v1/batches/{batch_id}/restart")
+    assert response.status_code == 202, response.text
+    assert response.json()["status"] == "queued"
+
+    response = client.get(f"/api/v1/batches/{batch_id}/status")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "done"
 
 
 def test_directory_import_processes_with_dynamic_dimensions(

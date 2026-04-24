@@ -30,6 +30,7 @@ from webui.schemas import (
     BatchStatus,
     FileRef,
     SourceMode,
+    TemplateAssetRef,
 )
 from webui.settings import Settings, get_settings
 
@@ -38,6 +39,13 @@ TEMPLATE_FILENAME = "template.json"
 CONFIG_FILENAME = "config.json"
 EVALUATION_FILENAME = "evaluation.json"
 METADATA_FILENAME = "metadata.json"
+ASSET_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff"}
+RESERVED_BATCH_FILES = {
+    TEMPLATE_FILENAME,
+    CONFIG_FILENAME,
+    EVALUATION_FILENAME,
+    METADATA_FILENAME,
+}
 
 JSON_DOC_NAMES = {
     "template": TEMPLATE_FILENAME,
@@ -478,3 +486,162 @@ def get_batch_root(batch_id: str, settings: Settings | None = None) -> Path:
     if not root.exists():
         raise BatchNotFound(batch_id)
     return root
+
+
+def _collect_template_relative_paths(value: Any) -> list[str]:
+    """Walk a parsed template.json payload and collect ``relativePath`` values."""
+    found: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key == "relativePath" and isinstance(item, str):
+                found.append(item)
+            else:
+                found.extend(_collect_template_relative_paths(item))
+    elif isinstance(value, list):
+        for item in value:
+            found.extend(_collect_template_relative_paths(item))
+    return found
+
+
+def _template_required_asset_names(
+    batch_id: str, settings: Settings
+) -> list[str]:
+    """Return deduplicated asset filenames referenced by template.json."""
+    template_doc = get_json_document(batch_id, "template", settings)
+    if not template_doc:
+        return []
+    raw_paths = _collect_template_relative_paths(
+        template_doc.get("preProcessors", [])
+    )
+    seen: list[str] = []
+    for rel in raw_paths:
+        name = Path(rel).name
+        if name and name not in seen:
+            seen.append(name)
+    return seen
+
+
+def _asset_is_present(batch_dir: Path, name: str) -> Path | None:
+    """Return the path to an asset if it exists in root or inputs/, else None."""
+    candidates = (batch_dir / name, batch_dir / "inputs" / name)
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
+
+
+def list_template_assets(
+    batch_id: str, settings: Settings | None = None
+) -> list[TemplateAssetRef]:
+    """Return template-referenced assets and whether each is present on disk."""
+    settings = settings or get_settings()
+    batch_dir = _batch_root(settings, batch_id)
+    if not batch_dir.exists():
+        raise BatchNotFound(batch_id)
+
+    required = _template_required_asset_names(batch_id, settings)
+    refs: list[TemplateAssetRef] = []
+    for name in required:
+        resolved = _asset_is_present(batch_dir, name)
+        refs.append(
+            TemplateAssetRef(
+                name=name,
+                required=True,
+                present=resolved is not None,
+                size_bytes=resolved.stat().st_size if resolved else None,
+            )
+        )
+    return refs
+
+
+def missing_template_assets(
+    batch_id: str, settings: Settings | None = None
+) -> list[str]:
+    """Return names of template-referenced assets that are not yet on disk."""
+    return [asset.name for asset in list_template_assets(batch_id, settings) if not asset.present]
+
+
+def _validate_asset_filename(name: str) -> str:
+    """Sanitize and validate a user-supplied asset filename."""
+    safe = _sanitise_filename(name)
+    if safe in RESERVED_BATCH_FILES:
+        raise InvalidBatchRequest(
+            f"{safe!r} is reserved for the batch itself; use a different filename."
+        )
+    suffix = Path(safe).suffix.lower()
+    if suffix not in ASSET_EXTENSIONS:
+        raise InvalidBatchRequest(
+            f"Unsupported asset type {suffix!r}; allowed: {sorted(ASSET_EXTENSIONS)}"
+        )
+    return safe
+
+
+def save_template_asset(
+    batch_id: str,
+    filename: str,
+    data: bytes,
+    settings: Settings | None = None,
+) -> TemplateAssetRef:
+    """Write a template asset (e.g. ``omr_marker.jpg``) into the batch root."""
+    settings = settings or get_settings()
+    batch_dir = _batch_root(settings, batch_id)
+    if not batch_dir.exists():
+        raise BatchNotFound(batch_id)
+    safe = _validate_asset_filename(filename)
+    target = batch_dir / safe
+    target.write_bytes(data)
+
+    required = _template_required_asset_names(batch_id, settings)
+    return TemplateAssetRef(
+        name=safe,
+        required=safe in required,
+        present=True,
+        size_bytes=target.stat().st_size,
+    )
+
+
+def delete_template_asset(
+    batch_id: str,
+    filename: str,
+    settings: Settings | None = None,
+) -> None:
+    """Remove a previously uploaded template asset from the batch root."""
+    settings = settings or get_settings()
+    batch_dir = _batch_root(settings, batch_id)
+    if not batch_dir.exists():
+        raise BatchNotFound(batch_id)
+    safe = _validate_asset_filename(filename)
+    target = batch_dir / safe
+    if not target.exists() or not target.is_file():
+        raise InvalidBatchRequest(f"Asset not found: {safe}")
+    target.unlink()
+
+
+def reset_batch_runtime_state(
+    batch_id: str, settings: Settings | None = None
+) -> None:
+    """Remove generated runtime/output artifacts and reset run metadata."""
+    settings = settings or get_settings()
+    root = get_batch_root(batch_id, settings)
+
+    for name in ("outputs", "_runtime"):
+        target = root / name
+        if target.exists():
+            shutil.rmtree(target, ignore_errors=True)
+
+    (root / "outputs").mkdir(parents=True, exist_ok=True)
+
+    meta = _load_metadata(settings, batch_id)
+    meta["status"] = BatchStatus.created.value
+    meta["last_error"] = None
+    meta["updated_at"] = _now().isoformat()
+    for key in (
+        "processed_files",
+        "total_files",
+        "latest_processed_file",
+        "latest_dynamic_dimensions",
+        "dynamic_dimensions_by_file",
+        "cancel_requested",
+    ):
+        meta.pop(key, None)
+    _save_metadata(settings, batch_id, meta)

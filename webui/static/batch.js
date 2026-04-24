@@ -1,6 +1,6 @@
 const panel = document.querySelector("[data-batch-id]")
 const batchId = panel ? panel.dataset.batchId : null
-const STATUS_CLASSES = ["status-created", "status-queued", "status-running", "status-done", "status-failed"]
+const STATUS_CLASSES = ["status-created", "status-queued", "status-running", "status-done", "status-failed", "status-cancelled"]
 
 const show = (element, message, kind = "info") => {
     if (!element) return
@@ -23,7 +23,7 @@ const jsonFetch = async (url, options = {}) => {
     return data
 }
 
-const updateStatus = (status, lastError) => {
+const updateStatus = (status, lastError, preprocessFailures = []) => {
     const pill = document.getElementById("status-pill")
     if (pill) {
         STATUS_CLASSES.forEach((cls) => pill.classList.remove(cls))
@@ -40,20 +40,40 @@ const updateStatus = (status, lastError) => {
             errorEl.textContent = ""
         }
     }
+    const warnEl = document.getElementById("preprocess-warning")
+    if (warnEl) {
+        if (Array.isArray(preprocessFailures) && preprocessFailures.length > 0) {
+            warnEl.hidden = false
+            warnEl.textContent = `Preprocessor could not locate markers in ${preprocessFailures.length} file(s): ${preprocessFailures.join(", ")}`
+        } else {
+            warnEl.hidden = true
+            warnEl.textContent = ""
+        }
+    }
     const runBtn = document.getElementById("run-btn")
     if (runBtn) {
         runBtn.disabled = status === "queued" || status === "running"
         runBtn.textContent = status === "running" ? "Running..." : "Run OMR"
+    }
+    const stopBtn = document.getElementById("stop-btn")
+    if (stopBtn) {
+        stopBtn.disabled = !(status === "queued" || status === "running")
+    }
+    const restartBtn = document.getElementById("restart-btn")
+    if (restartBtn) {
+        restartBtn.disabled = status === "queued" || status === "running"
     }
 }
 
 const pollStatus = async () => {
     try {
         const data = await jsonFetch(apiUrl("/status"))
-        updateStatus(data.status, data.last_error)
+        updateStatus(data.status, data.last_error, data.preprocess_failures)
         if (data.status === "queued" || data.status === "running") {
             setTimeout(pollStatus, 2000)
         } else if (data.status === "done") {
+            await refreshResults()
+        } else if (data.status === "cancelled") {
             await refreshResults()
         }
     } catch (error) {
@@ -133,6 +153,76 @@ const escapeHtml = (value) => {
         .replace(/>/g, "&gt;")
         .replace(/"/g, "&quot;")
         .replace(/'/g, "&#39;")
+}
+
+const refreshAssets = async () => {
+    try {
+        const assets = await jsonFetch(apiUrl("/assets"))
+        const list = document.getElementById("asset-list")
+        const empty = document.getElementById("no-assets-msg")
+        const panel = document.getElementById("template-assets-panel")
+        if (!panel) return
+
+        if (!assets || assets.length === 0) {
+            if (list) list.remove()
+            if (!document.getElementById("no-assets-msg")) {
+                const p = document.createElement("p")
+                p.className = "muted"
+                p.id = "no-assets-msg"
+                p.textContent = "Your template does not reference any external assets."
+                panel.appendChild(p)
+            }
+            return
+        }
+
+        if (empty) empty.remove()
+
+        let target = list
+        if (!target) {
+            target = document.createElement("ul")
+            target.className = "asset-list"
+            target.id = "asset-list"
+            panel.appendChild(target)
+        }
+        target.innerHTML = ""
+
+        assets.forEach((asset) => {
+            const li = document.createElement("li")
+            li.dataset.assetName = asset.name
+
+            const name = document.createElement("span")
+            name.className = "mono"
+            name.textContent = asset.name
+            li.appendChild(name)
+
+            const pill = document.createElement("span")
+            pill.className = `pill status-${asset.present ? "done" : "failed"}`
+            pill.textContent = asset.present ? "present" : "missing"
+            li.appendChild(pill)
+
+            const meta = document.createElement("span")
+            meta.className = "muted small"
+            if (asset.present && typeof asset.size_bytes === "number") {
+                meta.textContent = `${(asset.size_bytes / 1024).toFixed(1)} KB`
+            } else {
+                meta.textContent = "required by template"
+            }
+            li.appendChild(meta)
+
+            if (asset.present) {
+                const btn = document.createElement("button")
+                btn.className = "btn danger small"
+                btn.type = "button"
+                btn.dataset.deleteAsset = asset.name
+                btn.textContent = "Remove"
+                li.appendChild(btn)
+            }
+
+            target.appendChild(li)
+        })
+    } catch (error) {
+        console.error(error)
+    }
 }
 
 const handleUpload = async (event) => {
@@ -223,6 +313,9 @@ const handleSaveDoc = async (event) => {
         if (!response.ok) throw new Error(data.detail || "Save failed")
         show(feedback, data.status === "deleted" ? "Deleted." : "Saved.", "success")
         if (statusEl) statusEl.textContent = raw ? "present" : "empty"
+        if (docName === "template") {
+            await refreshAssets()
+        }
     } catch (error) {
         show(feedback, error.message, "error")
     }
@@ -233,6 +326,45 @@ const handleClearDoc = (event) => {
     if (!button) return
     const textarea = button.closest(".json-box").querySelector("[data-doc-textarea]")
     textarea.value = ""
+}
+
+const handleAssetUpload = async (event) => {
+    event.preventDefault()
+    const feedback = document.getElementById("asset-upload-feedback")
+    const input = document.getElementById("asset-file-input")
+    if (!input.files || input.files.length === 0) {
+        show(feedback, "Select at least one asset file first.", "error")
+        return
+    }
+    const formData = new FormData()
+    Array.from(input.files).forEach((file) => formData.append("files", file))
+    try {
+        const response = await fetch(apiUrl("/assets"), { method: "POST", body: formData })
+        const data = await response.json()
+        if (!response.ok) throw new Error(data.detail || "Asset upload failed")
+        show(feedback, `Uploaded ${data.length} asset(s).`, "success")
+        input.value = ""
+        await refreshAssets()
+    } catch (error) {
+        show(feedback, error.message, "error")
+    }
+}
+
+const handleDeleteAsset = async (event) => {
+    const button = event.target.closest("[data-delete-asset]")
+    if (!button) return
+    const name = button.dataset.deleteAsset
+    if (!window.confirm(`Remove asset ${name}?`)) return
+    try {
+        const response = await fetch(apiUrl(`/assets/${encodeURIComponent(name)}`), { method: "DELETE" })
+        if (!response.ok && response.status !== 204) {
+            const data = await response.json().catch(() => ({}))
+            throw new Error(data.detail || "Delete failed")
+        }
+        await refreshAssets()
+    } catch (error) {
+        window.alert(error.message)
+    }
 }
 
 const handleRun = async () => {
@@ -246,15 +378,45 @@ const handleRun = async () => {
     }
 }
 
+const handleStop = async () => {
+    const errorEl = document.getElementById("last-error")
+    try {
+        const data = await jsonFetch(apiUrl("/cancel"), { method: "POST" })
+        updateStatus(data.status, data.status === "running" ? "Stop requested. The current image will finish first." : "Cancelled before processing started.")
+        setTimeout(pollStatus, 1000)
+    } catch (error) {
+        show(errorEl, error.message, "error")
+    }
+}
+
+const handleRestart = async () => {
+    const errorEl = document.getElementById("last-error")
+    try {
+        await jsonFetch(apiUrl("/restart"), { method: "POST" })
+        updateStatus("queued", null)
+        await refreshResults()
+        setTimeout(pollStatus, 1000)
+    } catch (error) {
+        show(errorEl, error.message, "error")
+    }
+}
+
 document.addEventListener("DOMContentLoaded", () => {
     const uploadForm = document.getElementById("upload-form")
     if (uploadForm) uploadForm.addEventListener("submit", handleUpload)
     const importForm = document.getElementById("import-form")
     if (importForm) importForm.addEventListener("submit", handleImport)
+    const assetForm = document.getElementById("asset-upload-form")
+    if (assetForm) assetForm.addEventListener("submit", handleAssetUpload)
     const runBtn = document.getElementById("run-btn")
     if (runBtn) runBtn.addEventListener("click", handleRun)
+    const stopBtn = document.getElementById("stop-btn")
+    if (stopBtn) stopBtn.addEventListener("click", handleStop)
+    const restartBtn = document.getElementById("restart-btn")
+    if (restartBtn) restartBtn.addEventListener("click", handleRestart)
     document.addEventListener("click", (event) => {
         handleDeleteFile(event)
+        handleDeleteAsset(event)
         handleSaveDoc(event)
         handleClearDoc(event)
     })

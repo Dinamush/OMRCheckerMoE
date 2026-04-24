@@ -15,6 +15,7 @@ import logging
 import shutil
 import threading
 from pathlib import Path
+from typing import Any
 
 import cv2
 
@@ -46,9 +47,41 @@ def _lock_for(batch_id: str) -> threading.Lock:
         return lock
 
 
+def _is_cancel_requested(batch_id: str, settings: Settings) -> bool:
+    metadata = batches_service.get_batch_metadata(batch_id, settings)
+    return bool(metadata.get("cancel_requested", False))
+
+
+def _image_ended_up_in_errors(outputs_dir: Path, file_name: str) -> bool:
+    """Return True when the OMR engine moved ``file_name`` into the
+    ``Manual/ErrorFiles`` directory (which happens when a pre-processor
+    like ``CropOnMarkers`` could not locate its markers)."""
+    error_dir = outputs_dir / "Manual" / "ErrorFiles"
+    return (error_dir / file_name).exists()
+
+
+def _mark_cancelled(
+    batch_id: str,
+    reason: str,
+    settings: Settings,
+) -> None:
+    batches_service.update_status(
+        batch_id,
+        BatchStatus.cancelled,
+        last_error=reason,
+        settings=settings,
+    )
+
+
 def _discover_input_images(batch_id: str, settings: Settings) -> list[Path]:
     """Return all processable images for a batch."""
-    return batches_service.list_input_image_paths(batch_id, settings)
+    batch_root = batches_service.get_batch_root(batch_id, settings)
+    asset_names = {Path(asset).name for asset in _get_template_relative_assets(batch_root)}
+    return [
+        path
+        for path in batches_service.list_input_image_paths(batch_id, settings)
+        if path.name not in asset_names
+    ]
 
 
 def _scale_dimensions(
@@ -120,6 +153,58 @@ def _write_runtime_config(config: dict, dst: Path) -> None:
         json.dump(staged, fh, indent=2, sort_keys=True)
 
 
+def _load_template_payload(batch_root: Path) -> dict[str, Any]:
+    template_path = batch_root / "template.json"
+    if not template_path.exists():
+        return {}
+    with template_path.open("r", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def _collect_relative_paths(value: Any) -> list[str]:
+    found: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key == "relativePath" and isinstance(item, str):
+                found.append(item)
+            else:
+                found.extend(_collect_relative_paths(item))
+    elif isinstance(value, list):
+        for item in value:
+            found.extend(_collect_relative_paths(item))
+    return found
+
+
+def _get_template_relative_assets(batch_root: Path) -> list[str]:
+    """Return relative asset paths referenced by the template."""
+    template_payload = _load_template_payload(batch_root)
+    return _collect_relative_paths(template_payload.get("preProcessors", []))
+
+
+def _resolve_batch_asset(batch_root: Path, relative_path: str) -> Path:
+    """Resolve a template-referenced relative asset from batch root or inputs."""
+    direct = (batch_root / relative_path).resolve()
+    if direct.exists():
+        return direct
+
+    inputs_candidate = (batch_root / "inputs" / Path(relative_path).name).resolve()
+    if inputs_candidate.exists():
+        return inputs_candidate
+
+    raise FileNotFoundError(
+        f"Missing template asset '{relative_path}'. Place it in the batch root or inputs folder."
+    )
+
+
+def _copy_runtime_assets(batch_root: Path, runtime_root: Path) -> None:
+    """Copy any template-referenced relative assets into the runtime folder."""
+    for relative_path in _get_template_relative_assets(batch_root):
+        src = _resolve_batch_asset(batch_root, relative_path)
+        dst = runtime_root / relative_path
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+
+
 def _prepare_runtime_dir(
     batch_root: Path,
     image_path: Path,
@@ -138,6 +223,7 @@ def _prepare_runtime_dir(
         if src.exists():
             shutil.copy2(src, runtime_root / name)
     _write_runtime_config(runtime_config, runtime_root / "config.json")
+    _copy_runtime_assets(batch_root, runtime_root)
     return runtime_root
 
 
@@ -184,6 +270,10 @@ def run_batch_sync(batch_id: str, settings: Settings | None = None) -> None:
         outputs_dir.mkdir(parents=True, exist_ok=True)
         input_images = _discover_input_images(batch_id, settings)
 
+        if _is_cancel_requested(batch_id, settings):
+            _mark_cancelled(batch_id, "Cancelled before processing started.", settings)
+            return
+
         if not input_images:
             batches_service.update_status(
                 batch_id,
@@ -214,15 +304,24 @@ def run_batch_sync(batch_id: str, settings: Settings | None = None) -> None:
                 "latest_processed_file": None,
                 "latest_dynamic_dimensions": None,
                 "dynamic_dimensions_by_file": {},
+                "preprocess_failures": [],
             },
             settings,
         )
+        preprocess_failures: list[str] = []
 
         base_config = batches_service.get_json_document(batch_id, "config", settings) or {}
         dynamic_dimensions_by_file: dict[str, dict[str, int]] = {}
         latest_persisted_config = copy.deepcopy(base_config)
 
         for index, image_path in enumerate(input_images, start=1):
+            if _is_cancel_requested(batch_id, settings):
+                _mark_cancelled(
+                    batch_id,
+                    "Stopped by user before the next image started.",
+                    settings,
+                )
+                return
             dynamic_dimensions = _compute_dynamic_dimensions(image_path)
             dynamic_dimensions_by_file[image_path.name] = dynamic_dimensions
             latest_persisted_config = _merge_dimensions_into_config(
@@ -246,6 +345,9 @@ def run_batch_sync(batch_id: str, settings: Settings | None = None) -> None:
             _cleanup_runtime_dir(runtime_dir)
             runtime_dir = None
 
+            if _image_ended_up_in_errors(outputs_dir, image_path.name):
+                preprocess_failures.append(image_path.name)
+
             batches_service.update_batch_metadata(
                 batch_id,
                 {
@@ -254,16 +356,52 @@ def run_batch_sync(batch_id: str, settings: Settings | None = None) -> None:
                     "latest_processed_file": image_path.name,
                     "latest_dynamic_dimensions": dynamic_dimensions,
                     "dynamic_dimensions_by_file": dynamic_dimensions_by_file,
+                    "preprocess_failures": list(preprocess_failures),
                 },
                 settings,
             )
+
+            if _is_cancel_requested(batch_id, settings):
+                _mark_cancelled(
+                    batch_id,
+                    "Stopped by user after the current image finished.",
+                    settings,
+                )
+                return
 
         batches_service.save_json_document(
             batch_id, "config", latest_persisted_config, settings
         )
 
-        batches_service.update_status(batch_id, BatchStatus.done, settings=settings)
-    except Exception as exc:
+        if preprocess_failures and len(preprocess_failures) == len(input_images):
+            batches_service.update_status(
+                batch_id,
+                BatchStatus.failed,
+                last_error=(
+                    "Marker / page preprocessing failed for every input image. "
+                    "Check that template preprocessors can locate markers on "
+                    "your sheets. Failed files: "
+                    + ", ".join(preprocess_failures)
+                ),
+                settings=settings,
+            )
+        elif preprocess_failures:
+            batches_service.update_status(
+                batch_id,
+                BatchStatus.done,
+                last_error=(
+                    f"{len(preprocess_failures)} of {len(input_images)} file(s) "
+                    "failed marker / page preprocessing and were moved to "
+                    "outputs/Manual/ErrorFiles: "
+                    + ", ".join(preprocess_failures)
+                ),
+                settings=settings,
+            )
+        else:
+            batches_service.update_status(
+                batch_id, BatchStatus.done, settings=settings
+            )
+    except BaseException as exc:
         logger.exception("OMR run failed for batch %s", batch_id)
         batches_service.update_status(
             batch_id,
@@ -279,7 +417,47 @@ def run_batch_sync(batch_id: str, settings: Settings | None = None) -> None:
 def queue_run(batch_id: str, settings: Settings | None = None) -> None:
     """Mark a batch as queued so the caller can hand off to a background task."""
     settings = settings or get_settings()
+    batches_service.update_batch_metadata(
+        batch_id,
+        {
+            "cancel_requested": False,
+            "processed_files": 0,
+            "total_files": 0,
+            "latest_processed_file": None,
+            "latest_dynamic_dimensions": None,
+            "dynamic_dimensions_by_file": {},
+        },
+        settings,
+    )
     batches_service.update_status(batch_id, BatchStatus.queued, settings=settings)
+
+
+def request_cancel(batch_id: str, settings: Settings | None = None) -> BatchStatus:
+    """Request cooperative cancellation for a queued or running batch."""
+    settings = settings or get_settings()
+    batch = batches_service.get_batch(batch_id, settings)
+    if batch.status not in {BatchStatus.queued, BatchStatus.running}:
+        raise batches_service.InvalidBatchRequest(
+            "Only queued or running batches can be stopped."
+        )
+
+    batches_service.update_batch_metadata(
+        batch_id,
+        {"cancel_requested": True},
+        settings,
+    )
+
+    if batch.status == BatchStatus.queued:
+        _mark_cancelled(batch_id, "Cancelled before processing started.", settings)
+        return BatchStatus.cancelled
+
+    batches_service.update_status(
+        batch_id,
+        BatchStatus.running,
+        last_error="Stop requested. The current image will finish first.",
+        settings=settings,
+    )
+    return BatchStatus.running
 
 
 def read_results(batch_id: str, settings: Settings | None = None) -> ResultsPayload:

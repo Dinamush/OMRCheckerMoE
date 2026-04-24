@@ -16,11 +16,18 @@
             {% else %}
                 <p id="last-error" class="error" hidden></p>
             {% endif %}
+            {% if preprocess_failures %}
+                <p id="preprocess-warning" class="warning">Preprocessor could not locate markers in {{ preprocess_failures|length }} file(s): {{ preprocess_failures|join(", ") }}</p>
+            {% else %}
+                <p id="preprocess-warning" class="warning" hidden></p>
+            {% endif %}
         </div>
     </div>
 
     <div class="actions">
         <button id="run-btn" class="btn primary" type="button">Run OMR</button>
+        <button id="stop-btn" class="btn danger" type="button">Stop</button>
+        <button id="restart-btn" class="btn" type="button">Restart</button>
         <a id="download-csv" class="btn" href="/api/v1/batches/{{ batch.id }}/results/download">Download CSV</a>
     </div>
 </section>
@@ -98,6 +105,43 @@
         </div>
         {% endfor %}
     </div>
+</section>
+
+<section class="panel" id="template-assets-panel">
+    <h2>Template assets</h2>
+    <p class="muted small">
+        Non-image files referenced by <code>template.json</code> (e.g. marker crops used by <code>CropOnMarkers</code>).
+        Upload any assets listed as <em>missing</em> before running the batch.
+    </p>
+
+    <form id="asset-upload-form" class="stack">
+        <label class="file-picker">
+            <input id="asset-file-input" type="file" name="files" multiple accept="image/*" />
+            <span>Select asset file(s) referenced by your template (e.g. <code>omr_marker.jpg</code>).</span>
+        </label>
+        <button type="submit" class="btn primary">Upload assets</button>
+        <div id="asset-upload-feedback" class="feedback" hidden></div>
+    </form>
+
+    {% if template_assets %}
+    <ul class="asset-list" id="asset-list">
+        {% for asset in template_assets %}
+        <li data-asset-name="{{ asset.name }}">
+            <span class="mono">{{ asset.name }}</span>
+            {% if asset.present %}
+                <span class="pill status-done">present</span>
+                <span class="muted small">{{ (asset.size_bytes / 1024)|round(1) }} KB</span>
+                <button class="btn danger small" type="button" data-delete-asset="{{ asset.name }}">Remove</button>
+            {% else %}
+                <span class="pill status-failed">missing</span>
+                <span class="muted small">required by template</span>
+            {% endif %}
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <p class="muted" id="no-assets-msg">Your template does not reference any external assets.</p>
+    {% endif %}
 </section>
 
 <section class="panel">

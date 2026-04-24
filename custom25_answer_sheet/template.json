@@ -4,8 +4,8 @@
     768
   ],
   "bubbleDimensions": [
-    14,
-    14
+    13,
+    13
   ],
   "customLabels": {
     "CandidateNumber": [
@@ -19,8 +19,8 @@
   "fieldBlocks": {
     "CandidateNumber": {
       "origin": [
-        61,
-        346
+        54,
+        339
       ],
       "bubblesGap": 18.2,
       "labelsGap": 42.0,
@@ -31,10 +31,10 @@
     },
     "q01block": {
       "origin": [
-        58,
-        563
+        51,
+        556
       ],
-      "bubblesGap": 17.4,
+      "bubblesGap": 17.33,
       "labelsGap": 32.0,
       "fieldLabels": [
         "q1..5"
@@ -43,10 +43,10 @@
     },
     "q06block": {
       "origin": [
-        156,
-        563
+        149,
+        556
       ],
-      "bubblesGap": 17.4,
+      "bubblesGap": 17.33,
       "labelsGap": 32.0,
       "fieldLabels": [
         "q6..10"
@@ -55,10 +55,10 @@
     },
     "q11block": {
       "origin": [
-        250,
-        563
+        243,
+        556
       ],
-      "bubblesGap": 17.4,
+      "bubblesGap": 17.33,
       "labelsGap": 32.0,
       "fieldLabels": [
         "q11..15"
@@ -67,10 +67,10 @@
     },
     "q16block": {
       "origin": [
-        342,
-        563
+        335,
+        556
       ],
-      "bubblesGap": 17.4,
+      "bubblesGap": 17.33,
       "labelsGap": 32.0,
       "fieldLabels": [
         "q16..20"
@@ -79,10 +79,10 @@
     },
     "q21block": {
       "origin": [
-        424,
-        563
+        417,
+        556
       ],
-      "bubblesGap": 17.4,
+      "bubblesGap": 17.33,
       "labelsGap": 32.0,
       "fieldLabels": [
         "q21..25"

@@ -17,6 +17,7 @@ class BatchStatus(str, Enum):
     running = "running"
     done = "done"
     failed = "failed"
+    cancelled = "cancelled"
 
 
 class SourceMode(str, Enum):
@@ -55,6 +56,15 @@ class FileRef(BaseModel):
 
     name: str
     size_bytes: int
+
+
+class TemplateAssetRef(BaseModel):
+    """A file referenced by ``template.json`` (e.g. marker image)."""
+
+    name: str
+    required: bool = True
+    present: bool = False
+    size_bytes: int | None = None
 
 
 class DirectoryImportRequest(BaseModel):
@@ -114,6 +124,8 @@ class BatchStatusResponse(BaseModel):
     total_files: int = 0
     latest_processed_file: str | None = None
     latest_dynamic_dimensions: DynamicDimensions | None = None
+    cancel_requested: bool = False
+    preprocess_failures: list[str] = Field(default_factory=list)
 
 
 class ResultsRow(BaseModel):

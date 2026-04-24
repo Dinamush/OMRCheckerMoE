@@ -41,7 +41,68 @@ class CropOnMarkers(ImagePreprocessor):
         )
         self.marker_rescale_steps = int(marker_ops.get("marker_rescale_steps", 10))
         self.apply_erode_subtract = marker_ops.get("apply_erode_subtract", True)
+        self.marker_corners = self._parse_marker_corners(
+            marker_ops.get("markerCorners")
+        )
+        self.preserve_full_image = bool(marker_ops.get("preserveFullImage", False))
+        self.reference_marker_centers = self._parse_reference_centers(
+            marker_ops.get("referenceMarkerCenters")
+        )
+        if self.preserve_full_image and self.reference_marker_centers is None:
+            raise ValueError(
+                "preserveFullImage=true requires referenceMarkerCenters to be "
+                "set to the 4 expected marker centres in the (resized) "
+                "processing canvas, in top-left, top-right, bottom-left, "
+                "bottom-right order."
+            )
         self.marker = self.load_marker(marker_ops, config)
+
+    @staticmethod
+    def _parse_reference_centers(raw):
+        if raw is None:
+            return None
+        if len(raw) != 4:
+            raise ValueError(
+                "referenceMarkerCenters must contain 4 [x, y] pairs in order "
+                "[top-left, top-right, bottom-left, bottom-right]"
+            )
+        parsed = []
+        for idx, point in enumerate(raw):
+            if len(point) != 2:
+                raise ValueError(
+                    f"referenceMarkerCenters[{idx}] must be [x, y]"
+                )
+            parsed.append((float(point[0]), float(point[1])))
+        return parsed
+
+    @staticmethod
+    def _parse_marker_corners(raw):
+        """Parse per-corner search windows in ``[[y0, y1, x0, x1], ...]`` order.
+
+        The four entries must correspond to top-left, top-right, bottom-left,
+        bottom-right, matching the quadrant order used by the matcher. Returns
+        ``None`` if unset (fall back to standard 50/50 quadrants).
+        """
+        if raw is None:
+            return None
+        if len(raw) != 4:
+            raise ValueError(
+                "markerCorners must contain exactly 4 entries in order "
+                "[top-left, top-right, bottom-left, bottom-right]"
+            )
+        parsed = []
+        for idx, window in enumerate(raw):
+            if len(window) != 4:
+                raise ValueError(
+                    f"markerCorners[{idx}] must be [y0, y1, x0, x1]"
+                )
+            y0, y1, x0, x1 = (int(v) for v in window)
+            if y1 <= y0 or x1 <= x0:
+                raise ValueError(
+                    f"markerCorners[{idx}] has non-positive size: {window}"
+                )
+            parsed.append((y0, y1, x0, x1))
+        return parsed
 
     def __str__(self):
         return self.marker_path
@@ -64,22 +125,35 @@ class CropOnMarkers(ImagePreprocessor):
                 )
             )
         )
-        # Quads on warped image
+        # Build per-corner search windows. Prefer explicit ``markerCorners``
+        # when provided; otherwise fall back to the classical 50/50 quadrant
+        # split.
         quads = {}
         h1, w1 = image_eroded_sub.shape[:2]
-        midh, midw = (
-            h1 // QUADRANT_DIVISION["height_factor"],
-            w1 // QUADRANT_DIVISION["width_factor"],
-        )
-        origins = [[0, 0], [midw, 0], [0, midh], [midw, midh]]
-        quads[0] = image_eroded_sub[0:midh, 0:midw]
-        quads[1] = image_eroded_sub[0:midh, midw:w1]
-        quads[2] = image_eroded_sub[midh:h1, 0:midw]
-        quads[3] = image_eroded_sub[midh:h1, midw:w1]
+        if self.marker_corners is not None:
+            origins = []
+            for idx, (y0, y1, x0, x1) in enumerate(self.marker_corners):
+                y0c = max(0, min(y0, h1))
+                y1c = max(0, min(y1, h1))
+                x0c = max(0, min(x0, w1))
+                x1c = max(0, min(x1, w1))
+                quads[idx] = image_eroded_sub[y0c:y1c, x0c:x1c]
+                origins.append([x0c, y0c])
+        else:
+            midh, midw = (
+                h1 // QUADRANT_DIVISION["height_factor"],
+                w1 // QUADRANT_DIVISION["width_factor"],
+            )
+            origins = [[0, 0], [midw, 0], [0, midh], [midw, midh]]
+            quads[0] = image_eroded_sub[0:midh, 0:midw]
+            quads[1] = image_eroded_sub[0:midh, midw:w1]
+            quads[2] = image_eroded_sub[midh:h1, 0:midw]
+            quads[3] = image_eroded_sub[midh:h1, midw:w1]
 
-        # Draw Quadlines
-        image_eroded_sub[:, midw : midw + 2] = DEFAULT_WHITE_COLOR
-        image_eroded_sub[midh : midh + 2, :] = DEFAULT_WHITE_COLOR
+            # Draw Quadlines only for the classical split so the debug image
+            # keeps its familiar appearance.
+            image_eroded_sub[:, midw : midw + 2] = DEFAULT_WHITE_COLOR
+            image_eroded_sub[midh : midh + 2, :] = DEFAULT_WHITE_COLOR
 
         best_scale, all_max_t = self.getBestMatch(image_eroded_sub)
         if best_scale is None:
@@ -158,7 +232,25 @@ class CropOnMarkers(ImagePreprocessor):
         # analysis data
         self.threshold_circles.append(sum_t / 4)
 
-        image = ImageUtils.four_point_transform(image, np.array(centres))
+        if self.preserve_full_image:
+            src_pts = np.array(centres, dtype=np.float32)
+            dst_pts = np.array(self.reference_marker_centers, dtype=np.float32)
+            homography, _ = cv2.findHomography(src_pts, dst_pts, method=0)
+            if homography is None:
+                logger.error(
+                    file_path,
+                    "\nError: could not compute homography from detected markers.",
+                )
+                return None
+            image = cv2.warpPerspective(
+                image,
+                homography,
+                (image.shape[1], image.shape[0]),
+                flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_REPLICATE,
+            )
+        else:
+            image = ImageUtils.four_point_transform(image, np.array(centres))
         # appendSaveImg(1,image_eroded_sub)
         # appendSaveImg(1,image_norm)
 
