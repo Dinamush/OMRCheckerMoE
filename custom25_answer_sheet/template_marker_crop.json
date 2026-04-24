@@ -90,5 +90,15 @@
       "fieldType": "QTYPE_MCQ4"
     }
   },
-  "preProcessors": []
+  "preProcessors": [
+    {
+      "name": "CropOnMarkers",
+      "options": {
+        "relativePath": "omr_marker.jpg",
+        "sheetToMarkerWidthRatio": 17,
+        "min_matching_threshold": 0.2,
+        "max_matching_variation": 0.7
+      }
+    }
+  ]
 }
