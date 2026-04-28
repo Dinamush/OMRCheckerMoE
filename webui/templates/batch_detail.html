@@ -166,27 +166,79 @@
     <h2>Results</h2>
     <div id="results-container">
         {% if results.rows %}
-        <table class="table">
-            <thead>
-                <tr>
-                    {% for col in results.columns %}<th>{{ col }}</th>{% endfor %}
-                </tr>
-            </thead>
-            <tbody>
+        <div class="results-shell">
+            <div class="result-file-list" role="tablist" aria-label="Result files">
                 {% for row in results.rows %}
-                <tr>
-                    {% for col in results.columns %}
-                        {% if col == "file_id" %}<td class="mono">{{ row.file_id or "" }}</td>
-                        {% elif col == "input_path" %}<td class="mono small">{{ row.input_path or "" }}</td>
-                        {% elif col == "output_path" %}<td class="mono small">{{ row.output_path or "" }}</td>
-                        {% elif col == "score" %}<td>{{ row.score or "" }}</td>
-                        {% else %}<td>{{ row.responses.get(col, "") }}</td>
-                        {% endif %}
-                    {% endfor %}
-                </tr>
+                <button
+                    class="result-file-tab{% if loop.first %} active{% endif %}"
+                    type="button"
+                    role="tab"
+                    aria-selected="{% if loop.first %}true{% else %}false{% endif %}"
+                    data-result-select="{{ loop.index0 }}">
+                    <span class="mono">{{ row.file_id or ("File " ~ loop.index) }}</span>
+                    {% if row.score %}<span class="muted small">Score: {{ row.score }}</span>{% endif %}
+                </button>
                 {% endfor %}
-            </tbody>
-        </table>
+            </div>
+            <div class="result-file-detail">
+                {% for row in results.rows %}
+                <article class="result-card" data-result-card="{{ loop.index0 }}" {% if not loop.first %}hidden{% endif %}>
+                    <div class="flex-between result-card-head">
+                        <div>
+                            <h3>{{ row.file_id or ("File " ~ loop.index) }}</h3>
+                            {% if row.input_path %}<p class="muted small mono">{{ row.input_path }}</p>{% endif %}
+                        </div>
+                        {% if row.score %}<span class="pill status-done">Score {{ row.score }}</span>{% endif %}
+                    </div>
+                    <div class="answer-grid">
+                        {% for col in results.columns %}
+                            {% if col not in ["file_id", "input_path", "output_path", "score"] %}
+                            {% set answer_value = row.responses.get(col, "") %}
+                            {% set is_erasure_risk = col.startswith("q") and answer_value|length > 1 %}
+                            <div class="answer-cell{% if is_erasure_risk %} answer-cell-risk{% endif %}">
+                                <span class="answer-key">{{ col }}</span>
+                                <strong>{{ answer_value or "—" }}</strong>
+                                {% if is_erasure_risk %}
+                                <span class="answer-risk" title="Multiple marks detected in CSV output. This can happen when an erased option remains dark enough to be read.">Erasure risk 85%</span>
+                                {% endif %}
+                            </div>
+                            {% endif %}
+                        {% endfor %}
+                    </div>
+                    <p class="muted small result-risk-note">Erasure risk is a review heuristic from the CSV output. Multiple marks on one question can indicate a student erased one answer and selected another, but the residual mark still read as filled.</p>
+                    {% if row.output_path %}
+                    <p class="muted small mono result-output-path">Output: {{ row.output_path }}</p>
+                    {% endif %}
+                </article>
+                {% endfor %}
+            </div>
+        </div>
+        <details class="raw-results" open>
+            <summary>Raw CSV table</summary>
+            <div class="table-scroll">
+                <table class="table results-table">
+                    <thead>
+                        <tr>
+                            {% for col in results.columns %}<th>{{ col }}</th>{% endfor %}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for row in results.rows %}
+                        <tr>
+                            {% for col in results.columns %}
+                                {% if col == "file_id" %}<td class="mono">{{ row.file_id or "" }}</td>
+                                {% elif col == "input_path" %}<td class="mono small">{{ row.input_path or "" }}</td>
+                                {% elif col == "output_path" %}<td class="mono small">{{ row.output_path or "" }}</td>
+                                {% elif col == "score" %}<td>{{ row.score or "" }}</td>
+                                {% else %}<td>{{ row.responses.get(col, "") }}</td>
+                                {% endif %}
+                            {% endfor %}
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </details>
         {% else %}
         <p class="muted" id="no-results-msg">No results yet. Run the batch to generate results.</p>
         {% endif %}

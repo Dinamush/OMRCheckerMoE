@@ -130,31 +130,123 @@ const refreshResults = async () => {
         const data = await jsonFetch(apiUrl("/results"))
         const container = document.getElementById("results-container")
         if (!container) return
-        if (!data.rows || data.rows.length === 0) {
-            container.innerHTML = '<p class="muted" id="no-results-msg">No results yet. Run the batch to generate results.</p>'
-            return
-        }
-        const columns = data.columns
-        const header = columns.map((col) => `<th>${escapeHtml(col)}</th>`).join("")
-        const rows = data.rows.map((row) => {
-            const cells = columns.map((col) => {
-                if (col === "file_id") return `<td class="mono">${escapeHtml(row.file_id || "")}</td>`
-                if (col === "input_path") return `<td class="mono small">${escapeHtml(row.input_path || "")}</td>`
-                if (col === "output_path") return `<td class="mono small">${escapeHtml(row.output_path || "")}</td>`
-                if (col === "score") return `<td>${escapeHtml(row.score || "")}</td>`
-                return `<td>${escapeHtml((row.responses && row.responses[col]) || "")}</td>`
-            }).join("")
-            return `<tr>${cells}</tr>`
-        }).join("")
-        container.innerHTML = `
-            <table class="table">
-                <thead><tr>${header}</tr></thead>
-                <tbody>${rows}</tbody>
-            </table>
-        `
+        renderResults(container, data)
     } catch (error) {
         console.error(error)
     }
+}
+
+const getResponseColumns = (columns) => {
+    return (columns || []).filter((col) => !["file_id", "input_path", "output_path", "score"].includes(col))
+}
+
+const getResultCell = (row, col) => {
+    if (col === "file_id") return row.file_id || ""
+    if (col === "input_path") return row.input_path || ""
+    if (col === "output_path") return row.output_path || ""
+    if (col === "score") return row.score || ""
+    return (row.responses && row.responses[col]) || ""
+}
+
+const getErasureRisk = (column, value) => {
+    const answer = String(value || "").trim().toUpperCase()
+    if (!/^q\d+/i.test(column) || answer.length <= 1) return 0
+    const markedOptions = new Set(answer.replace(/[^A-Z]/g, "").split(""))
+    if (markedOptions.size <= 1) return 0
+    return Math.min(95, 65 + markedOptions.size * 10)
+}
+
+const renderResultCard = (row, responseColumns, index) => {
+    const fileId = row.file_id || `File ${index + 1}`
+    const answers = responseColumns.map((col) => {
+        const value = getResultCell(row, col) || "—"
+        const erasureRisk = getErasureRisk(col, value)
+        return `
+            <div class="answer-cell${erasureRisk ? " answer-cell-risk" : ""}">
+                <span class="answer-key">${escapeHtml(col)}</span>
+                <strong>${escapeHtml(value)}</strong>
+                ${erasureRisk ? `<span class="answer-risk" title="Multiple marks detected in CSV output. This can happen when an erased option remains dark enough to be read.">Erasure risk ${erasureRisk}%</span>` : ""}
+            </div>
+        `
+    }).join("")
+    return `
+        <article class="result-card" data-result-card="${index}" ${index === 0 ? "" : "hidden"}>
+            <div class="flex-between result-card-head">
+                <div>
+                    <h3>${escapeHtml(fileId)}</h3>
+                    ${row.input_path ? `<p class="muted small mono">${escapeHtml(row.input_path)}</p>` : ""}
+                </div>
+                ${row.score ? `<span class="pill status-done">Score ${escapeHtml(row.score)}</span>` : ""}
+            </div>
+            <div class="answer-grid">${answers}</div>
+            <p class="muted small result-risk-note">Erasure risk is a review heuristic from the CSV output. Multiple marks on one question can indicate a student erased one answer and selected another, but the residual mark still read as filled.</p>
+            ${row.output_path ? `<p class="muted small mono result-output-path">Output: ${escapeHtml(row.output_path)}</p>` : ""}
+        </article>
+    `
+}
+
+const renderResults = (container, data) => {
+    if (!data.rows || data.rows.length === 0) {
+        container.innerHTML = '<p class="muted" id="no-results-msg">No results yet. Run the batch to generate results.</p>'
+        return
+    }
+
+    const columns = data.columns || []
+    const responseColumns = getResponseColumns(columns)
+    const tabs = data.rows.map((row, index) => {
+        const fileId = row.file_id || `File ${index + 1}`
+        return `
+            <button
+                class="result-file-tab${index === 0 ? " active" : ""}"
+                type="button"
+                role="tab"
+                aria-selected="${index === 0 ? "true" : "false"}"
+                data-result-select="${index}">
+                <span class="mono">${escapeHtml(fileId)}</span>
+                ${row.score ? `<span class="muted small">Score: ${escapeHtml(row.score)}</span>` : ""}
+            </button>
+        `
+    }).join("")
+    const cards = data.rows.map((row, index) => renderResultCard(row, responseColumns, index)).join("")
+    const header = columns.map((col) => `<th>${escapeHtml(col)}</th>`).join("")
+    const rows = data.rows.map((row) => {
+        const cells = columns.map((col) => {
+            const className = ["file_id", "input_path", "output_path"].includes(col) ? ' class="mono small"' : ""
+            return `<td${className}>${escapeHtml(getResultCell(row, col))}</td>`
+        }).join("")
+        return `<tr>${cells}</tr>`
+    }).join("")
+
+    container.innerHTML = `
+        <div class="results-shell">
+            <div class="result-file-list" role="tablist" aria-label="Result files">${tabs}</div>
+            <div class="result-file-detail">${cards}</div>
+        </div>
+        <details class="raw-results" open>
+            <summary>Raw CSV table</summary>
+            <div class="table-scroll">
+                <table class="table results-table">
+                    <thead><tr>${header}</tr></thead>
+                    <tbody>${rows}</tbody>
+                </table>
+            </div>
+        </details>
+    `
+}
+
+const handleResultSelect = (event) => {
+    const button = event.target.closest("[data-result-select]")
+    if (!button) return
+    const container = button.closest("#results-container")
+    const selected = button.dataset.resultSelect
+    container.querySelectorAll("[data-result-select]").forEach((tab) => {
+        const isActive = tab.dataset.resultSelect === selected
+        tab.classList.toggle("active", isActive)
+        tab.setAttribute("aria-selected", isActive ? "true" : "false")
+    })
+    container.querySelectorAll("[data-result-card]").forEach((card) => {
+        card.hidden = card.dataset.resultCard !== selected
+    })
 }
 
 const escapeHtml = (value) => {
@@ -1163,6 +1255,7 @@ document.addEventListener("DOMContentLoaded", () => {
     document.addEventListener("click", (event) => {
         handleDeleteFile(event)
         handleDeleteAsset(event)
+        handleResultSelect(event)
         handleEditorMode(event)
         handleSaveDoc(event)
         handleClearDoc(event)
