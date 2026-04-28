@@ -1,0 +1,154 @@
+{
+  "pageDimensions": [
+    666,
+    515
+  ],
+  "bubbleDimensions": [
+    10,
+    10
+  ],
+  "customLabels": {
+    "CandidateNumber": [
+      "cand1..10"
+    ]
+  },
+  "outputColumns": [
+    "CandidateNumber",
+    "q1..25"
+  ],
+  "fieldBlocks": {
+    "CandidateNumber": {
+      "origin": [
+        430,
+        103
+      ],
+      "bubblesGap": 10.0,
+      "labelsGap": 21.5,
+      "fieldLabels": [
+        "cand1..10"
+      ],
+      "fieldType": "QTYPE_INT"
+    },
+    "q01block": {
+      "origin": [
+        53,
+        257
+      ],
+      "bubblesGap": 20.0,
+      "labelsGap": 42.0,
+      "fieldLabels": [
+        "q1..5"
+      ],
+      "fieldType": "QTYPE_MCQ4"
+    },
+    "q06block": {
+      "origin": [
+        181,
+        257
+      ],
+      "bubblesGap": 20.0,
+      "labelsGap": 42.0,
+      "fieldLabels": [
+        "q6..10"
+      ],
+      "fieldType": "QTYPE_MCQ4"
+    },
+    "q11block": {
+      "origin": [
+        310,
+        257
+      ],
+      "bubblesGap": 19.5,
+      "labelsGap": 42.0,
+      "fieldLabels": [
+        "q11..15"
+      ],
+      "fieldType": "QTYPE_MCQ4"
+    },
+    "q16block": {
+      "origin": [
+        435,
+        257
+      ],
+      "bubblesGap": 20.3,
+      "labelsGap": 42.0,
+      "fieldLabels": [
+        "q16..20"
+      ],
+      "fieldType": "QTYPE_MCQ4"
+    },
+    "q21block": {
+      "origin": [
+        566,
+        257
+      ],
+      "bubblesGap": 19.7,
+      "labelsGap": 42.0,
+      "fieldLabels": [
+        "q21..25"
+      ],
+      "fieldType": "QTYPE_MCQ4"
+    }
+  },
+  "preProcessors": [
+    {
+      "name": "CropOnMarkers",
+      "options": {
+        "relativePath": "omr_marker.jpg",
+        "sheetToMarkerWidthRatio": 28,
+        "min_matching_threshold": 0.5,
+        "max_matching_variation": 0.35,
+        "marker_rescale_range": [
+          90,
+          110
+        ],
+        "marker_rescale_steps": 5,
+        "markerCorners": [
+          [
+            0,
+            40,
+            0,
+            40
+          ],
+          [
+            0,
+            40,
+            626,
+            666
+          ],
+          [
+            475,
+            515,
+            0,
+            40
+          ],
+          [
+            475,
+            515,
+            626,
+            666
+          ]
+        ],
+        "preserveFullImage": true,
+        "referenceMarkerCenters": [
+          [
+            13.5,
+            13.2
+          ],
+          [
+            651.5,
+            13.2
+          ],
+          [
+            13.5,
+            499.0
+          ],
+          [
+            651.5,
+            499.0
+          ]
+        ]
+      }
+    }
+  ]
+}
