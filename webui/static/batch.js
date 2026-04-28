@@ -99,15 +99,17 @@ const refreshFiles = async () => {
             const sizeKb = (file.size_bytes / 1024).toFixed(1)
             const previewUrl = `${apiUrl(`/files/${encodeURIComponent(file.name)}/preview`)}`
             li.innerHTML = `
-                <a class="image-preview-link" target="_blank" rel="noopener">
-                    <img class="image-preview-thumb" loading="lazy" alt="">
+                <a class="sheet-preview-link" target="_blank" rel="noopener">
+                    <img class="sheet-preview-image" loading="lazy" alt="">
                 </a>
-                <span class="mono"></span>
-                <span class="muted small">${sizeKb} KB</span>
-                <button class="btn danger small" type="button" data-delete-file=""></button>
+                <div class="file-meta">
+                    <span class="mono"></span>
+                    <span class="muted small">${sizeKb} KB</span>
+                    <button class="btn danger small" type="button" data-delete-file=""></button>
+                </div>
             `
-            const previewLink = li.querySelector(".image-preview-link")
-            const previewImg = li.querySelector(".image-preview-thumb")
+            const previewLink = li.querySelector(".sheet-preview-link")
+            const previewImg = li.querySelector(".sheet-preview-image")
             previewLink.href = previewUrl
             previewImg.src = previewUrl
             previewImg.alt = `Preview of ${file.name}`

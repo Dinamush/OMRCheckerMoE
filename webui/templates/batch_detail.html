@@ -61,12 +61,14 @@
     <ul class="file-list" id="file-list">
         {% for file in files %}
         <li>
-            <a class="image-preview-link" href="/api/v1/batches/{{ batch.id }}/files/{{ file.name | urlencode }}/preview" target="_blank" rel="noopener">
-                <img class="image-preview-thumb" src="/api/v1/batches/{{ batch.id }}/files/{{ file.name | urlencode }}/preview" alt="Preview of {{ file.name }}" loading="lazy" />
+            <a class="sheet-preview-link" href="/api/v1/batches/{{ batch.id }}/files/{{ file.name | urlencode }}/preview" target="_blank" rel="noopener">
+                <img class="sheet-preview-image" src="/api/v1/batches/{{ batch.id }}/files/{{ file.name | urlencode }}/preview" alt="Preview of {{ file.name }}" loading="lazy" />
             </a>
-            <span class="mono">{{ file.name }}</span>
-            <span class="muted small">{{ (file.size_bytes / 1024)|round(1) }} KB</span>
-            <button class="btn danger small" type="button" data-delete-file="{{ file.name }}">Remove</button>
+            <div class="file-meta">
+                <span class="mono">{{ file.name }}</span>
+                <span class="muted small">{{ (file.size_bytes / 1024)|round(1) }} KB</span>
+                <button class="btn danger small" type="button" data-delete-file="{{ file.name }}">Remove</button>
+            </div>
         </li>
         {% endfor %}
     </ul>
