@@ -37,8 +37,8 @@
 
     <form id="upload-form" class="stack">
         <label class="file-picker">
-            <input id="file-input" type="file" name="files" multiple accept="image/png,image/jpeg" />
-            <span>Select images (PNG / JPG / JPEG) &mdash; you can select several at once.</span>
+            <input id="file-input" type="file" name="files" multiple accept="image/png,image/jpeg,application/pdf,.pdf" />
+            <span>Select images or PDFs (PNG / JPG / JPEG / PDF) &mdash; PDFs are split into one image per page.</span>
         </label>
         <button type="submit" class="btn primary">Upload</button>
         <div id="upload-feedback" class="feedback" hidden></div>
@@ -51,10 +51,20 @@
             <input id="source-dir" name="source_dir" placeholder="/absolute/path/to/scans" />
             <button type="submit" class="btn">Import</button>
         </div>
-        <p class="muted small">Only PNG/JPG/JPEG files are imported; other files are skipped.</p>
+        <p class="muted small">PNG/JPG/JPEG files are imported directly. PDF files are split into one PNG image per page; other files are skipped.</p>
         <div id="import-feedback" class="feedback" hidden></div>
     </form>
     {% endif %}
+
+    <form id="rotation-form" class="form-inline" aria-label="Image rotation">
+        <label for="rotation-degrees">Rotate inputs before OMR</label>
+        <select id="rotation-degrees" name="rotation_degrees">
+            {% for degrees, label in [(0, "0 (default)"), (90, "90 clockwise"), (180, "180"), (270, "270 (90 counter-clockwise)")] %}
+            <option value="{{ degrees }}" {% if batch.rotation_degrees == degrees %}selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+        </select>
+        <span class="muted small" id="rotation-feedback">Preview matches the selected runtime rotation.</span>
+    </form>
 
     <h3>Files in this batch <span class="muted small" id="file-count">({{ files|length }})</span></h3>
     {% if files %}
@@ -62,7 +72,7 @@
         {% for file in files %}
         <li>
             <a class="sheet-preview-link" href="/api/v1/batches/{{ batch.id }}/files/{{ file.name | urlencode }}/preview" target="_blank" rel="noopener">
-                <img class="sheet-preview-image" src="/api/v1/batches/{{ batch.id }}/files/{{ file.name | urlencode }}/preview" alt="Preview of {{ file.name }}" loading="lazy" />
+                <img class="sheet-preview-image" src="/api/v1/batches/{{ batch.id }}/files/{{ file.name | urlencode }}/preview" alt="Preview of {{ file.name }}" loading="lazy" style="--preview-rotation: {{ batch.rotation_degrees }}deg" />
             </a>
             <div class="file-meta">
                 <span class="mono">{{ file.name }}</span>
@@ -176,7 +186,11 @@
                     aria-selected="{% if loop.first %}true{% else %}false{% endif %}"
                     data-result-select="{{ loop.index0 }}">
                     <span class="mono">{{ row.file_id or ("File " ~ loop.index) }}</span>
-                    {% if row.score %}<span class="muted small">Score: {{ row.score }}</span>{% endif %}
+                    {% if row.status == "failed" %}
+                    <span class="muted small">Failed</span>
+                    {% elif row.score %}
+                    <span class="muted small">Score: {{ row.score }}</span>
+                    {% endif %}
                 </button>
                 {% endfor %}
             </div>
@@ -187,9 +201,21 @@
                         <div>
                             <h3>{{ row.file_id or ("File " ~ loop.index) }}</h3>
                             {% if row.input_path %}<p class="muted small mono">{{ row.input_path }}</p>{% endif %}
+                            {% if row.status == "failed" and row.error_reason %}
+                            <p class="error small">{{ row.error_reason }}</p>
+                            {% endif %}
                         </div>
-                        {% if row.score %}<span class="pill status-done">Score {{ row.score }}</span>{% endif %}
+                        {% if row.status == "failed" %}
+                        <span class="pill status-failed">Failed</span>
+                        {% elif row.score %}
+                        <span class="pill status-done">Score {{ row.score }}</span>
+                        {% endif %}
                     </div>
+                    {% if row.status == "failed" %}
+                    {% if row.output_path %}
+                    <p class="muted small mono result-output-path">Output: {{ row.output_path }}</p>
+                    {% endif %}
+                    {% else %}
                     <div class="answer-grid">
                         {% for col in results.columns %}
                             {% if col not in ["file_id", "input_path", "output_path", "score"] %}
@@ -208,6 +234,7 @@
                     <p class="muted small result-risk-note">Erasure risk is a review heuristic from the CSV output. Multiple marks on one question can indicate a student erased one answer and selected another, but the residual mark still read as filled.</p>
                     {% if row.output_path %}
                     <p class="muted small mono result-output-path">Output: {{ row.output_path }}</p>
+                    {% endif %}
                     {% endif %}
                 </article>
                 {% endfor %}

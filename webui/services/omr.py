@@ -97,25 +97,67 @@ def _scale_dimensions(
     return width, height
 
 
-def _compute_dynamic_dimensions(image_path: Path) -> dict[str, int]:
+def _template_page_dimensions(template_payload: dict[str, Any] | None) -> tuple[int, int] | None:
+    if not isinstance(template_payload, dict):
+        return None
+    page_dimensions = template_payload.get("pageDimensions")
+    if (
+        not isinstance(page_dimensions, list)
+        or len(page_dimensions) != 2
+        or not all(isinstance(value, int | float) for value in page_dimensions)
+    ):
+        return None
+    width, height = (int(page_dimensions[0]), int(page_dimensions[1]))
+    if width <= 0 or height <= 0:
+        return None
+    return width, height
+
+
+def _uses_marker_template_space(template_payload: dict[str, Any] | None) -> bool:
+    if not isinstance(template_payload, dict):
+        return False
+    preprocessors = template_payload.get("preProcessors")
+    if not isinstance(preprocessors, list):
+        return False
+    return any(
+        isinstance(processor, dict) and processor.get("name") == "CropOnMarkers"
+        for processor in preprocessors
+    )
+
+
+def _compute_dynamic_dimensions(
+    image_path: Path,
+    template_payload: dict[str, Any] | None = None,
+    rotation_degrees: int = 0,
+) -> dict[str, int]:
     """Compute per-image display and processing dimensions."""
     image = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
     if image is None:
         raise ValueError(f"Could not read image: {image_path.as_posix()}")
 
     source_height, source_width = image.shape[:2]
+    if rotation_degrees in {90, 270}:
+        source_width, source_height = source_height, source_width
     display_width, display_height = _scale_dimensions(
         source_width,
         source_height,
         int(CONFIG_DEFAULTS.dimensions.display_width),
         int(CONFIG_DEFAULTS.dimensions.display_height),
     )
-    processing_width, processing_height = _scale_dimensions(
-        source_width,
-        source_height,
-        int(CONFIG_DEFAULTS.dimensions.processing_width),
-        int(CONFIG_DEFAULTS.dimensions.processing_height),
+    template_dimensions = (
+        _template_page_dimensions(template_payload)
+        if _uses_marker_template_space(template_payload)
+        else None
     )
+    if template_dimensions is None:
+        processing_width, processing_height = _scale_dimensions(
+            source_width,
+            source_height,
+            int(CONFIG_DEFAULTS.dimensions.processing_width),
+            int(CONFIG_DEFAULTS.dimensions.processing_height),
+        )
+    else:
+        processing_width, processing_height = template_dimensions
 
     return {
         "source_height": int(source_height),
@@ -205,11 +247,34 @@ def _copy_runtime_assets(batch_root: Path, runtime_root: Path) -> None:
         shutil.copy2(src, dst)
 
 
+def _rotate_image_for_runtime(src: Path, dst: Path, rotation_degrees: int) -> None:
+    if rotation_degrees == 0:
+        shutil.copy2(src, dst)
+        return
+
+    rotate_codes = {
+        90: cv2.ROTATE_90_CLOCKWISE,
+        180: cv2.ROTATE_180,
+        270: cv2.ROTATE_90_COUNTERCLOCKWISE,
+    }
+    rotate_code = rotate_codes.get(rotation_degrees)
+    if rotate_code is None:
+        raise ValueError(f"Unsupported rotation: {rotation_degrees}")
+
+    image = cv2.imread(str(src), cv2.IMREAD_UNCHANGED)
+    if image is None:
+        raise ValueError(f"Could not read image for rotation: {src.as_posix()}")
+    rotated = cv2.rotate(image, rotate_code)
+    if not cv2.imwrite(str(dst), rotated):
+        raise ValueError(f"Could not write rotated runtime image: {dst.as_posix()}")
+
+
 def _prepare_runtime_dir(
     batch_root: Path,
     image_path: Path,
     runtime_config: dict,
     index: int,
+    rotation_degrees: int = 0,
 ) -> Path:
     """Build an isolated single-image runtime directory for engine execution."""
     runtime_root = batch_root / _RUNTIME_DIR_NAME / f"{index:04d}_{image_path.stem}"
@@ -217,7 +282,9 @@ def _prepare_runtime_dir(
         shutil.rmtree(runtime_root)
     runtime_root.mkdir(parents=True, exist_ok=True)
 
-    shutil.copy2(image_path, runtime_root / image_path.name)
+    _rotate_image_for_runtime(
+        image_path, runtime_root / image_path.name, rotation_degrees
+    )
     for name in ("template.json", "evaluation.json"):
         src = batch_root / name
         if src.exists():
@@ -311,6 +378,9 @@ def run_batch_sync(batch_id: str, settings: Settings | None = None) -> None:
         preprocess_failures: list[str] = []
 
         base_config = batches_service.get_json_document(batch_id, "config", settings) or {}
+        template_payload = _load_template_payload(batch_root)
+        metadata = batches_service.get_batch_metadata(batch_id, settings)
+        rotation_degrees = int(metadata.get("rotation_degrees", 0))
         dynamic_dimensions_by_file: dict[str, dict[str, int]] = {}
         latest_persisted_config = copy.deepcopy(base_config)
 
@@ -322,7 +392,9 @@ def run_batch_sync(batch_id: str, settings: Settings | None = None) -> None:
                     settings,
                 )
                 return
-            dynamic_dimensions = _compute_dynamic_dimensions(image_path)
+            dynamic_dimensions = _compute_dynamic_dimensions(
+                image_path, template_payload, rotation_degrees
+            )
             dynamic_dimensions_by_file[image_path.name] = dynamic_dimensions
             latest_persisted_config = _merge_dimensions_into_config(
                 base_config, dynamic_dimensions
@@ -332,6 +404,7 @@ def run_batch_sync(batch_id: str, settings: Settings | None = None) -> None:
                 image_path,
                 latest_persisted_config,
                 index,
+                rotation_degrees,
             )
 
             args = {
@@ -460,54 +533,92 @@ def request_cancel(batch_id: str, settings: Settings | None = None) -> BatchStat
     return BatchStatus.running
 
 
-def read_results(batch_id: str, settings: Settings | None = None) -> ResultsPayload:
-    """Parse the latest ``Results_*.csv`` for a batch, if any."""
-    settings = settings or get_settings()
-    csv_path = batches_service.find_results_csv(batch_id, settings)
-    if csv_path is None:
-        return ResultsPayload(
-            batch_id=batch_id, columns=[], rows=[], generated_csv=None
-        )
-
-    with csv_path.open("r", encoding="utf-8", newline="") as fh:
+def _read_csv_records(path: Path) -> tuple[list[str], list[dict[str, str]]]:
+    with path.open("r", encoding="utf-8", newline="") as fh:
         reader = csv.reader(fh)
         raw_rows = list(reader)
 
     if not raw_rows:
-        return ResultsPayload(
-            batch_id=batch_id,
-            columns=[],
-            rows=[],
-            generated_csv=csv_path.as_posix(),
-        )
+        return [], []
 
     header, *data_rows = raw_rows
-    rows: list[ResultsRow] = []
-    for row in data_rows:
-        if not row:
-            continue
-        record = dict(zip(header, row))
-        file_id = record.get("file_id") or (row[0] if row else "")
-        responses = {
-            key: value
-            for key, value in record.items()
-            if key not in {"file_id", "input_path", "output_path", "score"}
-        }
-        rows.append(
-            ResultsRow(
-                file_id=file_id,
-                input_path=record.get("input_path"),
-                output_path=record.get("output_path"),
-                score=record.get("score"),
-                responses=responses,
-            )
+    records = [
+        dict(zip(header, row))
+        for row in data_rows
+        if row and any(str(value).strip() for value in row)
+    ]
+    return header, records
+
+
+def _find_error_files_csvs(batch_id: str, settings: Settings) -> list[Path]:
+    batch_root = batches_service.get_batch_root(batch_id, settings)
+    outputs = batch_root / "outputs"
+    if not outputs.exists():
+        return []
+    candidates = [
+        path
+        for manual_dir in outputs.rglob("Manual")
+        if manual_dir.is_dir()
+        for path in manual_dir.glob("ErrorFiles*.csv")
+    ]
+    candidates.sort(key=lambda path: path.stat().st_mtime)
+    return candidates
+
+
+def _result_row_from_record(record: dict[str, str], status: str = "ok") -> ResultsRow:
+    responses = {
+        key: value
+        for key, value in record.items()
+        if key not in {"file_id", "input_path", "output_path", "score"}
+    }
+    error_reason = None
+    if status == "failed":
+        error_reason = "Marker preprocessing failed (image moved to Manual/ErrorFiles)."
+    return ResultsRow(
+        file_id=record.get("file_id") or "",
+        input_path=record.get("input_path"),
+        output_path=record.get("output_path"),
+        score=record.get("score"),
+        status=status,
+        error_reason=error_reason,
+        responses=responses,
+    )
+
+
+def read_results(batch_id: str, settings: Settings | None = None) -> ResultsPayload:
+    """Parse the latest ``Results_*.csv`` for a batch, if any."""
+    settings = settings or get_settings()
+    csv_path = batches_service.find_results_csv(batch_id, settings)
+    error_csvs = _find_error_files_csvs(batch_id, settings)
+    if csv_path is None and not error_csvs:
+        return ResultsPayload(
+            batch_id=batch_id, columns=[], rows=[], generated_csv=None
         )
+
+    header: list[str] = []
+    rows: list[ResultsRow] = []
+    seen_error_file_ids: set[str] = set()
+
+    if csv_path is not None:
+        header, records = _read_csv_records(csv_path)
+        rows.extend(_result_row_from_record(record) for record in records)
+
+    for error_csv in error_csvs:
+        error_header, error_records = _read_csv_records(error_csv)
+        if not header:
+            header = error_header
+        for record in error_records:
+            file_id = record.get("file_id") or ""
+            if file_id in seen_error_file_ids:
+                continue
+            seen_error_file_ids.add(file_id)
+            rows.append(_result_row_from_record(record, status="failed"))
 
     return ResultsPayload(
         batch_id=batch_id,
         columns=header,
         rows=rows,
-        generated_csv=csv_path.as_posix(),
+        generated_csv=csv_path.as_posix() if csv_path is not None else None,
     )
 
 

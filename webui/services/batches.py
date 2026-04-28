@@ -35,6 +35,8 @@ from webui.schemas import (
 from webui.settings import Settings, get_settings
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
+PDF_EXTENSIONS = {".pdf"}
+UPLOAD_EXTENSIONS = IMAGE_EXTENSIONS | PDF_EXTENSIONS
 TEMPLATE_FILENAME = "template.json"
 CONFIG_FILENAME = "config.json"
 EVALUATION_FILENAME = "evaluation.json"
@@ -54,6 +56,7 @@ JSON_DOC_NAMES = {
 }
 
 _SAFE_FILENAME = re.compile(r"[^A-Za-z0-9._-]+")
+VALID_ROTATIONS = {0, 90, 180, 270}
 
 
 class BatchNotFound(Exception):
@@ -128,8 +131,22 @@ def _file_count(batch_dir: Path) -> int:
     )
 
 
+def _next_available_path(directory: Path, filename: str) -> Path:
+    target = directory / filename
+    if not target.exists():
+        return target
+    stem, ext = target.stem, target.suffix
+    counter = 1
+    while (directory / f"{stem}_{counter}{ext}").exists():
+        counter += 1
+    return directory / f"{stem}_{counter}{ext}"
+
+
 def _to_batch(settings: Settings, batch_id: str, meta: dict[str, Any]) -> Batch:
     batch_dir = _batch_root(settings, batch_id)
+    rotation_degrees = int(meta.get("rotation_degrees", 0))
+    if rotation_degrees not in VALID_ROTATIONS:
+        rotation_degrees = 0
     return Batch(
         id=batch_id,
         name=meta.get("name", batch_id),
@@ -145,6 +162,7 @@ def _to_batch(settings: Settings, batch_id: str, meta: dict[str, Any]) -> Batch:
         has_template=(batch_dir / TEMPLATE_FILENAME).exists(),
         has_config=(batch_dir / CONFIG_FILENAME).exists(),
         has_evaluation=(batch_dir / EVALUATION_FILENAME).exists(),
+        rotation_degrees=rotation_degrees,
     )
 
 
@@ -165,6 +183,7 @@ def create_batch(name: str, settings: Settings | None = None) -> Batch:
         "source_mode": None,
         "source_dir": None,
         "last_error": None,
+        "rotation_degrees": 0,
     }
     _save_metadata(settings, batch_id, meta)
     return _to_batch(settings, batch_id, meta)
@@ -225,6 +244,24 @@ def update_status(
     return _to_batch(settings, batch_id, meta)
 
 
+def set_rotation(
+    batch_id: str,
+    degrees: int,
+    settings: Settings | None = None,
+) -> Batch:
+    """Persist a per-batch image rotation used during runtime staging."""
+    settings = settings or get_settings()
+    if degrees not in VALID_ROTATIONS:
+        raise InvalidBatchRequest(
+            f"Invalid rotation {degrees!r}; allowed: {sorted(VALID_ROTATIONS)}"
+        )
+    meta = _load_metadata(settings, batch_id)
+    meta["rotation_degrees"] = degrees
+    meta["updated_at"] = _now().isoformat()
+    _save_metadata(settings, batch_id, meta)
+    return _to_batch(settings, batch_id, meta)
+
+
 def set_source(
     batch_id: str,
     source_mode: SourceMode,
@@ -278,28 +315,57 @@ def save_uploaded_file(
     filename: str,
     data: bytes,
     settings: Settings | None = None,
-) -> FileRef:
-    """Write an uploaded image into the batch's ``inputs/`` folder."""
+) -> list[FileRef]:
+    """Write an uploaded image or split an uploaded PDF into page images."""
     settings = settings or get_settings()
     inputs = _inputs_dir(settings, batch_id)
     if not inputs.exists():
         raise BatchNotFound(batch_id)
     safe = _sanitise_filename(filename)
     suffix = Path(safe).suffix.lower()
-    if suffix not in IMAGE_EXTENSIONS:
+    if suffix not in UPLOAD_EXTENSIONS:
         raise InvalidBatchRequest(
-            f"Unsupported file type {suffix!r}; allowed: {sorted(IMAGE_EXTENSIONS)}"
+            f"Unsupported file type {suffix!r}; allowed: {sorted(UPLOAD_EXTENSIONS)}"
         )
-    target = inputs / safe
-    if target.exists():
-        stem, ext = target.stem, target.suffix
-        counter = 1
-        while (inputs / f"{stem}_{counter}{ext}").exists():
-            counter += 1
-        target = inputs / f"{stem}_{counter}{ext}"
+    if suffix in PDF_EXTENSIONS:
+        stored = _save_pdf_pages_as_images(inputs, safe, data)
+        set_source(batch_id, SourceMode.upload, None, settings)
+        return stored
+    target = _next_available_path(inputs, safe)
     target.write_bytes(data)
     set_source(batch_id, SourceMode.upload, None, settings)
-    return FileRef(name=target.name, size_bytes=target.stat().st_size)
+    return [FileRef(name=target.name, size_bytes=target.stat().st_size)]
+
+
+def _save_pdf_pages_as_images(inputs: Path, safe_filename: str, data: bytes) -> list[FileRef]:
+    """Render every PDF page into a PNG image in ``inputs``."""
+    try:
+        import fitz
+    except ImportError as exc:
+        raise InvalidBatchRequest(
+            "PDF uploads require PyMuPDF. Install dependencies with "
+            "`python -m pip install -r requirements.txt`."
+        ) from exc
+
+    stored: list[FileRef] = []
+    try:
+        with fitz.open(stream=data, filetype="pdf") as pdf:
+            if pdf.page_count == 0:
+                raise InvalidBatchRequest(f"PDF has no pages: {safe_filename}")
+            stem = Path(safe_filename).stem
+            for page_index, page in enumerate(pdf, start=1):
+                pixmap = page.get_pixmap(dpi=200, alpha=False)
+                page_name = f"{stem}_page_{page_index:04d}.png"
+                target = _next_available_path(inputs, page_name)
+                pixmap.save(str(target))
+                stored.append(
+                    FileRef(name=target.name, size_bytes=target.stat().st_size)
+                )
+    except InvalidBatchRequest:
+        raise
+    except Exception as exc:
+        raise InvalidBatchRequest(f"Could not convert PDF {safe_filename!r}: {exc}") from exc
+    return stored
 
 
 def delete_file(
@@ -369,21 +435,22 @@ def import_directory(
     for child in sorted(src.iterdir()):
         if not child.is_file():
             continue
-        if child.suffix.lower() not in IMAGE_EXTENSIONS:
+        suffix = child.suffix.lower()
+        if suffix not in UPLOAD_EXTENSIONS:
             skipped.append(child.name)
             continue
         safe = _sanitise_filename(child.name)
-        target = inputs / safe
-        if target.exists():
-            skipped.append(child.name)
+        if suffix in PDF_EXTENSIONS:
+            imported.extend(_save_pdf_pages_as_images(inputs, safe, child.read_bytes()))
             continue
-        if copy:
-            shutil.copy2(child, target)
-        else:
+        target = _next_available_path(inputs, safe)
+        if not copy:
             try:
                 target.symlink_to(child.resolve())
             except (OSError, NotImplementedError):
                 shutil.copy2(child, target)
+        else:
+            shutil.copy2(child, target)
         imported.append(FileRef(name=target.name, size_bytes=target.stat().st_size))
 
     if imported:

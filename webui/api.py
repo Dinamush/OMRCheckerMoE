@@ -23,6 +23,7 @@ from fastapi.responses import FileResponse
 from webui.schemas import (
     Batch,
     BatchCreate,
+    BatchRotationUpdate,
     BatchStatus,
     BatchStatusResponse,
     DirectoryImportRequest,
@@ -87,6 +88,16 @@ async def delete_batch(
     batches_service.delete_batch(batch_id, settings)
 
 
+@router.put("/batches/{batch_id}/rotation", response_model=Batch)
+@_handle_errors
+async def update_batch_rotation(
+    batch_id: str,
+    payload: BatchRotationUpdate,
+    settings: Settings = Depends(get_settings),
+) -> Batch:
+    return batches_service.set_rotation(batch_id, payload.rotation_degrees, settings)
+
+
 @router.get("/batches/{batch_id}/files", response_model=list[FileRef])
 @_handle_errors
 async def list_files(
@@ -119,7 +130,7 @@ async def upload_files(
                     f"({settings.max_upload_bytes} bytes)"
                 ),
             )
-        stored.append(
+        stored.extend(
             batches_service.save_uploaded_file(
                 batch_id,
                 upload.filename or "upload",

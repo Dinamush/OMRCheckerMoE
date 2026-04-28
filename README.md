@@ -219,7 +219,8 @@ Then open:
 
 Key UI features:
 
-- **Batch workflow**: create a batch, upload/import images, attach JSON docs, run OMR, download results.
+- **Batch workflow**: create a batch, upload/import images or PDFs, attach JSON docs, run OMR, download results.
+- **PDF preprocessing**: uploaded/imported PDFs are split into one PNG image per page before OMR processing, so every page appears as an input sheet in the batch.
 - **Template/config/evaluation editor**: toggle between:
   - **Code mode** (raw JSON)
   - **UI mode** (form controls like sliders, tag/chip editors, repeatable cards, and ordered lists)
@@ -248,7 +249,7 @@ Useful API endpoints (in addition to `/api/v1/batches/*`):
 For local-directory batch marking, the intended flow is:
 
 1. Create a batch.
-2. Use "Import from directory" to pull all supported images from a local folder into the batch `inputs/` directory.
+2. Use "Import from directory" to pull all supported images/PDFs from a local folder into the batch `inputs/` directory. PDFs are rendered into page images automatically.
 3. Save or upload `template.json` and, optionally, `config.json` / `evaluation.json`.
 4. Run OMR once for the batch.
 

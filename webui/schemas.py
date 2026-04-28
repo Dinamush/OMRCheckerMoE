@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -49,6 +49,13 @@ class Batch(BaseModel):
     has_template: bool = False
     has_config: bool = False
     has_evaluation: bool = False
+    rotation_degrees: Literal[0, 90, 180, 270] = 0
+
+
+class BatchRotationUpdate(BaseModel):
+    """Payload for rotating all batch inputs before processing."""
+
+    rotation_degrees: Literal[0, 90, 180, 270] = 0
 
 
 class FileRef(BaseModel):
@@ -139,6 +146,8 @@ class ResultsRow(BaseModel):
     input_path: str | None = None
     output_path: str | None = None
     score: str | None = None
+    status: Literal["ok", "failed"] = "ok"
+    error_reason: str | None = None
     responses: dict[str, str] = Field(default_factory=dict)
 
 

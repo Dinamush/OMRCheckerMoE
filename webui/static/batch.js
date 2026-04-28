@@ -23,6 +23,18 @@ const jsonFetch = async (url, options = {}) => {
     return data
 }
 
+const getSelectedRotation = () => {
+    const select = document.getElementById("rotation-degrees")
+    return select ? Number(select.value || 0) : 0
+}
+
+const applyPreviewRotation = () => {
+    const degrees = getSelectedRotation()
+    document.querySelectorAll(".sheet-preview-image").forEach((image) => {
+        image.style.setProperty("--preview-rotation", `${degrees}deg`)
+    })
+}
+
 const updateStatus = (status, lastError, preprocessFailures = []) => {
     const pill = document.getElementById("status-pill")
     if (pill) {
@@ -113,6 +125,7 @@ const refreshFiles = async () => {
             previewLink.href = previewUrl
             previewImg.src = previewUrl
             previewImg.alt = `Preview of ${file.name}`
+            previewImg.style.setProperty("--preview-rotation", `${getSelectedRotation()}deg`)
             li.querySelector(".mono").textContent = file.name
             const button = li.querySelector("button")
             button.dataset.deleteFile = file.name
@@ -122,6 +135,27 @@ const refreshFiles = async () => {
         if (empty) empty.hidden = files.length > 0
     } catch (error) {
         console.error(error)
+    }
+}
+
+const handleRotationChange = async (event) => {
+    const select = event.target.closest("#rotation-degrees")
+    if (!select) return
+    const feedback = document.getElementById("rotation-feedback")
+    try {
+        applyPreviewRotation()
+        const data = await jsonFetch(apiUrl("/rotation"), {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ rotation_degrees: Number(select.value) }),
+        })
+        select.value = String(data.rotation_degrees)
+        applyPreviewRotation()
+        if (feedback) {
+            show(feedback, `Rotation saved: ${data.rotation_degrees} degrees.`, "success")
+        }
+    } catch (error) {
+        if (feedback) show(feedback, error.message, "error")
     }
 }
 
@@ -137,7 +171,7 @@ const refreshResults = async () => {
 }
 
 const getResponseColumns = (columns) => {
-    return (columns || []).filter((col) => !["file_id", "input_path", "output_path", "score"].includes(col))
+    return (columns || []).filter((col) => !["file_id", "input_path", "output_path", "score", "status", "error_reason"].includes(col))
 }
 
 const getResultCell = (row, col) => {
@@ -145,6 +179,8 @@ const getResultCell = (row, col) => {
     if (col === "input_path") return row.input_path || ""
     if (col === "output_path") return row.output_path || ""
     if (col === "score") return row.score || ""
+    if (col === "status") return row.status || ""
+    if (col === "error_reason") return row.error_reason || ""
     return (row.responses && row.responses[col]) || ""
 }
 
@@ -158,6 +194,21 @@ const getErasureRisk = (column, value) => {
 
 const renderResultCard = (row, responseColumns, index) => {
     const fileId = row.file_id || `File ${index + 1}`
+    if (row.status === "failed") {
+        return `
+            <article class="result-card" data-result-card="${index}" ${index === 0 ? "" : "hidden"}>
+                <div class="flex-between result-card-head">
+                    <div>
+                        <h3>${escapeHtml(fileId)}</h3>
+                        ${row.input_path ? `<p class="muted small mono">${escapeHtml(row.input_path)}</p>` : ""}
+                        ${row.error_reason ? `<p class="error small">${escapeHtml(row.error_reason)}</p>` : ""}
+                    </div>
+                    <span class="pill status-failed">Failed</span>
+                </div>
+                ${row.output_path ? `<p class="muted small mono result-output-path">Output: ${escapeHtml(row.output_path)}</p>` : ""}
+            </article>
+        `
+    }
     const answers = responseColumns.map((col) => {
         const value = getResultCell(row, col) || "—"
         const erasureRisk = getErasureRisk(col, value)
@@ -203,7 +254,8 @@ const renderResults = (container, data) => {
                 aria-selected="${index === 0 ? "true" : "false"}"
                 data-result-select="${index}">
                 <span class="mono">${escapeHtml(fileId)}</span>
-                ${row.score ? `<span class="muted small">Score: ${escapeHtml(row.score)}</span>` : ""}
+                ${row.status === "failed" ? '<span class="muted small">Failed</span>' : ""}
+                ${row.status !== "failed" && row.score ? `<span class="muted small">Score: ${escapeHtml(row.score)}</span>` : ""}
             </button>
         `
     }).join("")
@@ -1252,6 +1304,9 @@ document.addEventListener("DOMContentLoaded", () => {
     if (stopBtn) stopBtn.addEventListener("click", handleStop)
     const restartBtn = document.getElementById("restart-btn")
     if (restartBtn) restartBtn.addEventListener("click", handleRestart)
+    const rotationForm = document.getElementById("rotation-form")
+    if (rotationForm) rotationForm.addEventListener("change", handleRotationChange)
+    applyPreviewRotation()
     document.addEventListener("click", (event) => {
         handleDeleteFile(event)
         handleDeleteAsset(event)

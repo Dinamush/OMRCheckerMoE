@@ -169,6 +169,22 @@ class CropOnMarkers(ImagePreprocessor):
         sum_t, max_t = 0, 0
         quarter_match_log = "Matching Marker:  "
         for k in range(0, 4):
+            if (
+                quads[k].size == 0
+                or quads[k].shape[0] < optimal_marker.shape[0]
+                or quads[k].shape[1] < optimal_marker.shape[1]
+            ):
+                logger.error(
+                    file_path,
+                    "\nError: marker search window is smaller than marker template in Quad",
+                    k + 1,
+                    "\n\t search_window",
+                    quads[k].shape[:2],
+                    "\t marker_template",
+                    optimal_marker.shape[:2],
+                    "\n\t Check that config dimensions match template pageDimensions.",
+                )
+                return None
             res = cv2.matchTemplate(quads[k], optimal_marker, cv2.TM_CCOEFF_NORMED)
             max_t = res.max()
             quarter_match_log += f"Quarter{str(k + 1)}: {str(round(max_t, 3))}\t"
@@ -340,6 +356,11 @@ class CropOnMarkers(ImagePreprocessor):
             rescaled_marker = ImageUtils.resize_util_h(
                 self.marker, u_height=int(_h * s)
             )
+            if (
+                image_eroded_sub.shape[0] < rescaled_marker.shape[0]
+                or image_eroded_sub.shape[1] < rescaled_marker.shape[1]
+            ):
+                continue
             # res is the black image with white dots
             res = cv2.matchTemplate(
                 image_eroded_sub, rescaled_marker, cv2.TM_CCOEFF_NORMED

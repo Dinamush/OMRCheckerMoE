@@ -11,10 +11,12 @@ shared ``conftest.py``.
 
 from __future__ import annotations
 
+import csv
 import json
 import time
 from pathlib import Path
 
+import cv2
 import pytest
 from fastapi.testclient import TestClient
 
@@ -94,6 +96,35 @@ def test_upload_and_list_files(
     assert files[0]["size_bytes"] > 0
 
 
+def test_pdf_upload_splits_pages_into_images(client: TestClient) -> None:
+    fitz = pytest.importorskip("fitz")
+    batch_id = _create_batch(client, "PDF upload test")
+    pdf = fitz.open()
+    for label in ("Page 1", "Page 2"):
+        page = pdf.new_page(width=240, height=320)
+        page.insert_text((72, 120), label)
+    pdf_bytes = pdf.tobytes()
+    pdf.close()
+
+    response = client.post(
+        f"/api/v1/batches/{batch_id}/files",
+        files=[("files", ("sample.pdf", pdf_bytes, "application/pdf"))],
+    )
+    assert response.status_code == 201, response.text
+    uploaded = response.json()
+    assert len(uploaded) == 2
+    assert uploaded[0]["name"] == "sample_page_0001.png"
+    assert uploaded[1]["name"] == "sample_page_0002.png"
+
+    response = client.get(f"/api/v1/batches/{batch_id}/files")
+    assert response.status_code == 200
+    files = response.json()
+    assert [file["name"] for file in files] == [
+        "sample_page_0001.png",
+        "sample_page_0002.png",
+    ]
+
+
 def test_rejects_unsupported_filetype(client: TestClient) -> None:
     batch_id = _create_batch(client, "Bad upload")
     response = client.post(
@@ -101,6 +132,96 @@ def test_rejects_unsupported_filetype(client: TestClient) -> None:
         files=[("files", ("notes.txt", b"hello", "text/plain"))],
     )
     assert response.status_code == 400
+
+
+def test_rotation_endpoint_persists_allowed_values(client: TestClient) -> None:
+    batch_id = _create_batch(client, "Rotation setting")
+
+    response = client.put(
+        f"/api/v1/batches/{batch_id}/rotation",
+        json={"rotation_degrees": 90},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["rotation_degrees"] == 90
+
+    response = client.get(f"/api/v1/batches/{batch_id}")
+    assert response.status_code == 200
+    assert response.json()["rotation_degrees"] == 90
+
+    response = client.put(
+        f"/api/v1/batches/{batch_id}/rotation",
+        json={"rotation_degrees": 45},
+    )
+    assert response.status_code == 422
+
+
+def test_rotation_restores_sideways_input_for_processing(
+    client: TestClient,
+    tmp_path: Path,
+    adrian_images: list[Path],
+    sample_template_body: dict,
+    sample_config_body: dict,
+) -> None:
+    original = cv2.imread(str(adrian_images[0]), cv2.IMREAD_UNCHANGED)
+    assert original is not None
+    rotated_path = tmp_path / "adrian_sideways.png"
+    cv2.imwrite(str(rotated_path), cv2.rotate(original, cv2.ROTATE_90_CLOCKWISE))
+
+    batch_id = _create_batch(client, "Rotated input")
+    _upload_image(client, batch_id, rotated_path)
+    response = client.put(
+        f"/api/v1/batches/{batch_id}/rotation",
+        json={"rotation_degrees": 270},
+    )
+    assert response.status_code == 200, response.text
+    client.put(f"/api/v1/batches/{batch_id}/template", json=sample_template_body)
+    client.put(f"/api/v1/batches/{batch_id}/config", json=sample_config_body)
+
+    response = client.post(f"/api/v1/batches/{batch_id}/process")
+    assert response.status_code == 202, response.text
+    final = _wait_for_status(client, batch_id)
+    assert final["status"] == "done", final
+    assert final["latest_dynamic_dimensions"] == _compute_dynamic_dimensions(
+        rotated_path, sample_template_body, 270
+    )
+
+    response = client.get(f"/api/v1/batches/{batch_id}/results")
+    assert response.status_code == 200
+    results = response.json()
+    assert len(results["rows"]) >= 1
+    assert results["rows"][0]["status"] == "ok"
+
+
+def test_results_include_failed_error_file_rows(
+    client: TestClient,
+    storage_root: Path,
+) -> None:
+    batch_id = _create_batch(client, "Failed rows")
+    manual_dir = storage_root / batch_id / "outputs" / "Manual"
+    manual_dir.mkdir(parents=True)
+    error_csv = manual_dir / "ErrorFiles.csv"
+    with error_csv.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["file_id", "input_path", "output_path", "score", "q1"])
+        writer.writerow(
+            [
+                "failed_page.png",
+                "inputs/failed_page.png",
+                "outputs/Manual/ErrorFiles/failed_page.png",
+                "NA",
+                "",
+            ]
+        )
+
+    response = client.get(f"/api/v1/batches/{batch_id}/results")
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["columns"] == ["file_id", "input_path", "output_path", "score", "q1"]
+    assert len(payload["rows"]) == 1
+    row = payload["rows"][0]
+    assert row["file_id"] == "failed_page.png"
+    assert row["status"] == "failed"
+    assert row["error_reason"]
 
 
 def test_directory_import(
@@ -183,7 +304,7 @@ def test_full_process_flow_produces_results(
     assert final["total_files"] == len(adrian_images)
     assert final["latest_processed_file"] == adrian_images[-1].name
     assert final["latest_dynamic_dimensions"] == _compute_dynamic_dimensions(
-        adrian_images[-1]
+        adrian_images[-1], sample_template_body
     )
 
     response = client.get(f"/api/v1/batches/{batch_id}/results")
@@ -203,7 +324,7 @@ def test_full_process_flow_produces_results(
     response = client.get(f"/api/v1/batches/{batch_id}/config")
     assert response.status_code == 200
     persisted_config = response.json()
-    expected_dimensions = _compute_dynamic_dimensions(adrian_images[-1])
+    expected_dimensions = _compute_dynamic_dimensions(adrian_images[-1], sample_template_body)
     assert persisted_config["dimensions"]["display_height"] == expected_dimensions["display_height"]
     assert persisted_config["dimensions"]["display_width"] == expected_dimensions["display_width"]
     assert (
@@ -452,7 +573,7 @@ def test_directory_import_processes_with_dynamic_dimensions(
     assert final["processed_files"] == len(adrian_images)
     assert final["total_files"] == len(adrian_images)
 
-    latest_expected = _compute_dynamic_dimensions(adrian_images[-1])
+    latest_expected = _compute_dynamic_dimensions(adrian_images[-1], sample_template_body)
     assert final["latest_dynamic_dimensions"] == latest_expected
 
     response = client.get(f"/api/v1/batches/{batch_id}/config")
