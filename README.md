@@ -207,13 +207,30 @@ Start it with:
 
 ```bash
 uvicorn webui.app:app --reload
+# or choose a port
+uvicorn webui.app:app --reload --port 5050
 ```
 
 Then open:
 
-- `http://127.0.0.1:8000/` – HTML UI for creating batches, uploading scans, editing `template.json` / `config.json` / `evaluation.json`, running OMR, and viewing results.
+- `http://127.0.0.1:8000/` – HTML UI for creating batches, uploading scans, editing `template.json` / `config.json` / `evaluation.json`, running OMR, and reviewing results.
 - `http://127.0.0.1:8000/docs` – auto-generated Swagger UI for the `/api/v1/*` endpoints.
 - `http://127.0.0.1:8000/openapi.json` – OpenAPI schema for machine consumption.
+
+Key UI features:
+
+- **Batch workflow**: create a batch, upload/import images, attach JSON docs, run OMR, download results.
+- **Template/config/evaluation editor**: toggle between:
+  - **Code mode** (raw JSON)
+  - **UI mode** (form controls like sliders, tag/chip editors, repeatable cards, and ordered lists)
+  - Switching between the two preserves edits; saving writes the same JSON back to disk.
+- **Image previews**:
+  - input sheets are viewable directly on the batch page (large preview)
+  - template assets (e.g. `omr_marker.jpg`) are previewable alongside the asset list
+- **Results review**:
+  - per-`file_id` view for assessing one sheet at a time
+  - a raw CSV table view contained in a horizontal scroller (no page overflow)
+  - flags likely multi-mark/erasure cases as a review heuristic when a question output contains multiple options (e.g. `AB`)
 
 Each batch is stored as a self-contained directory under `webui/storage/batches/<id>/`, mirroring the layout the CLI already expects (`inputs/`, `outputs/`, `template.json`, `config.json`, `evaluation.json`). That means a batch created via the UI can still be processed with `python main.py -i <batch>/inputs -o <batch>/outputs` as a fallback.
 
@@ -222,6 +239,11 @@ Configuration lives in `webui/settings.py` and can be overridden with environmen
 - `OMR_WEBUI_STORAGE_ROOT` – where batches are stored.
 - `OMR_WEBUI_ALLOW_DIRECTORY_IMPORT` – enables the "import from a server-side directory" endpoint and UI control. Keep this on for local use; turn it off before hosting to avoid arbitrary filesystem reads.
 - `OMR_WEBUI_CORS_ORIGINS` – comma-free JSON list of CORS allow-origins for external frontends.
+
+Useful API endpoints (in addition to `/api/v1/batches/*`):
+
+- Preview an input image: `/api/v1/batches/{batch_id}/files/{filename}/preview`
+- Preview a template asset image: `/api/v1/batches/{batch_id}/assets/{filename}/preview`
 
 For local-directory batch marking, the intended flow is:
 
