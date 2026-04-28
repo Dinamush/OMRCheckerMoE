@@ -160,6 +160,17 @@ async def delete_file(
     batches_service.delete_file(batch_id, filename, settings)
 
 
+@router.get("/batches/{batch_id}/files/{filename}/preview")
+@_handle_errors
+async def preview_file(
+    batch_id: str,
+    filename: str,
+    settings: Settings = Depends(get_settings),
+) -> FileResponse:
+    resolved = batches_service.resolve_input_file(batch_id, filename, settings)
+    return FileResponse(resolved, filename=resolved.name)
+
+
 @router.get(
     "/batches/{batch_id}/assets",
     response_model=list[TemplateAssetRef],
@@ -217,6 +228,17 @@ async def delete_template_asset(
     settings: Settings = Depends(get_settings),
 ) -> None:
     batches_service.delete_template_asset(batch_id, filename, settings)
+
+
+@router.get("/batches/{batch_id}/assets/{filename}/preview")
+@_handle_errors
+async def preview_template_asset(
+    batch_id: str,
+    filename: str,
+    settings: Settings = Depends(get_settings),
+) -> FileResponse:
+    resolved = batches_service.resolve_template_asset(batch_id, filename, settings)
+    return FileResponse(resolved, filename=resolved.name)
 
 
 def _make_json_endpoints(doc_name: str) -> None:

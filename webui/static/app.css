@@ -71,7 +71,7 @@ a:hover { text-decoration: underline; }
 .form-inline { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
 .stack { display: flex; flex-direction: column; gap: 0.5rem; margin-block-end: 1rem; }
 
-input[type="text"], input:not([type]), input[type="file"], textarea {
+input[type="text"], input[type="number"], input:not([type]), input[type="file"], textarea, select {
     background: #0d1117;
     color: var(--text);
     border: 1px solid var(--panel-border);
@@ -80,12 +80,20 @@ input[type="text"], input:not([type]), input[type="file"], textarea {
     font-family: inherit;
     font-size: 0.95rem;
 }
-input:focus, textarea:focus {
+input:focus, textarea:focus, select:focus {
     outline: none;
     border-color: var(--accent);
     box-shadow: 0 0 0 2px rgba(47, 129, 247, 0.25);
 }
 input[type="file"] { padding: 0.35rem; }
+input[type="range"] {
+    padding: 0;
+    accent-color: var(--accent);
+}
+input.invalid, textarea.invalid {
+    border-color: var(--danger);
+    box-shadow: 0 0 0 2px rgba(248, 81, 73, 0.22);
+}
 
 .form-inline input { flex: 1 1 20rem; }
 
@@ -177,11 +185,42 @@ textarea {
 .file-list { list-style: none; padding: 0; margin: 0; }
 .file-list li {
     display: grid;
-    grid-template-columns: 1fr auto auto;
+    grid-template-columns: 5.5rem 1fr auto auto;
     align-items: center;
     gap: 0.75rem;
-    padding: 0.4rem 0.5rem;
+    padding: 0.65rem 0.5rem;
     border-bottom: 1px solid var(--panel-border);
+}
+
+.image-preview-link,
+.image-preview-missing {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 5rem;
+    height: 5rem;
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    background: #0d1117;
+    overflow: hidden;
+    flex-shrink: 0;
+}
+
+.image-preview-link:hover {
+    border-color: var(--accent);
+}
+
+.image-preview-thumb {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+    display: block;
+}
+
+.asset-preview-link,
+.image-preview-missing {
+    width: 4rem;
+    height: 4rem;
 }
 
 .json-grid {
@@ -197,6 +236,159 @@ textarea {
 }
 .json-box .flex-between { align-items: center; margin-block-end: 0.5rem; }
 .json-box h3 { margin: 0; font-size: 0.95rem; }
+
+.editor-mode-toggle {
+    display: inline-flex;
+    gap: 0.25rem;
+    padding: 0.2rem;
+    margin-block-end: 0.65rem;
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    background: #090c10;
+}
+
+.editor-mode-toggle .btn {
+    border-color: transparent;
+}
+
+.editor-mode-toggle .btn.active {
+    background: var(--accent);
+    color: #fff;
+}
+
+.dynamic-editor {
+    display: flex;
+    flex-direction: column;
+    gap: 0.9rem;
+    max-height: 42rem;
+    overflow: auto;
+    padding-right: 0.25rem;
+}
+
+.dynamic-editor[hidden] {
+    display: none;
+}
+
+.dynamic-section {
+    display: flex;
+    flex-direction: column;
+    gap: 0.65rem;
+    padding: 0.75rem;
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    background: rgba(22, 27, 34, 0.72);
+}
+
+.dynamic-section h4,
+.dynamic-card h5 {
+    margin: 0;
+}
+
+.dynamic-section > p {
+    margin: -0.3rem 0 0;
+}
+
+.dynamic-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    color: var(--muted);
+    font-size: 0.82rem;
+}
+
+.dynamic-field > span:first-child {
+    font-weight: 600;
+    color: var(--text);
+}
+
+.dynamic-field input,
+.dynamic-field select,
+.dynamic-field textarea {
+    width: 100%;
+}
+
+.dynamic-pair {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr));
+    gap: 0.65rem;
+}
+
+.number-control {
+    display: grid;
+    grid-template-columns: minmax(5rem, 0.55fr) minmax(7rem, 1fr);
+    gap: 0.5rem;
+    align-items: center;
+}
+
+.number-control input[type="number"] {
+    min-width: 0;
+}
+
+.dynamic-card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.65rem;
+    padding: 0.75rem;
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    background: #0d1117;
+}
+
+.dynamic-card[draggable="true"] {
+    cursor: grab;
+}
+
+.dynamic-card-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 0.75rem;
+    align-items: flex-start;
+}
+
+.tag-editor {
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+}
+
+.tag-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+}
+
+.tag-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.22rem 0.35rem 0.22rem 0.55rem;
+    border: 1px solid rgba(88, 166, 255, 0.28);
+    border-radius: 999px;
+    background: rgba(47, 129, 247, 0.12);
+    color: var(--text);
+    font-size: 0.8rem;
+}
+
+.tag-chip button {
+    width: 1.25rem;
+    height: 1.25rem;
+    border: 0;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--muted);
+    cursor: pointer;
+    line-height: 1;
+}
+
+.tag-chip button:hover:not(:disabled) {
+    color: var(--text);
+    background: rgba(88, 166, 255, 0.24);
+}
+
+.tag-chip button:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
 
 .template-help {
     margin: 0 0 1rem;
@@ -227,7 +419,7 @@ textarea {
     display: flex;
     align-items: center;
     gap: 0.75rem;
-    padding: 0.5rem 0.5rem;
+    padding: 0.65rem 0.5rem;
     border-bottom: 1px solid var(--panel-border);
     flex-wrap: wrap;
 }

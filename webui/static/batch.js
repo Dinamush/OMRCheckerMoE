@@ -97,11 +97,20 @@ const refreshFiles = async () => {
         files.forEach((file) => {
             const li = document.createElement("li")
             const sizeKb = (file.size_bytes / 1024).toFixed(1)
+            const previewUrl = `${apiUrl(`/files/${encodeURIComponent(file.name)}/preview`)}`
             li.innerHTML = `
+                <a class="image-preview-link" target="_blank" rel="noopener">
+                    <img class="image-preview-thumb" loading="lazy" alt="">
+                </a>
                 <span class="mono"></span>
                 <span class="muted small">${sizeKb} KB</span>
                 <button class="btn danger small" type="button" data-delete-file=""></button>
             `
+            const previewLink = li.querySelector(".image-preview-link")
+            const previewImg = li.querySelector(".image-preview-thumb")
+            previewLink.href = previewUrl
+            previewImg.src = previewUrl
+            previewImg.alt = `Preview of ${file.name}`
             li.querySelector(".mono").textContent = file.name
             const button = li.querySelector("button")
             button.dataset.deleteFile = file.name
@@ -155,6 +164,698 @@ const escapeHtml = (value) => {
         .replace(/'/g, "&#39;")
 }
 
+const editorStates = new WeakMap()
+
+const defaultDoc = (docName) => {
+    if (docName === "template") {
+        return {
+            pageDimensions: [666, 515],
+            bubbleDimensions: [10, 10],
+            customLabels: {},
+            outputColumns: [],
+            fieldBlocks: {},
+            preProcessors: [],
+        }
+    }
+    if (docName === "config") {
+        return {
+            dimensions: {
+                display_height: 515,
+                display_width: 666,
+                processing_height: 515,
+                processing_width: 666,
+            },
+            outputs: {
+                show_image_level: 0,
+            },
+        }
+    }
+    if (docName === "evaluation") {
+        return {
+            source_type: "custom",
+            options: {
+                questions_in_order: [],
+                answers_in_order: [],
+            },
+            marking_schemes: {},
+        }
+    }
+    return {}
+}
+
+const getEditorStorageKey = (box) => `omr-editor-mode:${batchId}:${box.dataset.doc}`
+
+const createEl = (tag, className, text) => {
+    const element = document.createElement(tag)
+    if (className) element.className = className
+    if (text !== undefined) element.textContent = text
+    return element
+}
+
+const parseTextareaDoc = (box) => {
+    const docName = box.dataset.doc
+    const textarea = box.querySelector("[data-doc-textarea]")
+    const raw = textarea.value.trim()
+    if (!raw) return { ok: true, value: defaultDoc(docName) }
+    try {
+        const value = JSON.parse(raw)
+        if (!value || typeof value !== "object" || Array.isArray(value)) {
+            return { ok: false, error: `${docName}.json must be a JSON object` }
+        }
+        return { ok: true, value }
+    } catch (error) {
+        return { ok: false, error: `Invalid JSON: ${error.message}` }
+    }
+}
+
+const getEditorState = (box) => {
+    const existing = editorStates.get(box)
+    if (existing) return existing
+    const parsed = parseTextareaDoc(box)
+    const state = {
+        doc: parsed.ok ? parsed.value : defaultDoc(box.dataset.doc),
+        mode: "code",
+    }
+    editorStates.set(box, state)
+    return state
+}
+
+const syncTextareaFromState = (box) => {
+    const state = getEditorState(box)
+    const textarea = box.querySelector("[data-doc-textarea]")
+    if (state.doc === null) {
+        textarea.value = ""
+        return
+    }
+    textarea.value = JSON.stringify(state.doc, null, 2)
+}
+
+const syncStateFromTextarea = (box) => {
+    const parsed = parseTextareaDoc(box)
+    if (!parsed.ok) return parsed
+    const state = getEditorState(box)
+    state.doc = parsed.value
+    return parsed
+}
+
+const persistDynamicChange = (box) => {
+    syncTextareaFromState(box)
+    renderDynamicEditor(box)
+}
+
+const setEditorMode = (box, mode) => {
+    const feedback = box.querySelector("[data-doc-feedback]")
+    const codePanel = box.querySelector("[data-code-panel]")
+    const dynamicPanel = box.querySelector("[data-dynamic-panel]")
+    const state = getEditorState(box)
+
+    if (mode === "ui") {
+        const parsed = syncStateFromTextarea(box)
+        if (!parsed.ok) {
+            show(feedback, parsed.error, "error")
+            return
+        }
+        renderDynamicEditor(box)
+    } else {
+        syncTextareaFromState(box)
+    }
+
+    state.mode = mode
+    codePanel.hidden = mode !== "code"
+    dynamicPanel.hidden = mode !== "ui"
+    codePanel.style.display = mode === "code" ? "" : "none"
+    dynamicPanel.style.display = mode === "ui" ? "" : "none"
+    codePanel.setAttribute("aria-hidden", mode === "code" ? "false" : "true")
+    dynamicPanel.setAttribute("aria-hidden", mode === "ui" ? "false" : "true")
+    box.querySelectorAll("[data-doc-mode]").forEach((button) => {
+        button.classList.toggle("active", button.dataset.docMode === mode)
+    })
+    window.localStorage.setItem(getEditorStorageKey(box), mode)
+}
+
+const makeSection = (title, description) => {
+    const section = createEl("section", "dynamic-section")
+    const heading = createEl("h4", null, title)
+    section.appendChild(heading)
+    if (description) section.appendChild(createEl("p", "muted small", description))
+    return section
+}
+
+const makeField = (label, control, hint) => {
+    const wrapper = createEl("label", "dynamic-field")
+    wrapper.appendChild(createEl("span", null, label))
+    wrapper.appendChild(control)
+    if (hint) wrapper.appendChild(createEl("small", "muted", hint))
+    return wrapper
+}
+
+const makeTextInput = (value, handleChange, placeholder = "") => {
+    const input = document.createElement("input")
+    input.value = value ?? ""
+    input.placeholder = placeholder
+    input.addEventListener("input", () => handleChange(input.value))
+    return input
+}
+
+const makeNumberInput = (value, handleChange, options = {}) => {
+    const wrap = createEl("div", "number-control")
+    const input = document.createElement("input")
+    input.type = "number"
+    input.value = value ?? 0
+    if (options.step !== undefined) input.step = String(options.step)
+    if (options.min !== undefined) input.min = String(options.min)
+    if (options.max !== undefined) input.max = String(options.max)
+    const commit = (raw) => {
+        const next = Number(raw)
+        handleChange(Number.isNaN(next) ? 0 : next)
+    }
+    input.addEventListener("input", () => {
+        if (range) range.value = input.value
+        commit(input.value)
+    })
+    wrap.appendChild(input)
+
+    let range = null
+    if (options.slider) {
+        range = document.createElement("input")
+        range.type = "range"
+        range.min = String(options.min ?? 0)
+        range.max = String(options.max ?? 100)
+        range.step = String(options.step ?? 1)
+        range.value = input.value
+        range.addEventListener("input", () => {
+            input.value = range.value
+            commit(range.value)
+        })
+        wrap.appendChild(range)
+    }
+    return wrap
+}
+
+const makeCheckbox = (value, handleChange) => {
+    const input = document.createElement("input")
+    input.type = "checkbox"
+    input.checked = Boolean(value)
+    input.addEventListener("change", () => handleChange(input.checked))
+    return input
+}
+
+const makeSelect = (value, options, handleChange) => {
+    const select = document.createElement("select")
+    options.forEach((option) => {
+        const item = document.createElement("option")
+        item.value = option
+        item.textContent = option
+        select.appendChild(item)
+    })
+    select.value = value || options[0]
+    select.addEventListener("change", () => handleChange(select.value))
+    return select
+}
+
+const makeJsonTextarea = (value, handleChange) => {
+    const textarea = document.createElement("textarea")
+    textarea.rows = 5
+    textarea.value = JSON.stringify(value, null, 2)
+    textarea.addEventListener("change", () => {
+        try {
+            handleChange(JSON.parse(textarea.value || "null"))
+            textarea.classList.remove("invalid")
+        } catch (_error) {
+            textarea.classList.add("invalid")
+        }
+    })
+    return textarea
+}
+
+const makeTagEditor = (items, handleChange, placeholder = "Add item") => {
+    const currentItems = Array.isArray(items) ? [...items] : []
+    const wrap = createEl("div", "tag-editor")
+    const list = createEl("div", "tag-list")
+    const input = document.createElement("input")
+    input.placeholder = placeholder
+
+    const update = (nextItems) => {
+        handleChange(nextItems)
+    }
+
+    currentItems.forEach((item, index) => {
+        const chip = createEl("span", "tag-chip")
+        const label = createEl("span", null, String(item))
+        chip.appendChild(label)
+
+        const up = createEl("button", null, "↑")
+        up.type = "button"
+        up.title = "Move left"
+        up.disabled = index === 0
+        up.addEventListener("click", () => {
+            const next = [...currentItems]
+            const moved = next.splice(index, 1)[0]
+            next.splice(index - 1, 0, moved)
+            update(next)
+        })
+        chip.appendChild(up)
+
+        const down = createEl("button", null, "↓")
+        down.type = "button"
+        down.title = "Move right"
+        down.disabled = index === currentItems.length - 1
+        down.addEventListener("click", () => {
+            const next = [...currentItems]
+            const moved = next.splice(index, 1)[0]
+            next.splice(index + 1, 0, moved)
+            update(next)
+        })
+        chip.appendChild(down)
+
+        const remove = createEl("button", null, "×")
+        remove.type = "button"
+        remove.title = "Remove"
+        remove.addEventListener("click", () => {
+            update(currentItems.filter((_entry, itemIndex) => itemIndex !== index))
+        })
+        chip.appendChild(remove)
+        list.appendChild(chip)
+    })
+
+    input.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== ",") return
+        event.preventDefault()
+        const value = input.value.trim()
+        if (!value) return
+        input.value = ""
+        update([...currentItems, value])
+    })
+
+    wrap.appendChild(list)
+    wrap.appendChild(input)
+    return wrap
+}
+
+const addPairControls = (section, label, values, handleChange, names = ["width", "height"]) => {
+    const row = createEl("div", "dynamic-pair")
+    const pair = Array.isArray(values) ? [...values] : [0, 0]
+    names.forEach((name, index) => {
+        row.appendChild(
+            makeField(
+                `${label} ${name}`,
+                makeNumberInput(pair[index], (next) => {
+                    const updated = [...pair]
+                    updated[index] = next
+                    handleChange(updated)
+                }),
+            )
+        )
+    })
+    section.appendChild(row)
+}
+
+const updateObjectKey = (objectValue, oldKey, newKey) => {
+    const safeKey = newKey.trim()
+    if (!safeKey || safeKey === oldKey || objectValue[safeKey]) return oldKey
+    const entries = Object.entries(objectValue)
+    const rebuilt = {}
+    entries.forEach(([key, value]) => {
+        rebuilt[key === oldKey ? safeKey : key] = value
+    })
+    Object.keys(objectValue).forEach((key) => delete objectValue[key])
+    Object.assign(objectValue, rebuilt)
+    return safeKey
+}
+
+const makeCard = (title, actions = []) => {
+    const card = createEl("article", "dynamic-card")
+    const head = createEl("div", "dynamic-card-head")
+    head.appendChild(createEl("h5", null, title))
+    const actionWrap = createEl("div", "actions")
+    actions.forEach((action) => actionWrap.appendChild(action))
+    head.appendChild(actionWrap)
+    card.appendChild(head)
+    return card
+}
+
+const renderGenericObject = (container, objectValue, handleChange, skipKeys = new Set()) => {
+    Object.entries(objectValue || {}).forEach(([key, value]) => {
+        if (skipKeys.has(key)) return
+        if (typeof value === "boolean") {
+            container.appendChild(makeField(key, makeCheckbox(value, (next) => handleChange(key, next))))
+            return
+        }
+        if (typeof value === "number") {
+            container.appendChild(makeField(key, makeNumberInput(value, (next) => handleChange(key, next), { slider: true, min: 0, max: Math.max(100, value * 2 || 100) })))
+            return
+        }
+        if (typeof value === "string") {
+            container.appendChild(makeField(key, makeTextInput(value, (next) => handleChange(key, next))))
+            return
+        }
+        if (Array.isArray(value) && value.every((entry) => typeof entry === "string" || typeof entry === "number")) {
+            container.appendChild(makeField(key, makeTagEditor(value, (next) => handleChange(key, next))))
+            return
+        }
+        container.appendChild(makeField(key, makeJsonTextarea(value, (next) => handleChange(key, next)), "Custom JSON"))
+    })
+}
+
+const renderTemplateEditor = (box, root, doc) => {
+    doc.pageDimensions = Array.isArray(doc.pageDimensions) ? doc.pageDimensions : [666, 515]
+    doc.bubbleDimensions = Array.isArray(doc.bubbleDimensions) ? doc.bubbleDimensions : [10, 10]
+    doc.outputColumns = Array.isArray(doc.outputColumns) ? doc.outputColumns : []
+    doc.customLabels = doc.customLabels && typeof doc.customLabels === "object" ? doc.customLabels : {}
+    doc.fieldBlocks = doc.fieldBlocks && typeof doc.fieldBlocks === "object" ? doc.fieldBlocks : {}
+    doc.preProcessors = Array.isArray(doc.preProcessors) ? doc.preProcessors : []
+
+    const basics = makeSection("Sheet Basics", "Normalized dimensions and output column order.")
+    addPairControls(basics, "Page", doc.pageDimensions, (next) => {
+        doc.pageDimensions = next
+        persistDynamicChange(box)
+    })
+    addPairControls(basics, "Bubble", doc.bubbleDimensions, (next) => {
+        doc.bubbleDimensions = next
+        persistDynamicChange(box)
+    })
+    basics.appendChild(makeField("Output columns", makeTagEditor(doc.outputColumns, (next) => {
+        doc.outputColumns = next
+        persistDynamicChange(box)
+    }, "q1..25")))
+    root.appendChild(basics)
+
+    const labels = makeSection("Custom Labels", "Grouped output columns such as candidate number fields.")
+    Object.entries(doc.customLabels).forEach(([key, value]) => {
+        const card = makeCard(key)
+        card.appendChild(makeField("Name", makeTextInput(key, (next) => {
+            updateObjectKey(doc.customLabels, key, next)
+            persistDynamicChange(box)
+        })))
+        card.appendChild(makeField("Field tags", makeTagEditor(value, (next) => {
+            doc.customLabels[key] = next
+            persistDynamicChange(box)
+        }, "cand1..10")))
+        const remove = createEl("button", "btn danger small", "Remove")
+        remove.type = "button"
+        remove.addEventListener("click", () => {
+            delete doc.customLabels[key]
+            persistDynamicChange(box)
+        })
+        card.querySelector(".actions").appendChild(remove)
+        labels.appendChild(card)
+    })
+    const addLabel = createEl("button", "btn small", "Add label group")
+    addLabel.type = "button"
+    addLabel.addEventListener("click", () => {
+        let index = Object.keys(doc.customLabels).length + 1
+        while (doc.customLabels[`CustomLabel${index}`]) index += 1
+        doc.customLabels[`CustomLabel${index}`] = []
+        persistDynamicChange(box)
+    })
+    labels.appendChild(addLabel)
+    root.appendChild(labels)
+
+    const blocks = makeSection("Field Blocks", "Bubble grids for questions, candidate numbers, and other sheet fields.")
+    Object.entries(doc.fieldBlocks).forEach(([key, block]) => {
+        const remove = createEl("button", "btn danger small", "Remove")
+        remove.type = "button"
+        remove.addEventListener("click", () => {
+            delete doc.fieldBlocks[key]
+            persistDynamicChange(box)
+        })
+        const card = makeCard(key, [remove])
+        block.origin = Array.isArray(block.origin) ? block.origin : [0, 0]
+        block.fieldLabels = Array.isArray(block.fieldLabels) ? block.fieldLabels : []
+        card.appendChild(makeField("Block name", makeTextInput(key, (next) => {
+            updateObjectKey(doc.fieldBlocks, key, next)
+            persistDynamicChange(box)
+        })))
+        card.appendChild(makeField("Field type", makeSelect(block.fieldType || "QTYPE_MCQ4", ["QTYPE_MCQ4", "QTYPE_INT", "__CUSTOM__"], (next) => {
+            block.fieldType = next
+            persistDynamicChange(box)
+        })))
+        card.appendChild(makeField("Direction", makeSelect(block.direction || "vertical", ["vertical", "horizontal"], (next) => {
+            block.direction = next
+            persistDynamicChange(box)
+        })))
+        addPairControls(card, "Origin", block.origin, (next) => {
+            block.origin = next
+            persistDynamicChange(box)
+        }, ["x", "y"])
+        card.appendChild(makeField("Bubbles gap", makeNumberInput(block.bubblesGap ?? 0, (next) => {
+            block.bubblesGap = next
+            persistDynamicChange(box)
+        }, { step: 0.1, slider: true, min: 0, max: 100 })))
+        card.appendChild(makeField("Labels gap", makeNumberInput(block.labelsGap ?? 0, (next) => {
+            block.labelsGap = next
+            persistDynamicChange(box)
+        }, { step: 0.1, slider: true, min: 0, max: 150 })))
+        card.appendChild(makeField("Field labels", makeTagEditor(block.fieldLabels, (next) => {
+            block.fieldLabels = next
+            persistDynamicChange(box)
+        }, "q1..5")))
+        renderGenericObject(card, block, (childKey, next) => {
+            block[childKey] = next
+            persistDynamicChange(box)
+        }, new Set(["origin", "fieldLabels", "fieldType", "direction", "bubblesGap", "labelsGap"]))
+        blocks.appendChild(card)
+    })
+    const addBlock = createEl("button", "btn small", "Add field block")
+    addBlock.type = "button"
+    addBlock.addEventListener("click", () => {
+        let index = Object.keys(doc.fieldBlocks).length + 1
+        while (doc.fieldBlocks[`fieldBlock${index}`]) index += 1
+        doc.fieldBlocks[`fieldBlock${index}`] = {
+            origin: [0, 0],
+            bubblesGap: 20,
+            labelsGap: 40,
+            fieldLabels: [],
+            fieldType: "QTYPE_MCQ4",
+        }
+        persistDynamicChange(box)
+    })
+    blocks.appendChild(addBlock)
+    root.appendChild(blocks)
+
+    const processors = makeSection("Preprocessors", "Ordered image transforms before bubble reading.")
+    doc.preProcessors.forEach((processor, index) => {
+        processor.options = processor.options && typeof processor.options === "object" ? processor.options : {}
+        const remove = createEl("button", "btn danger small", "Remove")
+        remove.type = "button"
+        remove.addEventListener("click", () => {
+            doc.preProcessors.splice(index, 1)
+            persistDynamicChange(box)
+        })
+        const up = createEl("button", "btn small", "Up")
+        up.type = "button"
+        up.disabled = index === 0
+        up.addEventListener("click", () => {
+            const moved = doc.preProcessors.splice(index, 1)[0]
+            doc.preProcessors.splice(index - 1, 0, moved)
+            persistDynamicChange(box)
+        })
+        const down = createEl("button", "btn small", "Down")
+        down.type = "button"
+        down.disabled = index === doc.preProcessors.length - 1
+        down.addEventListener("click", () => {
+            const moved = doc.preProcessors.splice(index, 1)[0]
+            doc.preProcessors.splice(index + 1, 0, moved)
+            persistDynamicChange(box)
+        })
+        const card = makeCard(`${index + 1}. ${processor.name || "Processor"}`, [up, down, remove])
+        card.draggable = true
+        card.dataset.arrayIndex = String(index)
+        card.appendChild(makeField("Name", makeSelect(processor.name || "CropOnMarkers", ["CropOnMarkers", "CropPage", "FeatureBasedAlignment", "GaussianBlur", "Levels", "MedianBlur"], (next) => {
+            processor.name = next
+            persistDynamicChange(box)
+        })))
+        renderGenericObject(card, processor.options, (childKey, next) => {
+            processor.options[childKey] = next
+            persistDynamicChange(box)
+        })
+        card.appendChild(makeField("Options JSON", makeJsonTextarea(processor.options, (next) => {
+            processor.options = next && typeof next === "object" && !Array.isArray(next) ? next : {}
+            persistDynamicChange(box)
+        }), "Use for nested arrays like markerCorners or referenceMarkerCenters."))
+        processors.appendChild(card)
+    })
+    const addProcessor = createEl("button", "btn small", "Add preprocessor")
+    addProcessor.type = "button"
+    addProcessor.addEventListener("click", () => {
+        doc.preProcessors.push({ name: "CropOnMarkers", options: { relativePath: "omr_marker.jpg" } })
+        persistDynamicChange(box)
+    })
+    processors.appendChild(addProcessor)
+    root.appendChild(processors)
+
+    const handled = new Set(["pageDimensions", "bubbleDimensions", "customLabels", "outputColumns", "fieldBlocks", "preProcessors"])
+    const advanced = makeSection("Advanced JSON", "Any custom keys not covered above.")
+    renderGenericObject(advanced, doc, (key, next) => {
+        doc[key] = next
+        persistDynamicChange(box)
+    }, handled)
+    if (advanced.children.length > 2) root.appendChild(advanced)
+}
+
+const renderConfigEditor = (box, root, doc) => {
+    doc.dimensions = doc.dimensions && typeof doc.dimensions === "object" ? doc.dimensions : {}
+    doc.outputs = doc.outputs && typeof doc.outputs === "object" ? doc.outputs : {}
+    doc.threshold_params = doc.threshold_params && typeof doc.threshold_params === "object" ? doc.threshold_params : {}
+    doc.alignment_params = doc.alignment_params && typeof doc.alignment_params === "object" ? doc.alignment_params : {}
+
+    const dimensions = makeSection("Dimensions")
+    const dimensionKeys = ["display_height", "display_width", "processing_height", "processing_width"]
+    dimensionKeys.forEach((key) => {
+        dimensions.appendChild(makeField(key, makeNumberInput(doc.dimensions[key] ?? 0, (next) => {
+            doc.dimensions[key] = next
+            persistDynamicChange(box)
+        }, { slider: true, min: 0, max: 3000 })))
+    })
+    root.appendChild(dimensions)
+
+    const outputs = makeSection("Outputs")
+    renderGenericObject(outputs, doc.outputs, (key, next) => {
+        doc.outputs[key] = next
+        persistDynamicChange(box)
+    })
+    root.appendChild(outputs)
+
+    const thresholds = makeSection("Threshold Parameters")
+    renderGenericObject(thresholds, doc.threshold_params, (key, next) => {
+        doc.threshold_params[key] = next
+        persistDynamicChange(box)
+    })
+    root.appendChild(thresholds)
+
+    const alignment = makeSection("Alignment Parameters")
+    renderGenericObject(alignment, doc.alignment_params, (key, next) => {
+        doc.alignment_params[key] = next
+        persistDynamicChange(box)
+    })
+    root.appendChild(alignment)
+
+    const handled = new Set(["dimensions", "outputs", "threshold_params", "alignment_params"])
+    const advanced = makeSection("Advanced JSON")
+    renderGenericObject(advanced, doc, (key, next) => {
+        doc[key] = next
+        persistDynamicChange(box)
+    }, handled)
+    if (advanced.children.length > 1) root.appendChild(advanced)
+}
+
+const renderEvaluationEditor = (box, root, doc) => {
+    doc.options = doc.options && typeof doc.options === "object" ? doc.options : {}
+    doc.marking_schemes = doc.marking_schemes && typeof doc.marking_schemes === "object" ? doc.marking_schemes : {}
+
+    const source = makeSection("Source")
+    source.appendChild(makeField("source_type", makeSelect(doc.source_type || "custom", ["custom", "csv"], (next) => {
+        doc.source_type = next
+        persistDynamicChange(box)
+    })))
+    root.appendChild(source)
+
+    const options = makeSection("Options")
+    renderGenericObject(options, doc.options, (key, next) => {
+        doc.options[key] = next
+        persistDynamicChange(box)
+    })
+    root.appendChild(options)
+
+    const schemes = makeSection("Marking Schemes")
+    Object.entries(doc.marking_schemes).forEach(([key, scheme]) => {
+        const remove = createEl("button", "btn danger small", "Remove")
+        remove.type = "button"
+        remove.addEventListener("click", () => {
+            delete doc.marking_schemes[key]
+            persistDynamicChange(box)
+        })
+        const card = makeCard(key, [remove])
+        card.appendChild(makeField("Scheme name", makeTextInput(key, (next) => {
+            updateObjectKey(doc.marking_schemes, key, next)
+            persistDynamicChange(box)
+        })))
+        if (key === "DEFAULT") {
+            renderGenericObject(card, scheme, (markKey, next) => {
+                scheme[markKey] = next
+                persistDynamicChange(box)
+            })
+            schemes.appendChild(card)
+            return
+        }
+        scheme.marking = scheme.marking && typeof scheme.marking === "object" ? scheme.marking : {
+            correct: 1,
+            incorrect: 0,
+            unmarked: 0,
+        }
+        if (scheme.questions !== undefined) {
+            card.appendChild(makeField("Questions", makeTagEditor(scheme.questions || [], (next) => {
+                scheme.questions = next
+                persistDynamicChange(box)
+            }, "q1..25")))
+        }
+        renderGenericObject(card, scheme.marking, (markKey, next) => {
+            scheme.marking[markKey] = next
+            persistDynamicChange(box)
+        })
+        renderGenericObject(card, scheme, (childKey, next) => {
+            scheme[childKey] = next
+            persistDynamicChange(box)
+        }, new Set(["questions", "marking"]))
+        schemes.appendChild(card)
+    })
+    const addScheme = createEl("button", "btn small", "Add marking scheme")
+    addScheme.type = "button"
+    addScheme.addEventListener("click", () => {
+        let index = Object.keys(doc.marking_schemes).length + 1
+        while (doc.marking_schemes[`SCHEME_${index}`]) index += 1
+        doc.marking_schemes[`SCHEME_${index}`] = {
+            questions: [],
+            marking: {
+                correct: 1,
+                incorrect: 0,
+                unmarked: 0,
+            },
+        }
+        persistDynamicChange(box)
+    })
+    schemes.appendChild(addScheme)
+    root.appendChild(schemes)
+
+    const handled = new Set(["source_type", "options", "marking_schemes"])
+    const advanced = makeSection("Advanced JSON")
+    renderGenericObject(advanced, doc, (key, next) => {
+        doc[key] = next
+        persistDynamicChange(box)
+    }, handled)
+    if (advanced.children.length > 1) root.appendChild(advanced)
+}
+
+function renderDynamicEditor(box) {
+    const root = box.querySelector("[data-dynamic-panel]")
+    const state = getEditorState(box)
+    const doc = state.doc
+    root.innerHTML = ""
+
+    if (doc === null) {
+        root.appendChild(createEl("p", "muted", "Document cleared. Save to delete it, or switch back to UI mode from code to start a fresh document."))
+        return
+    }
+
+    if (!doc || typeof doc !== "object" || Array.isArray(doc)) {
+        root.appendChild(createEl("p", "error", "This editor only supports JSON objects."))
+        return
+    }
+
+    if (box.dataset.doc === "template") {
+        renderTemplateEditor(box, root, doc)
+    } else if (box.dataset.doc === "config") {
+        renderConfigEditor(box, root, doc)
+    } else if (box.dataset.doc === "evaluation") {
+        renderEvaluationEditor(box, root, doc)
+    } else {
+        renderGenericObject(root, doc, (key, next) => {
+            doc[key] = next
+            persistDynamicChange(box)
+        })
+    }
+}
+
 const refreshAssets = async () => {
     try {
         const assets = await jsonFetch(apiUrl("/assets"))
@@ -189,6 +890,28 @@ const refreshAssets = async () => {
         assets.forEach((asset) => {
             const li = document.createElement("li")
             li.dataset.assetName = asset.name
+
+            if (asset.present) {
+                const previewUrl = apiUrl(`/assets/${encodeURIComponent(asset.name)}/preview`)
+                const preview = document.createElement("a")
+                preview.className = "image-preview-link asset-preview-link"
+                preview.href = previewUrl
+                preview.target = "_blank"
+                preview.rel = "noopener"
+
+                const img = document.createElement("img")
+                img.className = "image-preview-thumb asset-preview-thumb"
+                img.src = previewUrl
+                img.alt = `Preview of ${asset.name}`
+                img.loading = "lazy"
+                preview.appendChild(img)
+                li.appendChild(preview)
+            } else {
+                const missing = document.createElement("span")
+                missing.className = "image-preview-missing"
+                missing.setAttribute("aria-hidden", "true")
+                li.appendChild(missing)
+            }
 
             const name = document.createElement("span")
             name.className = "mono"
@@ -293,6 +1016,16 @@ const handleSaveDoc = async (event) => {
     const textarea = box.querySelector("[data-doc-textarea]")
     const feedback = box.querySelector("[data-doc-feedback]")
     const statusEl = box.querySelector("[data-doc-status]")
+    const state = getEditorState(box)
+    if (state.mode === "ui") {
+        if (state.doc !== null) syncTextareaFromState(box)
+    } else {
+        const synced = syncStateFromTextarea(box)
+        if (!synced.ok) {
+            show(feedback, synced.error, "error")
+            return
+        }
+    }
     const raw = textarea.value.trim()
     let payload = null
     if (raw) {
@@ -324,8 +1057,19 @@ const handleSaveDoc = async (event) => {
 const handleClearDoc = (event) => {
     const button = event.target.closest("[data-clear-doc]")
     if (!button) return
-    const textarea = button.closest(".json-box").querySelector("[data-doc-textarea]")
+    const box = button.closest(".json-box")
+    const state = getEditorState(box)
+    const textarea = box.querySelector("[data-doc-textarea]")
+    state.doc = null
     textarea.value = ""
+    if (state.mode === "ui") renderDynamicEditor(box)
+}
+
+const handleEditorMode = (event) => {
+    const button = event.target.closest("[data-doc-mode]")
+    if (!button) return
+    const box = button.closest(".json-box")
+    setEditorMode(box, button.dataset.docMode)
 }
 
 const handleAssetUpload = async (event) => {
@@ -417,8 +1161,16 @@ document.addEventListener("DOMContentLoaded", () => {
     document.addEventListener("click", (event) => {
         handleDeleteFile(event)
         handleDeleteAsset(event)
+        handleEditorMode(event)
         handleSaveDoc(event)
         handleClearDoc(event)
+    })
+
+    document.querySelectorAll(".json-box").forEach((box) => {
+        const savedMode = window.localStorage.getItem(getEditorStorageKey(box))
+        if (savedMode === "ui") {
+            setEditorMode(box, "ui")
+        }
     })
 
     const initialStatus = document.getElementById("status-pill")

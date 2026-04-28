@@ -319,6 +319,31 @@ def delete_file(
     target.unlink()
 
 
+def resolve_input_file(
+    batch_id: str,
+    filename: str,
+    settings: Settings | None = None,
+) -> Path:
+    """Return a safely resolved input image path for preview/download."""
+    settings = settings or get_settings()
+    inputs = _inputs_dir(settings, batch_id)
+    if not inputs.exists():
+        raise BatchNotFound(batch_id)
+    safe = _sanitise_filename(filename)
+    target = (inputs / safe).resolve()
+    try:
+        target.relative_to(inputs.resolve())
+    except ValueError as exc:
+        raise InvalidBatchRequest("Path traversal not allowed") from exc
+    if (
+        not target.exists()
+        or not target.is_file()
+        or target.suffix.lower() not in IMAGE_EXTENSIONS
+    ):
+        raise InvalidBatchRequest(f"Input image not found: {safe}")
+    return target
+
+
 def import_directory(
     batch_id: str,
     source_dir: str,
@@ -615,6 +640,23 @@ def delete_template_asset(
     if not target.exists() or not target.is_file():
         raise InvalidBatchRequest(f"Asset not found: {safe}")
     target.unlink()
+
+
+def resolve_template_asset(
+    batch_id: str,
+    filename: str,
+    settings: Settings | None = None,
+) -> Path:
+    """Return a safely resolved template asset image path for preview/download."""
+    settings = settings or get_settings()
+    batch_dir = _batch_root(settings, batch_id)
+    if not batch_dir.exists():
+        raise BatchNotFound(batch_id)
+    safe = _validate_asset_filename(filename)
+    resolved = _asset_is_present(batch_dir, safe)
+    if resolved is None:
+        raise InvalidBatchRequest(f"Asset not found: {safe}")
+    return resolved.resolve()
 
 
 def reset_batch_runtime_state(

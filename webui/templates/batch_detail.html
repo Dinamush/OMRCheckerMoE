@@ -61,6 +61,9 @@
     <ul class="file-list" id="file-list">
         {% for file in files %}
         <li>
+            <a class="image-preview-link" href="/api/v1/batches/{{ batch.id }}/files/{{ file.name | urlencode }}/preview" target="_blank" rel="noopener">
+                <img class="image-preview-thumb" src="/api/v1/batches/{{ batch.id }}/files/{{ file.name | urlencode }}/preview" alt="Preview of {{ file.name }}" loading="lazy" />
+            </a>
             <span class="mono">{{ file.name }}</span>
             <span class="muted small">{{ (file.size_bytes / 1024)|round(1) }} KB</span>
             <button class="btn danger small" type="button" data-delete-file="{{ file.name }}">Remove</button>
@@ -92,11 +95,17 @@
                 <h3>{{ doc_name }}.json</h3>
                 <span class="muted small" data-doc-status>{% if doc %}present{% else %}empty{% endif %}</span>
             </div>
+            <div class="editor-mode-toggle" role="group" aria-label="{{ doc_name }} editor mode">
+                <button class="btn small active" type="button" data-doc-mode="code">Code</button>
+                <button class="btn small" type="button" data-doc-mode="ui">UI</button>
+            </div>
             <textarea
                 data-doc-textarea
+                data-code-panel
                 spellcheck="false"
                 rows="12"
                 placeholder='{"example": true}'>{% if doc %}{{ doc | tojson(indent=2) }}{% endif %}</textarea>
+            <div class="dynamic-editor" data-dynamic-panel hidden></div>
             <div class="actions">
                 <button class="btn primary small" type="button" data-save-doc>Save</button>
                 <button class="btn small" type="button" data-clear-doc>Clear</button>
@@ -127,6 +136,13 @@
     <ul class="asset-list" id="asset-list">
         {% for asset in template_assets %}
         <li data-asset-name="{{ asset.name }}">
+            {% if asset.present %}
+                <a class="image-preview-link asset-preview-link" href="/api/v1/batches/{{ batch.id }}/assets/{{ asset.name | urlencode }}/preview" target="_blank" rel="noopener">
+                    <img class="image-preview-thumb asset-preview-thumb" src="/api/v1/batches/{{ batch.id }}/assets/{{ asset.name | urlencode }}/preview" alt="Preview of {{ asset.name }}" loading="lazy" />
+                </a>
+            {% else %}
+                <span class="image-preview-missing" aria-hidden="true"></span>
+            {% endif %}
             <span class="mono">{{ asset.name }}</span>
             {% if asset.present %}
                 <span class="pill status-done">present</span>
