@@ -19,6 +19,34 @@ from src.utils.image import CLAHE_HELPER, ImageUtils
 from src.utils.interaction import InteractionUtils
 
 
+def select_question_response(
+    *,
+    marked_options: list[tuple[str, float]],
+    empty_value: str,
+    multi_mark_equal_delta: float,
+) -> tuple[str, bool]:
+    """Return (response, is_multi_marked) for one question strip.
+
+    marked_options: list of (option_value, mean_intensity) for bubbles that
+    cleared the per-strip threshold. Lower intensity means darker.
+    """
+    if not marked_options:
+        return empty_value, False
+
+    marked_options = sorted(marked_options, key=lambda item: item[1])
+    best_intensity = float(marked_options[0][1])
+    delta = max(0.0, float(multi_mark_equal_delta)) * 255.0
+    equally_dark = [
+        option
+        for option, intensity in marked_options
+        if abs(float(intensity) - best_intensity) <= delta
+    ]
+    if len(equally_dark) > 1:
+        equally_dark = sorted(dict.fromkeys(equally_dark))
+        return f"MR({''.join(equally_dark)})", True
+    return marked_options[0][0], False
+
+
 class ImageInstanceOps:
     """Class to hold fine-tuned utilities for a group of images. One instance for each processing directory."""
 
@@ -298,20 +326,19 @@ class ImageInstanceOps:
                     #     InteractionUtils.show("QStrip: "+key+"-"+str(block_q_strip_no),
                     #     img[st[1] : end[1], st[0]+shift : end[0]+shift],0,config=config)
 
-                    # TODO: get rid of total_q_box_no
-                    detected_bubbles = []
+                    bubble_measurements: list[tuple[str, str, float, bool]] = []
                     for bubble in field_block_bubbles:
+                        intensity = float(all_q_vals[total_q_box_no])
                         bubble_is_marked = (
-                            per_q_strip_threshold > all_q_vals[total_q_box_no]
+                            per_q_strip_threshold > intensity
                         )
                         total_q_box_no += 1
+                        x, y, field_value = (
+                            bubble.x + field_block.shift,
+                            bubble.y,
+                            bubble.field_value,
+                        )
                         if bubble_is_marked:
-                            detected_bubbles.append(bubble)
-                            x, y, field_value = (
-                                bubble.x + field_block.shift,
-                                bubble.y,
-                                bubble.field_value,
-                            )
                             cv2.rectangle(
                                 final_marked,
                                 (int(x + box_w / 12), int(y + box_h / 12)),
@@ -343,26 +370,40 @@ class ImageInstanceOps:
                                 CLR_GRAY,
                                 -1,
                             )
-
-                    for bubble in detected_bubbles:
-                        field_label, field_value = (
-                            bubble.field_label,
-                            bubble.field_value,
+                        bubble_measurements.append(
+                            (bubble.field_label, field_value, intensity, bubble_is_marked)
                         )
-                        # Only send rolls multi-marked in the directory
-                        multi_marked_local = field_label in omr_response
-                        omr_response[field_label] = (
-                            (omr_response[field_label] + field_value)
-                            if multi_marked_local
-                            else field_value
-                        )
-                        # TODO: generalize this into identifier
-                        # multi_roll = multi_marked_local and "Roll" in str(q)
-                        multi_marked = multi_marked or multi_marked_local
 
-                    if len(detected_bubbles) == 0:
-                        field_label = field_block_bubbles[0].field_label
-                        omr_response[field_label] = field_block.empty_val
+                    field_label = field_block_bubbles[0].field_label
+                    is_question = str(field_label).lower().startswith("q")
+                    if is_question:
+                        multi_mark_equal_delta = float(
+                            getattr(config.outputs, "multi_mark_equal_delta", 0.06)
+                        )
+                        marked_options = [
+                            (field_value, intensity)
+                            for _, field_value, intensity, is_marked in bubble_measurements
+                            if is_marked
+                        ]
+                        response, is_multi = select_question_response(
+                            marked_options=marked_options,
+                            empty_value=field_block.empty_val,
+                            multi_mark_equal_delta=multi_mark_equal_delta,
+                        )
+                        omr_response[field_label] = response
+                        multi_marked = multi_marked or is_multi
+                    else:
+                        for _, field_value, _, is_marked in bubble_measurements:
+                            if not is_marked:
+                                continue
+                            multi_marked_local = field_label in omr_response
+                            omr_response[field_label] = (
+                                (omr_response[field_label] + field_value)
+                                if multi_marked_local
+                                else field_value
+                            )
+                        if field_label not in omr_response:
+                            omr_response[field_label] = field_block.empty_val
 
                     if config.outputs.show_image_level >= 5:
                         if key in all_c_box_vals:

@@ -39,6 +39,7 @@
       "fieldLabels": [
         "q1..5"
       ],
+      "emptyValue": "NR",
       "fieldType": "QTYPE_MCQ4"
     },
     "q06block": {
@@ -51,6 +52,7 @@
       "fieldLabels": [
         "q6..10"
       ],
+      "emptyValue": "NR",
       "fieldType": "QTYPE_MCQ4"
     },
     "q11block": {
@@ -63,6 +65,7 @@
       "fieldLabels": [
         "q11..15"
       ],
+      "emptyValue": "NR",
       "fieldType": "QTYPE_MCQ4"
     },
     "q16block": {
@@ -75,6 +78,7 @@
       "fieldLabels": [
         "q16..20"
       ],
+      "emptyValue": "NR",
       "fieldType": "QTYPE_MCQ4"
     },
     "q21block": {
@@ -87,6 +91,7 @@
       "fieldLabels": [
         "q21..25"
       ],
+      "emptyValue": "NR",
       "fieldType": "QTYPE_MCQ4"
     }
   },

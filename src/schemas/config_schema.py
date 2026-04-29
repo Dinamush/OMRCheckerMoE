@@ -51,6 +51,7 @@ CONFIG_SCHEMA = {
                 "save_detections": {"type": "boolean"},
                 # This option moves multimarked files into a separate folder for manual checking, skipping evaluation
                 "filter_out_multimarked_files": {"type": "boolean"},
+                "multi_mark_equal_delta": {"type": "number", "minimum": 0, "maximum": 1},
             },
         },
     },

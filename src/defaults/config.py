@@ -29,6 +29,7 @@ CONFIG_DEFAULTS = DotMap(
             "save_image_level": 0,
             "save_detections": True,
             "filter_out_multimarked_files": False,
+            "multi_mark_equal_delta": 0.06,
         },
     },
     _dynamic=False,
