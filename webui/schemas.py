@@ -148,6 +148,9 @@ class ResultsRow(BaseModel):
     score: str | None = None
     status: Literal["ok", "failed"] = "ok"
     error_reason: str | None = None
+    qc_flags: list[str] = Field(default_factory=list)
+    nr_count: int = 0
+    nr_percent: float = 0.0
     responses: dict[str, str] = Field(default_factory=dict)
 
 

@@ -12,8 +12,12 @@ import csv
 import copy
 import json
 import logging
+import os
+import re
 import shutil
 import threading
+import time
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from pathlib import Path
 from typing import Any
 
@@ -32,10 +36,13 @@ logger = logging.getLogger(__name__)
 
 _COPIED_JSON_FILES = ("template.json", "config.json", "evaluation.json")
 _RUNTIME_DIR_NAME = "_runtime"
+_RUNTIME_BASE_DIR_NAME = "_base"
 _DISPLAY_KEYS = ("display_height", "display_width", "processing_height", "processing_width")
 
 _batch_locks: dict[str, threading.Lock] = {}
 _locks_guard = threading.Lock()
+
+_QC_Q_COL = re.compile(r"^q\d+", re.IGNORECASE)
 
 
 def _lock_for(batch_id: str) -> threading.Lock:
@@ -203,6 +210,37 @@ def _load_template_payload(batch_root: Path) -> dict[str, Any]:
         return json.load(fh)
 
 
+def _with_runtime_template_defaults(template_payload: dict[str, Any]) -> dict[str, Any]:
+    """Apply safe runtime defaults without mutating the user's saved template."""
+    if not isinstance(template_payload, dict):
+        return {}
+    runtime_template = copy.deepcopy(template_payload)
+    preprocessors = runtime_template.get("preProcessors")
+    if not isinstance(preprocessors, list):
+        return runtime_template
+    for processor in preprocessors:
+        if not isinstance(processor, dict) or processor.get("name") != "CropOnMarkers":
+            continue
+        options = processor.get("options")
+        if not isinstance(options, dict):
+            options = {}
+            processor["options"] = options
+        if "markerCorners" in options:
+            options.setdefault("markerSearchPadding", 20)
+            options.setdefault("fallbackToExpandedMarkerCorners", True)
+            # Heavy-bubble or slightly tilted scans legitimately produce
+            # corner-score spreads ~0.4-0.7. Keep older saved templates
+            # tolerant by injecting the safer default at runtime only when
+            # the user hasn't pinned a stricter value of their own.
+            options.setdefault("max_matching_variation", 0.5)
+    return runtime_template
+
+
+def _write_runtime_template(template_payload: dict[str, Any], dst: Path) -> None:
+    with dst.open("w", encoding="utf-8") as fh:
+        json.dump(_with_runtime_template_defaults(template_payload), fh, indent=2, sort_keys=True)
+
+
 def _collect_relative_paths(value: Any) -> list[str]:
     found: list[str] = []
     if isinstance(value, dict):
@@ -247,10 +285,49 @@ def _copy_runtime_assets(batch_root: Path, runtime_root: Path) -> None:
         shutil.copy2(src, dst)
 
 
+def _link_or_copy(src: Path, dst: Path) -> None:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if dst.exists():
+            return
+        os.link(src, dst)
+    except OSError:
+        shutil.copy2(src, dst)
+
+
+def _prepare_runtime_base(batch_root: Path) -> Path:
+    runtime_root = batch_root / _RUNTIME_DIR_NAME
+    base_root = runtime_root / _RUNTIME_BASE_DIR_NAME
+    if base_root.exists():
+        shutil.rmtree(base_root)
+    base_root.mkdir(parents=True, exist_ok=True)
+
+    template_payload = _load_template_payload(batch_root)
+    if template_payload:
+        _write_runtime_template(template_payload, base_root / "template.json")
+    evaluation_src = batch_root / "evaluation.json"
+    if evaluation_src.exists():
+        _link_or_copy(evaluation_src, base_root / "evaluation.json")
+
+    _copy_runtime_assets(batch_root, base_root)
+    return base_root
+
+
 def _rotate_image_for_runtime(src: Path, dst: Path, rotation_degrees: int) -> None:
     if rotation_degrees == 0:
         shutil.copy2(src, dst)
         return
+
+    rotated_dir = dst.parent.parent / "_rotated"
+    rotated_dir.mkdir(parents=True, exist_ok=True)
+    cache_key = f"{src.stem}_rot{rotation_degrees}{src.suffix.lower()}"
+    cached = rotated_dir / cache_key
+    try:
+        if cached.exists() and cached.stat().st_mtime >= src.stat().st_mtime:
+            shutil.copy2(cached, dst)
+            return
+    except OSError:
+        pass
 
     rotate_codes = {
         90: cv2.ROTATE_90_CLOCKWISE,
@@ -267,6 +344,10 @@ def _rotate_image_for_runtime(src: Path, dst: Path, rotation_degrees: int) -> No
     rotated = cv2.rotate(image, rotate_code)
     if not cv2.imwrite(str(dst), rotated):
         raise ValueError(f"Could not write rotated runtime image: {dst.as_posix()}")
+    try:
+        cv2.imwrite(str(cached), rotated)
+    except Exception:
+        pass
 
 
 def _prepare_runtime_dir(
@@ -275,6 +356,7 @@ def _prepare_runtime_dir(
     runtime_config: dict,
     index: int,
     rotation_degrees: int = 0,
+    base_root: Path | None = None,
 ) -> Path:
     """Build an isolated single-image runtime directory for engine execution."""
     runtime_root = batch_root / _RUNTIME_DIR_NAME / f"{index:04d}_{image_path.stem}"
@@ -282,21 +364,134 @@ def _prepare_runtime_dir(
         shutil.rmtree(runtime_root)
     runtime_root.mkdir(parents=True, exist_ok=True)
 
-    _rotate_image_for_runtime(
-        image_path, runtime_root / image_path.name, rotation_degrees
-    )
+    _rotate_image_for_runtime(image_path, runtime_root / image_path.name, rotation_degrees)
+    if base_root is None:
+        base_root = _prepare_runtime_base(batch_root)
     for name in ("template.json", "evaluation.json"):
-        src = batch_root / name
+        src = base_root / name
         if src.exists():
-            shutil.copy2(src, runtime_root / name)
+            _link_or_copy(src, runtime_root / name)
+    for path in base_root.rglob("*"):
+        if not path.is_file():
+            continue
+        if path.name in {"template.json", "evaluation.json"}:
+            continue
+        rel = path.relative_to(base_root)
+        _link_or_copy(path, runtime_root / rel)
     _write_runtime_config(runtime_config, runtime_root / "config.json")
-    _copy_runtime_assets(batch_root, runtime_root)
     return runtime_root
 
 
 def _cleanup_runtime_dir(runtime_dir: Path | None) -> None:
     if runtime_dir and runtime_dir.exists():
         shutil.rmtree(runtime_dir, ignore_errors=True)
+
+
+def _default_max_workers() -> int:
+    cpu = os.cpu_count() or 2
+    return max(1, min(4, int(cpu)))
+
+
+def _coerce_max_workers(value: Any) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return _default_max_workers()
+    return max(1, min(32, parsed))
+
+
+def _process_one_image(payload: dict[str, Any]) -> dict[str, Any]:
+    """Worker entrypoint to process a single image in its own runtime dir."""
+    from main import entry_point_for_args
+
+    batch_root = Path(payload["batch_root"])
+    outputs_dir = Path(payload["outputs_dir"])
+    image_path = Path(payload["image_path"])
+    base_config = payload.get("base_config") or {}
+    template_payload = payload.get("template_payload") or {}
+    base_root = Path(payload["base_root"])
+    rotation_degrees = int(payload.get("rotation_degrees", 0))
+    index = int(payload.get("index", 1))
+
+    runtime_dir: Path | None = None
+    try:
+        if not base_root.exists():
+            base_root = _prepare_runtime_base(batch_root)
+        dynamic_dimensions = _compute_dynamic_dimensions(
+            image_path, template_payload, rotation_degrees
+        )
+        runtime_config = _merge_dimensions_into_config(base_config, dynamic_dimensions)
+        runtime_dir = _prepare_runtime_dir(
+            batch_root,
+            image_path,
+            runtime_config,
+            index,
+            rotation_degrees,
+            base_root=base_root,
+        )
+        worker_outputs_dir = outputs_dir / "_workers" / f"{index:04d}_{image_path.stem}"
+        worker_outputs_dir.mkdir(parents=True, exist_ok=True)
+        args = {
+            "input_paths": [str(runtime_dir)],
+            "output_dir": str(worker_outputs_dir),
+            "debug": False,
+            "autoAlign": False,
+            "setLayout": False,
+        }
+        entry_point_for_args(args)
+        ended_in_errors = _image_ended_up_in_errors(worker_outputs_dir, image_path.name)
+
+        def read_rows(path: Path) -> tuple[list[str], list[list[str]]]:
+            if not path.exists():
+                return [], []
+            with path.open("r", encoding="utf-8", newline="") as fh:
+                reader = csv.reader(fh)
+                raw = [row for row in reader if row]
+            if not raw:
+                return [], []
+            return raw[0], raw[1:]
+
+        results_csv = next((worker_outputs_dir / "Results").glob("Results_*.csv"), None)
+        mm_csv = worker_outputs_dir / "Manual" / "MultiMarkedFiles.csv"
+        err_csv = worker_outputs_dir / "Manual" / "ErrorFiles.csv"
+
+        results_header, results_rows = read_rows(results_csv) if results_csv else ([], [])
+        mm_header, mm_rows = read_rows(mm_csv)
+        err_header, err_rows = read_rows(err_csv)
+
+        checked_image = worker_outputs_dir / "CheckedOMRs" / image_path.name
+        error_image = worker_outputs_dir / "Manual" / "ErrorFiles" / image_path.name
+        mm_image = worker_outputs_dir / "Manual" / "MultiMarkedFiles" / image_path.name
+
+        return {
+            "file_name": image_path.name,
+            "index": index,
+            "dynamic_dimensions": dynamic_dimensions,
+            "runtime_config": runtime_config,
+            "ended_in_errors": ended_in_errors,
+            "worker_outputs_dir": str(worker_outputs_dir),
+            "results_header": results_header,
+            "results_rows": results_rows,
+            "mm_header": mm_header,
+            "mm_rows": mm_rows,
+            "err_header": err_header,
+            "err_rows": err_rows,
+            "checked_image": str(checked_image) if checked_image.exists() else None,
+            "error_image": str(error_image) if error_image.exists() else None,
+            "mm_image": str(mm_image) if mm_image.exists() else None,
+            "error": None,
+        }
+    except BaseException as exc:
+        return {
+            "file_name": image_path.name,
+            "index": index,
+            "dynamic_dimensions": None,
+            "runtime_config": None,
+            "ended_in_errors": True,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    finally:
+        _cleanup_runtime_dir(runtime_dir)
 
 
 def _write_non_interactive_config(src: Path, dst: Path) -> None:
@@ -322,8 +517,6 @@ def run_batch_sync(batch_id: str, settings: Settings | None = None) -> None:
     Updates the batch status throughout (``running`` → ``done``/``failed``).
     Safe to call from a ``BackgroundTasks`` task or directly from tests.
     """
-    from main import entry_point_for_args
-
     settings = settings or get_settings()
     lock = _lock_for(batch_id)
     if not lock.acquire(blocking=False):
@@ -376,75 +569,192 @@ def run_batch_sync(batch_id: str, settings: Settings | None = None) -> None:
             settings,
         )
         preprocess_failures: list[str] = []
+        preprocess_worker_errors: list[str] = []
 
         base_config = batches_service.get_json_document(batch_id, "config", settings) or {}
         template_payload = _load_template_payload(batch_root)
         metadata = batches_service.get_batch_metadata(batch_id, settings)
         rotation_degrees = int(metadata.get("rotation_degrees", 0))
+        max_workers = _coerce_max_workers(
+            (base_config.get("outputs") or {}).get("max_workers")
+        )
+
+        base_root = _prepare_runtime_base(batch_root)
+
         dynamic_dimensions_by_file: dict[str, dict[str, int]] = {}
         latest_persisted_config = copy.deepcopy(base_config)
+        latest_index_completed = 0
+        latest_file_name: str | None = None
+        latest_dimensions: dict[str, int] | None = None
+        latest_runtime_config: dict[str, Any] = copy.deepcopy(base_config)
+        aggregated_results_header: list[str] | None = None
+        aggregated_results_rows: list[tuple[int, list[str]]] = []
+        aggregated_mm_header: list[str] | None = None
+        aggregated_mm_rows: list[tuple[int, list[str]]] = []
+        aggregated_err_header: list[str] | None = None
+        aggregated_err_rows: list[tuple[int, list[str]]] = []
 
-        for index, image_path in enumerate(input_images, start=1):
-            if _is_cancel_requested(batch_id, settings):
-                _mark_cancelled(
-                    batch_id,
-                    "Stopped by user before the next image started.",
-                    settings,
-                )
+        def copy_if_present(path_str: str | None, dest_dir: Path) -> None:
+            if not path_str:
                 return
-            dynamic_dimensions = _compute_dynamic_dimensions(
-                image_path, template_payload, rotation_degrees
-            )
-            dynamic_dimensions_by_file[image_path.name] = dynamic_dimensions
-            latest_persisted_config = _merge_dimensions_into_config(
-                base_config, dynamic_dimensions
-            )
-            runtime_dir = _prepare_runtime_dir(
-                batch_root,
-                image_path,
-                latest_persisted_config,
-                index,
-                rotation_degrees,
-            )
+            src = Path(path_str)
+            if not src.exists():
+                return
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dest_dir / src.name)
 
-            args = {
-                "input_paths": [str(runtime_dir)],
-                "output_dir": str(outputs_dir),
-                "debug": False,
-                "autoAlign": False,
-                "setLayout": False,
+        def submit_payload(idx: int, image: Path) -> dict[str, Any]:
+            return {
+                "batch_root": str(batch_root),
+                "outputs_dir": str(outputs_dir),
+                "image_path": str(image),
+                "base_config": base_config,
+                "template_payload": template_payload,
+                "base_root": str(base_root),
+                "rotation_degrees": rotation_degrees,
+                "index": idx,
             }
-            entry_point_for_args(args)
-            _cleanup_runtime_dir(runtime_dir)
-            runtime_dir = None
 
-            if _image_ended_up_in_errors(outputs_dir, image_path.name):
-                preprocess_failures.append(image_path.name)
+        futures = {}
+        next_index = 1
+        image_iter = iter(input_images)
 
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            while len(futures) < max_workers:
+                try:
+                    image = next(image_iter)
+                except StopIteration:
+                    break
+                futures[executor.submit(_process_one_image, submit_payload(next_index, image))] = image
+                next_index += 1
+
+            completed = 0
+            while futures:
+                done, _ = wait(futures.keys(), return_when=FIRST_COMPLETED)
+                for future in done:
+                    image = futures.pop(future)
+                    result = future.result()
+                    completed += 1
+                    file_name = result.get("file_name") or image.name
+                    result_index = int(result.get("index") or 0)
+                    dyn = result.get("dynamic_dimensions") or {}
+                    ended_in_errors = bool(result.get("ended_in_errors", False))
+                    worker_error = result.get("error")
+                    results_header = result.get("results_header") or []
+                    results_rows = result.get("results_rows") or []
+                    mm_header = result.get("mm_header") or []
+                    mm_rows = result.get("mm_rows") or []
+                    err_header = result.get("err_header") or []
+                    err_rows = result.get("err_rows") or []
+
+                    if results_header and aggregated_results_header is None:
+                        aggregated_results_header = list(results_header)
+                    if mm_header and aggregated_mm_header is None:
+                        aggregated_mm_header = list(mm_header)
+                    if err_header and aggregated_err_header is None:
+                        aggregated_err_header = list(err_header)
+                    aggregated_results_rows.extend(
+                        (result_index, row) for row in results_rows
+                    )
+                    aggregated_mm_rows.extend((result_index, row) for row in mm_rows)
+                    aggregated_err_rows.extend((result_index, row) for row in err_rows)
+
+                    copy_if_present(
+                        result.get("checked_image"),
+                        outputs_dir / "CheckedOMRs",
+                    )
+                    copy_if_present(
+                        result.get("error_image"),
+                        outputs_dir / "Manual" / "ErrorFiles",
+                    )
+                    copy_if_present(
+                        result.get("mm_image"),
+                        outputs_dir / "Manual" / "MultiMarkedFiles",
+                    )
+
+                    if isinstance(dyn, dict) and dyn:
+                        dynamic_dimensions_by_file[file_name] = dyn
+                        runtime_config = result.get("runtime_config")
+                        if result_index >= latest_index_completed:
+                            latest_index_completed = result_index
+                            latest_file_name = file_name
+                            latest_dimensions = dyn
+                            if isinstance(runtime_config, dict):
+                                latest_runtime_config = runtime_config
+                    if ended_in_errors:
+                        preprocess_failures.append(file_name)
+                    if worker_error:
+                        preprocess_worker_errors.append(f"{file_name}: {worker_error}")
+
+                    batches_service.update_batch_metadata(
+                        batch_id,
+                        {
+                            "processed_files": completed,
+                            "total_files": len(input_images),
+                            "latest_processed_file": latest_file_name,
+                            "latest_dynamic_dimensions": latest_dimensions,
+                            "dynamic_dimensions_by_file": dynamic_dimensions_by_file,
+                            "preprocess_failures": list(preprocess_failures),
+                        },
+                        settings,
+                    )
+
+                if _is_cancel_requested(batch_id, settings):
+                    _mark_cancelled(
+                        batch_id,
+                        "Stop requested. Running images will finish first.",
+                        settings,
+                    )
+                    return
+
+                while len(futures) < max_workers:
+                    try:
+                        image = next(image_iter)
+                    except StopIteration:
+                        break
+                    futures[executor.submit(_process_one_image, submit_payload(next_index, image))] = image
+                    next_index += 1
+
+        results_dir = outputs_dir / "Results"
+        manual_dir = outputs_dir / "Manual"
+        results_dir.mkdir(parents=True, exist_ok=True)
+        manual_dir.mkdir(parents=True, exist_ok=True)
+        if aggregated_results_header is not None:
+            time_now_hrs = time.strftime("%I%p", time.localtime())
+            path = results_dir / f"Results_{time_now_hrs}.csv"
+            with path.open("w", encoding="utf-8", newline="") as fh:
+                writer = csv.writer(fh, quoting=csv.QUOTE_NONNUMERIC)
+                writer.writerow(aggregated_results_header)
+                writer.writerows(
+                    row for _, row in sorted(aggregated_results_rows, key=lambda item: item[0])
+                )
+        if aggregated_mm_header is not None:
+            path = manual_dir / "MultiMarkedFiles.csv"
+            with path.open("w", encoding="utf-8", newline="") as fh:
+                writer = csv.writer(fh, quoting=csv.QUOTE_NONNUMERIC)
+                writer.writerow(aggregated_mm_header)
+                writer.writerows(
+                    row for _, row in sorted(aggregated_mm_rows, key=lambda item: item[0])
+                )
+        if aggregated_err_header is not None:
+            path = manual_dir / "ErrorFiles.csv"
+            with path.open("w", encoding="utf-8", newline="") as fh:
+                writer = csv.writer(fh, quoting=csv.QUOTE_NONNUMERIC)
+                writer.writerow(aggregated_err_header)
+                writer.writerows(
+                    row for _, row in sorted(aggregated_err_rows, key=lambda item: item[0])
+                )
+
+        shutil.rmtree(outputs_dir / "_workers", ignore_errors=True)
+
+        batches_service.save_json_document(batch_id, "config", latest_runtime_config, settings)
+
+        if preprocess_worker_errors:
             batches_service.update_batch_metadata(
                 batch_id,
-                {
-                    "processed_files": index,
-                    "total_files": len(input_images),
-                    "latest_processed_file": image_path.name,
-                    "latest_dynamic_dimensions": dynamic_dimensions,
-                    "dynamic_dimensions_by_file": dynamic_dimensions_by_file,
-                    "preprocess_failures": list(preprocess_failures),
-                },
+                {"worker_errors": list(preprocess_worker_errors)},
                 settings,
             )
-
-            if _is_cancel_requested(batch_id, settings):
-                _mark_cancelled(
-                    batch_id,
-                    "Stopped by user after the current image finished.",
-                    settings,
-                )
-                return
-
-        batches_service.save_json_document(
-            batch_id, "config", latest_persisted_config, settings
-        )
 
         if preprocess_failures and len(preprocess_failures) == len(input_images):
             batches_service.update_status(
@@ -559,6 +869,7 @@ def _find_error_files_csvs(batch_id: str, settings: Settings) -> list[Path]:
         path
         for manual_dir in outputs.rglob("Manual")
         if manual_dir.is_dir()
+        and "_workers" not in manual_dir.relative_to(outputs).parts
         for path in manual_dir.glob("ErrorFiles*.csv")
     ]
     candidates.sort(key=lambda path: path.stat().st_mtime)
@@ -581,8 +892,50 @@ def _result_row_from_record(record: dict[str, str], status: str = "ok") -> Resul
         score=record.get("score"),
         status=status,
         error_reason=error_reason,
+        qc_flags=[],
+        nr_count=0,
+        nr_percent=0.0,
         responses=responses,
     )
+
+
+def _compute_qc(
+    *,
+    record: dict[str, str],
+    columns: list[str],
+    candidate_regex: str | None,
+) -> tuple[list[str], int, float]:
+    q_columns = [col for col in columns if _QC_Q_COL.match(col or "")]
+    nr_count = 0
+    for col in q_columns:
+        if (record.get(col) or "").strip() == "NR":
+            nr_count += 1
+    q_total = max(1, len(q_columns))
+    nr_percent = nr_count / q_total
+
+    flags: list[str] = []
+    if nr_percent >= 0.70:
+        flags.append("HIGH_NR")
+
+    candidate_column_present = False
+    candidate_value = ""
+    for key in ("CandidateNumber", "candidateNumber", "candidate_number"):
+        if key in record:
+            candidate_column_present = True
+            candidate_value = (record.get(key) or "").strip()
+            break
+
+    should_validate_candidate = candidate_column_present or candidate_regex is not None
+    if should_validate_candidate and candidate_value == "":
+        flags.append("BAD_CANDIDATE")
+    elif should_validate_candidate and candidate_regex:
+        try:
+            if re.fullmatch(candidate_regex, candidate_value) is None:
+                flags.append("BAD_CANDIDATE")
+        except re.error:
+            flags.append("BAD_CANDIDATE")
+
+    return flags, int(nr_count), float(nr_percent)
 
 
 def read_results(batch_id: str, settings: Settings | None = None) -> ResultsPayload:
@@ -598,10 +951,26 @@ def read_results(batch_id: str, settings: Settings | None = None) -> ResultsPayl
     header: list[str] = []
     rows: list[ResultsRow] = []
     seen_error_file_ids: set[str] = set()
+    config_doc = batches_service.get_json_document(batch_id, "config", settings) or {}
+    candidate_regex = None
+    if isinstance(config_doc, dict):
+        outputs = config_doc.get("outputs")
+        if isinstance(outputs, dict):
+            regex_value = outputs.get("candidate_regex")
+            if isinstance(regex_value, str) and regex_value.strip():
+                candidate_regex = regex_value.strip()
 
     if csv_path is not None:
         header, records = _read_csv_records(csv_path)
-        rows.extend(_result_row_from_record(record) for record in records)
+        for record in records:
+            row = _result_row_from_record(record)
+            flags, nr_count, nr_percent = _compute_qc(
+                record=record, columns=header, candidate_regex=candidate_regex
+            )
+            row.qc_flags = flags
+            row.nr_count = nr_count
+            row.nr_percent = nr_percent
+            rows.append(row)
 
     for error_csv in error_csvs:
         error_header, error_records = _read_csv_records(error_csv)
@@ -612,7 +981,14 @@ def read_results(batch_id: str, settings: Settings | None = None) -> ResultsPayl
             if file_id in seen_error_file_ids:
                 continue
             seen_error_file_ids.add(file_id)
-            rows.append(_result_row_from_record(record, status="failed"))
+            row = _result_row_from_record(record, status="failed")
+            flags, nr_count, nr_percent = _compute_qc(
+                record=record, columns=header, candidate_regex=candidate_regex
+            )
+            row.qc_flags = flags
+            row.nr_count = nr_count
+            row.nr_percent = nr_percent
+            rows.append(row)
 
     return ResultsPayload(
         batch_id=batch_id,

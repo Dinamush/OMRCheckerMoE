@@ -24,6 +24,7 @@ from webui.schemas import BatchStatus
 from webui.services import batches as batches_service
 from webui.services.omr import (
     _compute_dynamic_dimensions,
+    _prepare_runtime_base,
     _write_non_interactive_config,
 )
 from webui.settings import get_settings
@@ -96,7 +97,9 @@ def test_upload_and_list_files(
     assert files[0]["size_bytes"] > 0
 
 
-def test_pdf_upload_splits_pages_into_images(client: TestClient) -> None:
+def test_pdf_upload_splits_pages_into_images(
+    client: TestClient, storage_root: Path
+) -> None:
     fitz = pytest.importorskip("fitz")
     batch_id = _create_batch(client, "PDF upload test")
     pdf = fitz.open()
@@ -123,6 +126,29 @@ def test_pdf_upload_splits_pages_into_images(client: TestClient) -> None:
         "sample_page_0001.png",
         "sample_page_0002.png",
     ]
+
+    stale_duplicate = storage_root / batch_id / "inputs" / "sample_page_0001_1.png"
+    stale_duplicate.write_bytes(b"stale")
+
+    response = client.post(
+        f"/api/v1/batches/{batch_id}/files",
+        files=[("files", ("sample.pdf", pdf_bytes, "application/pdf"))],
+    )
+    assert response.status_code == 201, response.text
+    uploaded = response.json()
+    assert [file["name"] for file in uploaded] == [
+        "sample_page_0001.png",
+        "sample_page_0002.png",
+    ]
+
+    response = client.get(f"/api/v1/batches/{batch_id}/files")
+    assert response.status_code == 200
+    files = response.json()
+    assert [file["name"] for file in files] == [
+        "sample_page_0001.png",
+        "sample_page_0002.png",
+    ]
+    assert not stale_duplicate.exists()
 
 
 def test_rejects_unsupported_filetype(client: TestClient) -> None:
@@ -224,6 +250,58 @@ def test_results_include_failed_error_file_rows(
     assert row["error_reason"]
 
 
+def test_results_include_qc_flags_for_high_nr_and_bad_candidate(
+    client: TestClient,
+    storage_root: Path,
+) -> None:
+    batch_id = _create_batch(client, "QC flags")
+    batch_root = storage_root / batch_id
+    (batch_root / "outputs" / "Results").mkdir(parents=True)
+
+    client.put(
+        f"/api/v1/batches/{batch_id}/config",
+        json={"outputs": {"candidate_regex": "^\\d{10}$"}},
+    )
+
+    results_csv = batch_root / "outputs" / "Results" / "Results_11AM.csv"
+    results_csv.write_text(
+        '"file_id","CandidateNumber","q1","q2","q3","q4","q5"\n'
+        '"sheet1.png","","NR","NR","NR","NR","NR"\n',
+        encoding="utf-8",
+    )
+
+    response = client.get(f"/api/v1/batches/{batch_id}/results")
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert len(payload["rows"]) == 1
+    row = payload["rows"][0]
+    assert row["qc_flags"]
+    assert "HIGH_NR" in row["qc_flags"]
+    assert "BAD_CANDIDATE" in row["qc_flags"]
+    assert row["nr_count"] == 5
+    assert row["nr_percent"] >= 0.99
+
+
+def test_results_do_not_flag_missing_candidate_when_not_configured(
+    client: TestClient,
+    storage_root: Path,
+) -> None:
+    batch_id = _create_batch(client, "QC no candidate")
+    batch_root = storage_root / batch_id
+    (batch_root / "outputs" / "Results").mkdir(parents=True)
+    results_csv = batch_root / "outputs" / "Results" / "Results_11AM.csv"
+    results_csv.write_text(
+        '"file_id","q1","q2","q3","q4","q5"\n'
+        '"sheet1.png","A","B","C","D","A"\n',
+        encoding="utf-8",
+    )
+
+    response = client.get(f"/api/v1/batches/{batch_id}/results")
+    assert response.status_code == 200, response.text
+    row = response.json()["rows"][0]
+    assert "BAD_CANDIDATE" not in row["qc_flags"]
+
+
 def test_directory_import(
     client: TestClient, adrian_images: list[Path]
 ) -> None:
@@ -313,6 +391,9 @@ def test_full_process_flow_produces_results(
     assert results["batch_id"] == batch_id
     assert results["generated_csv"] is not None
     assert len(results["rows"]) >= 1
+    assert [row["file_id"] for row in results["rows"]] == [
+        image.name for image in adrian_images
+    ]
     assert "file_id" in results["columns"]
     assert "score" in results["columns"]
 
@@ -370,6 +451,41 @@ def test_staged_config_forces_non_interactive(tmp_path: Path) -> None:
 
     data = json.loads(dst.read_text(encoding="utf-8"))
     assert data["outputs"]["show_image_level"] == 0
+
+
+def test_runtime_base_rebuilds_and_injects_marker_defaults(tmp_path: Path) -> None:
+    batch_root = tmp_path / "batch"
+    batch_root.mkdir()
+    (batch_root / "template.json").write_text(
+        json.dumps(
+            {
+                "preProcessors": [
+                    {
+                        "name": "CropOnMarkers",
+                        "options": {
+                            "relativePath": "omr_marker.jpg",
+                            "markerCorners": [[0, 40, 0, 40]] * 4,
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (batch_root / "omr_marker.jpg").write_bytes(b"marker")
+
+    stale_base = batch_root / "_runtime" / "_base"
+    stale_base.mkdir(parents=True)
+    (stale_base / "template.json").write_text('{"stale": true}', encoding="utf-8")
+
+    base_root = _prepare_runtime_base(batch_root)
+
+    runtime_template = json.loads((base_root / "template.json").read_text(encoding="utf-8"))
+    options = runtime_template["preProcessors"][0]["options"]
+    assert "stale" not in runtime_template
+    assert options["markerSearchPadding"] == 20
+    assert options["fallbackToExpandedMarkerCorners"] is True
+    assert options["max_matching_variation"] == 0.5
 
 
 _MARKER_TEMPLATE = {

@@ -200,25 +200,137 @@ textarea {
 .file-picker:hover { border-color: var(--accent); }
 .file-picker input { display: block; margin: 0 auto 0.5rem; }
 
-.file-list { list-style: none; padding: 0; margin: 0; }
-.file-list li {
-    display: flex;
-    flex-direction: column;
-    gap: 0.65rem;
-    padding: 0.85rem 0;
-    border-bottom: 1px solid var(--panel-border);
-}
-
-.file-meta {
+.batch-files-toolbar {
     display: flex;
     align-items: center;
     gap: 0.75rem;
     flex-wrap: wrap;
+    margin-block: 0.75rem 1rem;
 }
 
-.file-meta .mono {
+.batch-files-toolbar input[type="search"] {
     flex: 1 1 18rem;
-    word-break: break-all;
+    min-width: 0;
+}
+
+.batch-files-shell {
+    display: grid;
+    grid-template-columns: minmax(18rem, 0.34fr) minmax(0, 1fr);
+    gap: 1rem;
+    align-items: start;
+    min-width: 0;
+}
+
+.batch-files-nav,
+.batch-file-preview {
+    min-width: 0;
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    background: #0d1117;
+    padding: 1rem;
+}
+
+.batch-files-nav-head,
+.batch-file-preview-head {
+    align-items: center;
+}
+
+.batch-files-nav-scroll {
+    max-height: min(68vh, 42rem);
+    overflow: auto;
+    padding-right: 0.25rem;
+}
+
+.file-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.file-list-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-width: 0;
+}
+
+.file-list-select {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: 0.65rem 0.75rem;
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    background: #12161c;
+    color: var(--text);
+    text-align: left;
+    cursor: pointer;
+}
+
+.file-list-select:hover,
+.file-list-select.active,
+.file-list-select:focus-visible {
+    border-color: var(--accent);
+    background: rgba(47, 129, 247, 0.12);
+    outline: none;
+}
+
+.file-list-name {
+    overflow-wrap: anywhere;
+}
+
+.file-list-size,
+.file-list-delete {
+    flex-shrink: 0;
+}
+
+.file-list-delete {
+    white-space: nowrap;
+}
+
+.file-list-empty {
+    padding: 0.85rem 0.25rem;
+    color: var(--muted);
+}
+
+.batch-file-preview {
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+}
+
+.batch-file-preview-content {
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+    min-width: 0;
+}
+
+.batch-file-preview-actions {
+    margin: 0;
+}
+
+.batch-file-preview-empty {
+    min-height: 28rem;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: flex-start;
+    gap: 0.35rem;
+    padding: 1rem;
+    border: 1px dashed var(--panel-border);
+    border-radius: 10px;
+    background: #090c10;
+}
+
+.batch-file-preview-empty[hidden],
+.batch-file-preview-content[hidden] {
+    display: none;
 }
 
 .sheet-preview-link {
@@ -614,6 +726,13 @@ textarea {
     line-height: 1.2;
 }
 
+.result-qc {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin-block: 0.35rem;
+}
+
 .result-risk-note {
     margin: 0.85rem 0 0;
     max-width: 52rem;
@@ -649,6 +768,14 @@ textarea {
     }
 
     .result-file-list {
+        max-height: none;
+    }
+
+    .batch-files-shell {
+        grid-template-columns: 1fr;
+    }
+
+    .batch-files-nav-scroll {
         max-height: none;
     }
 }

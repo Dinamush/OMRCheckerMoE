@@ -52,6 +52,8 @@ CONFIG_SCHEMA = {
                 # This option moves multimarked files into a separate folder for manual checking, skipping evaluation
                 "filter_out_multimarked_files": {"type": "boolean"},
                 "multi_mark_equal_delta": {"type": "number", "minimum": 0, "maximum": 1},
+                "max_workers": {"type": "integer", "minimum": 1, "maximum": 32},
+                "candidate_regex": {"type": ["string", "null"]},
             },
         },
     },

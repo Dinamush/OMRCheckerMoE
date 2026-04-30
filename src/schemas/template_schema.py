@@ -92,6 +92,10 @@ TEMPLATE_SCHEMA = {
                                         "apply_erode_subtract": {"type": "boolean"},
                                         "marker_rescale_range": two_positive_numbers,
                                         "marker_rescale_steps": {"type": "number"},
+                                        "markerSearchPadding": {"type": "number"},
+                                        "fallbackToExpandedMarkerCorners": {
+                                            "type": "boolean"
+                                        },
                                         "max_matching_variation": {"type": "number"},
                                         "min_matching_threshold": {"type": "number"},
                                         "relativePath": {"type": "string"},

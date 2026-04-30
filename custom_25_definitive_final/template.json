@@ -102,7 +102,7 @@
         "relativePath": "omr_marker.jpg",
         "sheetToMarkerWidthRatio": 28,
         "min_matching_threshold": 0.5,
-        "max_matching_variation": 0.35,
+        "max_matching_variation": 0.5,
         "marker_rescale_range": [
           90,
           110
@@ -134,6 +134,8 @@
             666
           ]
         ],
+        "markerSearchPadding": 20,
+        "fallbackToExpandedMarkerCorners": true,
         "preserveFullImage": true,
         "referenceMarkerCenters": [
           [

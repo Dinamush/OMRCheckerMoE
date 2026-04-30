@@ -142,6 +142,14 @@ def _next_available_path(directory: Path, filename: str) -> Path:
     return directory / f"{stem}_{counter}{ext}"
 
 
+def _remove_generated_pdf_pages(inputs: Path, stem: str) -> None:
+    """Remove page images previously generated from the same PDF stem."""
+    page_pattern = re.compile(rf"^{re.escape(stem)}_page_\d{{4}}(?:_\d+)?\.png$")
+    for child in inputs.iterdir():
+        if child.is_file() and page_pattern.match(child.name):
+            child.unlink()
+
+
 def _to_batch(settings: Settings, batch_id: str, meta: dict[str, Any]) -> Batch:
     batch_dir = _batch_root(settings, batch_id)
     rotation_degrees = int(meta.get("rotation_degrees", 0))
@@ -353,10 +361,11 @@ def _save_pdf_pages_as_images(inputs: Path, safe_filename: str, data: bytes) -> 
             if pdf.page_count == 0:
                 raise InvalidBatchRequest(f"PDF has no pages: {safe_filename}")
             stem = Path(safe_filename).stem
+            _remove_generated_pdf_pages(inputs, stem)
             for page_index, page in enumerate(pdf, start=1):
                 pixmap = page.get_pixmap(dpi=200, alpha=False)
                 page_name = f"{stem}_page_{page_index:04d}.png"
-                target = _next_available_path(inputs, page_name)
+                target = inputs / page_name
                 pixmap.save(str(target))
                 stored.append(
                     FileRef(name=target.name, size_bytes=target.stat().st_size)

@@ -44,6 +44,12 @@ class CropOnMarkers(ImagePreprocessor):
         self.marker_corners = self._parse_marker_corners(
             marker_ops.get("markerCorners")
         )
+        self.marker_search_padding = max(
+            0, int(marker_ops.get("markerSearchPadding", 20))
+        )
+        self.fallback_to_expanded_marker_corners = bool(
+            marker_ops.get("fallbackToExpandedMarkerCorners", True)
+        )
         self.preserve_full_image = bool(marker_ops.get("preserveFullImage", False))
         self.reference_marker_centers = self._parse_reference_centers(
             marker_ops.get("referenceMarkerCenters")
@@ -104,6 +110,105 @@ class CropOnMarkers(ImagePreprocessor):
             parsed.append((y0, y1, x0, x1))
         return parsed
 
+    @staticmethod
+    def _clip_window(window, height, width):
+        y0, y1, x0, x1 = window
+        y0c = max(0, min(int(y0), height))
+        y1c = max(0, min(int(y1), height))
+        x0c = max(0, min(int(x0), width))
+        x1c = max(0, min(int(x1), width))
+        return y0c, y1c, x0c, x1c
+
+    @classmethod
+    def _expand_window(cls, window, padding, height, width):
+        y0, y1, x0, x1 = window
+        return cls._clip_window(
+            (y0 - padding, y1 + padding, x0 - padding, x1 + padding),
+            height,
+            width,
+        )
+
+    @staticmethod
+    def _window_to_quad(image, window):
+        y0, y1, x0, x1 = window
+        return image[y0:y1, x0:x1], [x0, y0]
+
+    @staticmethod
+    def _quadrant_window(index, height, width):
+        midh, midw = (
+            height // QUADRANT_DIVISION["height_factor"],
+            width // QUADRANT_DIVISION["width_factor"],
+        )
+        windows = {
+            0: (0, midh, 0, midw),
+            1: (0, midh, midw, width),
+            2: (midh, height, 0, midw),
+            3: (midh, height, midw, width),
+        }
+        return windows[index]
+
+    @staticmethod
+    def _match_marker_in_quad(quad, marker):
+        if (
+            quad.size == 0
+            or quad.shape[0] < marker.shape[0]
+            or quad.shape[1] < marker.shape[1]
+        ):
+            return None, None
+        res = cv2.matchTemplate(quad, marker, cv2.TM_CCOEFF_NORMED)
+        return res, float(res.max())
+
+    def getBestMatchInWindows(self, search_windows):
+        """Pick the marker scale that performs best across the corner search windows.
+
+        ``all_max_t`` from a global ``matchTemplate`` can be inflated by
+        non-marker features (filled bubbles, text edges) when the marker
+        template has erode-subtract applied but the image does not. By
+        scoring scales using only the configured corner windows, the chosen
+        baseline is anchored to where the markers actually live.
+
+        Returns ``(best_scale, anchor_max_t)`` where ``anchor_max_t`` is the
+        max of per-corner scores at the chosen scale, or ``(None, 0.0)`` when
+        no scale fits inside every window.
+        """
+        descent_per_step = (
+            self.marker_rescale_range[1] - self.marker_rescale_range[0]
+        ) // self.marker_rescale_steps
+        _h, _w = self.marker.shape[:2]
+        best_scale = None
+        best_aggregate = -1.0
+        best_corner_scores: list[float] = []
+        for r0 in np.arange(
+            self.marker_rescale_range[1],
+            self.marker_rescale_range[0],
+            -1 * descent_per_step,
+        ):
+            scale = float(r0 / 100)
+            if scale == 0.0:
+                continue
+            rescaled_marker = ImageUtils.resize_util_h(
+                self.marker, u_height=int(_h * scale)
+            )
+            corner_scores: list[float] = []
+            for window_image in search_windows:
+                _res, max_t = self._match_marker_in_quad(
+                    window_image, rescaled_marker
+                )
+                if max_t is None:
+                    corner_scores = []
+                    break
+                corner_scores.append(float(max_t))
+            if len(corner_scores) != len(search_windows):
+                continue
+            aggregate = min(corner_scores)
+            if aggregate > best_aggregate:
+                best_aggregate = aggregate
+                best_scale = scale
+                best_corner_scores = corner_scores
+        if best_scale is None or not best_corner_scores:
+            return None, 0.0
+        return best_scale, max(best_corner_scores)
+
     def __str__(self):
         return self.marker_path
 
@@ -129,16 +234,31 @@ class CropOnMarkers(ImagePreprocessor):
         # when provided; otherwise fall back to the classical 50/50 quadrant
         # split.
         quads = {}
+        windows = {}
+        fallback_quads = {}
+        fallback_origins = {}
+        fallback_windows = {}
         h1, w1 = image_eroded_sub.shape[:2]
         if self.marker_corners is not None:
             origins = []
             for idx, (y0, y1, x0, x1) in enumerate(self.marker_corners):
-                y0c = max(0, min(y0, h1))
-                y1c = max(0, min(y1, h1))
-                x0c = max(0, min(x0, w1))
-                x1c = max(0, min(x1, w1))
-                quads[idx] = image_eroded_sub[y0c:y1c, x0c:x1c]
-                origins.append([x0c, y0c])
+                window = self._expand_window(
+                    (y0, y1, x0, x1), self.marker_search_padding, h1, w1
+                )
+                quad, origin = self._window_to_quad(image_eroded_sub, window)
+                quads[idx] = quad
+                windows[idx] = window
+                origins.append(origin)
+                fallback_padding = max(self.marker_search_padding * 2, 40)
+                fallback_window = self._expand_window(
+                    (y0, y1, x0, x1), fallback_padding, h1, w1
+                )
+                fallback_quad, fallback_origin = self._window_to_quad(
+                    image_eroded_sub, fallback_window
+                )
+                fallback_quads[idx] = fallback_quad
+                fallback_origins[idx] = fallback_origin
+                fallback_windows[idx] = fallback_window
         else:
             midh, midw = (
                 h1 // QUADRANT_DIVISION["height_factor"],
@@ -149,13 +269,18 @@ class CropOnMarkers(ImagePreprocessor):
             quads[1] = image_eroded_sub[0:midh, midw:w1]
             quads[2] = image_eroded_sub[midh:h1, 0:midw]
             quads[3] = image_eroded_sub[midh:h1, midw:w1]
+            windows[0] = (0, midh, 0, midw)
+            windows[1] = (0, midh, midw, w1)
+            windows[2] = (midh, h1, 0, midw)
+            windows[3] = (midh, h1, midw, w1)
 
             # Draw Quadlines only for the classical split so the debug image
             # keeps its familiar appearance.
             image_eroded_sub[:, midw : midw + 2] = DEFAULT_WHITE_COLOR
             image_eroded_sub[midh : midh + 2, :] = DEFAULT_WHITE_COLOR
 
-        best_scale, all_max_t = self.getBestMatch(image_eroded_sub)
+        search_windows = [quads[0], quads[1], quads[2], quads[3]]
+        best_scale, anchor_max_t = self.getBestMatchInWindows(search_windows)
         if best_scale is None:
             if config.outputs.show_image_level >= 1:
                 InteractionUtils.show("Quads", image_eroded_sub, config=config)
@@ -165,66 +290,78 @@ class CropOnMarkers(ImagePreprocessor):
             self.marker, u_height=int(self.marker.shape[0] * best_scale)
         )
         _h, w = optimal_marker.shape[:2]
-        centres = []
-        sum_t, max_t = 0, 0
+        centres_by_index: list[list[float] | None] = [None, None, None, None]
+        failed_corners: list[dict] = []
+        sum_t = 0.0
+        successful_corners = 0
+        corner_scores: list[float] = []
         quarter_match_log = "Matching Marker:  "
         for k in range(0, 4):
-            if (
-                quads[k].size == 0
-                or quads[k].shape[0] < optimal_marker.shape[0]
-                or quads[k].shape[1] < optimal_marker.shape[1]
-            ):
+            res, max_t = self._match_marker_in_quad(quads[k], optimal_marker)
+            used_fallback = False
+            if res is None:
                 logger.error(
                     file_path,
                     "\nError: marker search window is smaller than marker template in Quad",
                     k + 1,
                     "\n\t search_window",
                     quads[k].shape[:2],
+                    "\t search_bounds",
+                    windows.get(k),
                     "\t marker_template",
                     optimal_marker.shape[:2],
                     "\n\t Check that config dimensions match template pageDimensions.",
                 )
                 return None
-            res = cv2.matchTemplate(quads[k], optimal_marker, cv2.TM_CCOEFF_NORMED)
-            max_t = res.max()
+            if (
+                (
+                    max_t < self.min_matching_threshold
+                    or abs(anchor_max_t - max_t) >= self.max_matching_variation
+                )
+                and self.marker_corners is not None
+                and self.fallback_to_expanded_marker_corners
+            ):
+                fallback_res, fallback_max_t = self._match_marker_in_quad(
+                    fallback_quads[k], optimal_marker
+                )
+                if (
+                    fallback_res is not None
+                    and fallback_max_t >= self.min_matching_threshold
+                    and abs(anchor_max_t - fallback_max_t)
+                    < self.max_matching_variation
+                    and fallback_max_t >= max_t
+                ):
+                    res = fallback_res
+                    max_t = fallback_max_t
+                    origins[k] = fallback_origins[k]
+                    windows[k] = fallback_windows[k]
+                    used_fallback = True
+            corner_scores.append(round(max_t, 3))
             quarter_match_log += f"Quarter{str(k + 1)}: {str(round(max_t, 3))}\t"
             if (
                 max_t < self.min_matching_threshold
-                or abs(all_max_t - max_t) >= self.max_matching_variation
+                or abs(anchor_max_t - max_t) >= self.max_matching_variation
             ):
-                logger.error(
-                    file_path,
-                    "\nError: No circle found in Quad",
-                    k + 1,
-                    "\n\t min_matching_threshold",
-                    self.min_matching_threshold,
-                    "\t max_matching_variation",
-                    self.max_matching_variation,
-                    "\t max_t",
-                    max_t,
-                    "\t all_max_t",
-                    all_max_t,
+                failed_corners.append(
+                    {
+                        "index": k,
+                        "max_t": max_t,
+                        "search_window_shape": quads[k].shape[:2],
+                        "search_bounds": windows.get(k),
+                        "marker_template_shape": optimal_marker.shape[:2],
+                        "res": res,
+                    }
                 )
-                if config.outputs.show_image_level >= 1:
-                    InteractionUtils.show(
-                        f"No markers: {file_path}",
-                        image_eroded_sub,
-                        0,
-                        config=config,
+                if used_fallback:
+                    quarter_match_log += (
+                        f"Quarter{str(k + 1)} fallback (failed)\t"
                     )
-                    InteractionUtils.show(
-                        f"res_Q{str(k + 1)} ({str(max_t)})",
-                        res,
-                        1,
-                        config=config,
-                    )
-                return None
+                continue
 
             pt = np.argwhere(res == max_t)[0]
             pt = [pt[1], pt[0]]
             pt[0] += origins[k][0]
             pt[1] += origins[k][1]
-            # print(">>",pt)
             image = cv2.rectangle(
                 image,
                 tuple(pt),
@@ -232,7 +369,6 @@ class CropOnMarkers(ImagePreprocessor):
                 MARKER_RECTANGLE_COLOR,
                 DEFAULT_LINE_WIDTH,
             )
-            # display:
             image_eroded_sub = cv2.rectangle(
                 image_eroded_sub,
                 tuple(pt),
@@ -240,13 +376,105 @@ class CropOnMarkers(ImagePreprocessor):
                 ERODE_RECT_COLOR if self.apply_erode_subtract else NORMAL_RECT_COLOR,
                 4,
             )
-            centres.append([pt[0] + w / 2, pt[1] + _h / 2])
+            centres_by_index[k] = [pt[0] + w / 2, pt[1] + _h / 2]
             sum_t += max_t
+            successful_corners += 1
+            if used_fallback:
+                quarter_match_log += f"Quarter{str(k + 1)} fallback\t"
 
+        if failed_corners:
+            extrapolation_possible = (
+                len(failed_corners) == 1
+                and successful_corners == 3
+                and self.preserve_full_image
+                and self.reference_marker_centers is not None
+                and len(self.reference_marker_centers) == 4
+            )
+            if extrapolation_possible:
+                missing_idx = failed_corners[0]["index"]
+                good_indices = [k for k in range(4) if k != missing_idx]
+                src_three = np.array(
+                    [centres_by_index[k] for k in good_indices], dtype=np.float32
+                )
+                dst_three = np.array(
+                    [self.reference_marker_centers[k] for k in good_indices],
+                    dtype=np.float32,
+                )
+                # 3 reference→image correspondences pin down an affine
+                # transform; project the missing reference centre back into
+                # image space to estimate where the failed marker sits.
+                affine = cv2.getAffineTransform(dst_three, src_three)
+                missing_ref = np.array(
+                    [[self.reference_marker_centers[missing_idx]]],
+                    dtype=np.float32,
+                )
+                estimated = cv2.transform(missing_ref, affine)[0, 0]
+                centres_by_index[missing_idx] = [
+                    float(estimated[0]),
+                    float(estimated[1])
+                ]
+                logger.warning(
+                    file_path,
+                    "\nWarning: extrapolated marker for Quad",
+                    missing_idx + 1,
+                    "from 3 detected corners",
+                    "\n\t corner_scores",
+                    corner_scores,
+                    "\t anchor_max_t",
+                    round(anchor_max_t, 3),
+                    "\t estimated_centre",
+                    [round(estimated[0], 1), round(estimated[1], 1)],
+                )
+                quarter_match_log += (
+                    f"Quarter{missing_idx + 1} extrapolated\t"
+                )
+            else:
+                for failure in failed_corners:
+                    logger.error(
+                        file_path,
+                        "\nError: No circle found in Quad",
+                        failure["index"] + 1,
+                        "\n\t min_matching_threshold",
+                        self.min_matching_threshold,
+                        "\t max_matching_variation",
+                        self.max_matching_variation,
+                        "\t max_t",
+                        failure["max_t"],
+                        "\t anchor_max_t",
+                        anchor_max_t,
+                        "\n\t search_window",
+                        failure["search_window_shape"],
+                        "\t search_bounds",
+                        failure["search_bounds"],
+                        "\t marker_template",
+                        failure["marker_template_shape"],
+                        "\n\t corner_scores",
+                        corner_scores,
+                    )
+                if config.outputs.show_image_level >= 1:
+                    InteractionUtils.show(
+                        f"No markers: {file_path}",
+                        image_eroded_sub,
+                        0,
+                        config=config,
+                    )
+                    for failure in failed_corners:
+                        InteractionUtils.show(
+                            f"res_Q{str(failure['index'] + 1)} ({str(failure['max_t'])})",
+                            failure["res"],
+                            1,
+                            config=config,
+                        )
+                return None
+
+        centres = [c for c in centres_by_index if c is not None]
         logger.info(quarter_match_log)
         logger.info(f"Optimal Scale: {best_scale}")
-        # analysis data
-        self.threshold_circles.append(sum_t / 4)
+        # analysis data: average over corners that matched directly (excludes
+        # extrapolated corner from the running threshold so a synthetic point
+        # doesn't pull the per-batch threshold around).
+        if successful_corners:
+            self.threshold_circles.append(sum_t / successful_corners)
 
         if self.preserve_full_image:
             src_pts = np.array(centres, dtype=np.float32)

@@ -14,7 +14,10 @@ const show = (element, message, kind = "info") => {
 const apiUrl = (path) => `/api/v1/batches/${batchId}${path}`
 
 const jsonFetch = async (url, options = {}) => {
-    const response = await fetch(url, options)
+    const response = await fetch(url, {
+        cache: "no-store",
+        ...options,
+    })
     const text = await response.text()
     const data = text ? JSON.parse(text) : {}
     if (!response.ok) {
@@ -33,6 +36,273 @@ const applyPreviewRotation = () => {
     document.querySelectorAll(".sheet-preview-image").forEach((image) => {
         image.style.setProperty("--preview-rotation", `${degrees}deg`)
     })
+}
+
+const fileBrowserState = {
+    files: [],
+    filterQuery: "",
+    selectedFileName: null,
+}
+
+const getFileBrowserElements = () => ({
+    shell: document.querySelector("[data-file-browser]"),
+    list: document.getElementById("file-list"),
+    totalCount: document.getElementById("file-count"),
+    filteredCount: document.getElementById("file-browser-count"),
+    search: document.getElementById("file-search"),
+    previewContent: document.getElementById("file-preview-content"),
+    previewEmpty: document.getElementById("file-preview-empty"),
+    previewName: document.getElementById("selected-file-name"),
+    previewSize: document.getElementById("selected-file-size"),
+    previewOpen: document.getElementById("selected-file-open"),
+    previewDelete: document.getElementById("selected-file-delete"),
+    previewLink: document.getElementById("selected-file-preview-link"),
+    previewImage: document.getElementById("selected-file-preview-image"),
+})
+
+const getFilePreviewUrl = (filename) => apiUrl(`/files/${encodeURIComponent(filename)}/preview`)
+
+const formatFileSize = (sizeBytes) => `${(Number(sizeBytes || 0) / 1024).toFixed(1)} KB`
+
+const getVisibleFiles = () => {
+    const query = fileBrowserState.filterQuery.trim().toLowerCase()
+    if (!query) return fileBrowserState.files
+    return fileBrowserState.files.filter((file) => file.name.toLowerCase().includes(query))
+}
+
+const resolveSelectedFile = (files, preferredName = fileBrowserState.selectedFileName) => {
+    if (!Array.isArray(files) || files.length === 0) return null
+    if (preferredName) {
+        const preferred = files.find((file) => file.name === preferredName)
+        if (preferred) return preferred
+    }
+    return files[0]
+}
+
+const getNeighborFileName = (fileName) => {
+    const index = fileBrowserState.files.findIndex((file) => file.name === fileName)
+    if (index === -1) return fileBrowserState.selectedFileName
+    return fileBrowserState.files[index + 1]?.name || fileBrowserState.files[index - 1]?.name || null
+}
+
+const focusFileButton = (fileName) => {
+    if (!fileName) return
+    const button = Array.from(document.querySelectorAll("[data-file-select]")).find(
+        (element) => element.dataset.fileSelect === fileName,
+    )
+    if (!button) return
+    button.focus({ preventScroll: true })
+    button.scrollIntoView({ block: "nearest", inline: "nearest" })
+}
+
+const openFilePreview = (fileName) => {
+    if (!fileName) return
+    window.open(getFilePreviewUrl(fileName), "_blank", "noopener")
+}
+
+const renderFileNavigator = (visibleFiles, selectedFileName) => {
+    const elements = getFileBrowserElements()
+    if (!elements.list) return
+
+    if (elements.totalCount) {
+        elements.totalCount.textContent = `(${fileBrowserState.files.length})`
+    }
+    if (elements.filteredCount) {
+        elements.filteredCount.textContent = `Showing ${visibleFiles.length} of ${fileBrowserState.files.length}`
+    }
+
+    if (visibleFiles.length === 0) {
+        const query = fileBrowserState.filterQuery.trim()
+        elements.list.innerHTML = `<li class="file-list-empty">${query ? `No files match “${escapeHtml(query)}”.` : "No files uploaded yet."}</li>`
+        return
+    }
+
+    elements.list.innerHTML = visibleFiles
+        .map((file, index) => {
+            const isActive = file.name === selectedFileName
+            return `
+                <li class="file-list-row${isActive ? " active" : ""}" data-file-row data-file-name="${escapeHtml(file.name)}" data-file-size="${file.size_bytes}" data-file-index="${index}">
+                    <button
+                        class="file-list-select${isActive ? " active" : ""}"
+                        type="button"
+                        data-file-select="${escapeHtml(file.name)}"
+                        role="option"
+                        aria-selected="${isActive ? "true" : "false"}">
+                        <span class="mono file-list-name">${escapeHtml(file.name)}</span>
+                        <span class="muted small file-list-size">${formatFileSize(file.size_bytes)}</span>
+                    </button>
+                    <button class="btn danger small file-list-delete" type="button" data-delete-file="${escapeHtml(file.name)}" aria-label="Remove ${escapeHtml(file.name)}">Remove</button>
+                </li>
+            `
+        })
+        .join("")
+}
+
+const renderFilePreview = (selectedFile) => {
+    const elements = getFileBrowserElements()
+    if (!elements.previewContent || !elements.previewEmpty) return
+
+    if (!selectedFile && fileBrowserState.files.length > 0) {
+        selectedFile = fileBrowserState.files[0]
+        fileBrowserState.selectedFileName = selectedFile.name
+    }
+
+    if (!selectedFile) {
+        elements.previewContent.hidden = true
+        elements.previewEmpty.hidden = false
+        const heading = elements.previewEmpty.querySelector("h3")
+        const body = elements.previewEmpty.querySelector("p")
+        if (fileBrowserState.files.length === 0) {
+            if (heading) heading.textContent = "No files uploaded yet."
+            if (body) body.textContent = "Upload images or PDFs to start browsing scans here."
+        } else {
+            if (heading) heading.textContent = "No matching files"
+            if (body) {
+                const query = fileBrowserState.filterQuery.trim()
+                body.textContent = query
+                    ? `Clear “${query}” to show all ${fileBrowserState.files.length} file(s).`
+                    : "Adjust the filter to show files."
+            }
+        }
+        if (elements.previewDelete) {
+            elements.previewDelete.disabled = true
+            delete elements.previewDelete.dataset.deleteFile
+        }
+        if (elements.previewOpen) {
+            elements.previewOpen.setAttribute("href", "#")
+        }
+        if (elements.previewLink) {
+            elements.previewLink.setAttribute("href", "#")
+        }
+        if (elements.previewImage) {
+            elements.previewImage.removeAttribute("src")
+            elements.previewImage.removeAttribute("alt")
+        }
+        return
+    }
+
+    elements.previewContent.hidden = false
+    elements.previewEmpty.hidden = true
+    if (elements.previewName) elements.previewName.textContent = selectedFile.name
+    if (elements.previewSize) elements.previewSize.textContent = formatFileSize(selectedFile.size_bytes)
+
+    const previewUrl = getFilePreviewUrl(selectedFile.name)
+    if (elements.previewOpen) {
+        elements.previewOpen.href = previewUrl
+    }
+    if (elements.previewDelete) {
+        elements.previewDelete.disabled = false
+        elements.previewDelete.dataset.deleteFile = selectedFile.name
+        elements.previewDelete.setAttribute("aria-label", `Remove ${selectedFile.name}`)
+    }
+    if (elements.previewLink) {
+        elements.previewLink.href = previewUrl
+    }
+    if (elements.previewImage) {
+        elements.previewImage.src = previewUrl
+        elements.previewImage.alt = `Preview of ${selectedFile.name}`
+        elements.previewImage.style.setProperty("--preview-rotation", `${getSelectedRotation()}deg`)
+    }
+}
+
+const renderFileBrowser = ({ focusSelected = false } = {}) => {
+    const visibleFiles = getVisibleFiles()
+    const selectedFile = resolveSelectedFile(visibleFiles)
+    fileBrowserState.selectedFileName = selectedFile ? selectedFile.name : null
+    renderFileNavigator(visibleFiles, fileBrowserState.selectedFileName)
+    renderFilePreview(selectedFile)
+    applyPreviewRotation()
+    if (focusSelected && selectedFile) {
+        focusFileButton(selectedFile.name)
+    }
+}
+
+const bootstrapFileBrowser = () => {
+    const elements = getFileBrowserElements()
+    if (!elements.list) return
+
+    const selectButtons = Array.from(elements.list.querySelectorAll("[data-file-select]"))
+    const rows = Array.from(elements.list.querySelectorAll("[data-file-row]"))
+    fileBrowserState.files = (selectButtons.length > 0 ? selectButtons : rows)
+        .map((button) => {
+            const row = button.closest ? button.closest("[data-file-row]") : button
+            const name = button.dataset?.fileSelect || row?.dataset?.fileName
+            if (!name) return null
+            return {
+                name,
+                size_bytes: Number(row?.dataset?.fileSize || row?.querySelector?.("[data-file-size]")?.dataset?.fileSize || 0),
+            }
+        })
+        .filter(Boolean)
+    fileBrowserState.selectedFileName =
+        elements.shell?.dataset.selectedFile ||
+        elements.list.querySelector(".file-list-select.active")?.dataset.fileSelect ||
+        fileBrowserState.files[0]?.name ||
+        null
+    const search = elements.search
+    if (search) {
+        fileBrowserState.filterQuery = search.value || ""
+        search.addEventListener("input", handleFileBrowserSearch)
+    }
+    renderFileBrowser()
+}
+
+const handleFileBrowserSearch = (event) => {
+    const input = event.target.closest("#file-search")
+    if (!input) return
+    fileBrowserState.filterQuery = input.value || ""
+    renderFileBrowser()
+}
+
+const handleFileBrowserSelect = (event) => {
+    const button = event.target.closest("[data-file-select]")
+    if (!button) return
+    event.preventDefault()
+    fileBrowserState.selectedFileName = button.dataset.fileSelect || null
+    renderFileBrowser({ focusSelected: true })
+}
+
+const handleFileBrowserKeyDown = (event) => {
+    const button = event.target.closest("[data-file-select]")
+    const inBrowser = Boolean(event.target.closest("[data-file-browser]")) || event.target === document.body
+    if (!inBrowser && !button) return
+
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        if (!inBrowser) return
+        const visibleFiles = getVisibleFiles()
+        if (!visibleFiles.length) return
+        event.preventDefault()
+        const currentName = button?.dataset.fileSelect || fileBrowserState.selectedFileName || visibleFiles[0].name
+        const currentIndex = visibleFiles.findIndex((file) => file.name === currentName)
+        const baseIndex = currentIndex === -1 ? 0 : currentIndex
+        const nextIndex = Math.min(
+            visibleFiles.length - 1,
+            Math.max(0, baseIndex + (event.key === "ArrowDown" ? 1 : -1)),
+        )
+        fileBrowserState.selectedFileName = visibleFiles[nextIndex].name
+        renderFileBrowser({ focusSelected: true })
+        return
+    }
+
+    if (button && event.key === "Enter") {
+        event.preventDefault()
+        openFilePreview(button.dataset.fileSelect)
+        return
+    }
+
+    if (button && (event.key === " " || event.key === "Spacebar")) {
+        event.preventDefault()
+        fileBrowserState.selectedFileName = button.dataset.fileSelect || null
+        renderFileBrowser({ focusSelected: true })
+        return
+    }
+
+    if (event.target === document.body && event.key === "Enter") {
+        const selected = resolveSelectedFile(getVisibleFiles())
+        if (!selected) return
+        event.preventDefault()
+        openFilePreview(selected.name)
+    }
 }
 
 const updateStatus = (status, lastError, preprocessFailures = []) => {
@@ -93,46 +363,17 @@ const pollStatus = async () => {
     }
 }
 
-const refreshFiles = async () => {
+const refreshFiles = async (preferredSelection = fileBrowserState.selectedFileName) => {
     try {
         const files = await jsonFetch(apiUrl("/files"))
-        const list = document.getElementById("file-list")
-        const count = document.getElementById("file-count")
-        const empty = document.getElementById("no-files-msg")
-        if (count) count.textContent = `(${files.length})`
-        if (!list && files.length) {
-            window.location.reload()
-            return
-        }
-        if (!list) return
-        list.innerHTML = ""
-        files.forEach((file) => {
-            const li = document.createElement("li")
-            const sizeKb = (file.size_bytes / 1024).toFixed(1)
-            const previewUrl = `${apiUrl(`/files/${encodeURIComponent(file.name)}/preview`)}`
-            li.innerHTML = `
-                <a class="sheet-preview-link" target="_blank" rel="noopener">
-                    <img class="sheet-preview-image" loading="lazy" alt="">
-                </a>
-                <div class="file-meta">
-                    <span class="mono"></span>
-                    <span class="muted small">${sizeKb} KB</span>
-                    <button class="btn danger small" type="button" data-delete-file=""></button>
-                </div>
-            `
-            const previewLink = li.querySelector(".sheet-preview-link")
-            const previewImg = li.querySelector(".sheet-preview-image")
-            previewLink.href = previewUrl
-            previewImg.src = previewUrl
-            previewImg.alt = `Preview of ${file.name}`
-            previewImg.style.setProperty("--preview-rotation", `${getSelectedRotation()}deg`)
-            li.querySelector(".mono").textContent = file.name
-            const button = li.querySelector("button")
-            button.dataset.deleteFile = file.name
-            button.textContent = "Remove"
-            list.appendChild(li)
-        })
-        if (empty) empty.hidden = files.length > 0
+        fileBrowserState.files = files
+        const resolvedPreferred =
+            preferredSelection ||
+            fileBrowserState.selectedFileName ||
+            files[0]?.name ||
+            null
+        fileBrowserState.selectedFileName = resolvedPreferred
+        renderFileBrowser()
     } catch (error) {
         console.error(error)
     }
@@ -194,6 +435,13 @@ const getErasureRisk = (column, value) => {
 
 const renderResultCard = (row, responseColumns, index) => {
     const fileId = row.file_id || `File ${index + 1}`
+    const qcFlags = Array.isArray(row.qc_flags) ? row.qc_flags : []
+    const qcPills = qcFlags.length
+        ? `<div class="result-qc">${qcFlags.map((flag) => {
+            const extra = flag === "HIGH_NR" ? ` (${Math.round((row.nr_percent || 0) * 100)}%)` : ""
+            return `<span class="pill status-cancelled">QC ${escapeHtml(flag)}${extra}</span>`
+        }).join("")}</div>`
+        : ""
     if (row.status === "failed") {
         return `
             <article class="result-card" data-result-card="${index}" ${index === 0 ? "" : "hidden"}>
@@ -201,6 +449,7 @@ const renderResultCard = (row, responseColumns, index) => {
                     <div>
                         <h3>${escapeHtml(fileId)}</h3>
                         ${row.input_path ? `<p class="muted small mono">${escapeHtml(row.input_path)}</p>` : ""}
+                        ${qcPills}
                         ${row.error_reason ? `<p class="error small">${escapeHtml(row.error_reason)}</p>` : ""}
                     </div>
                     <span class="pill status-failed">Failed</span>
@@ -246,6 +495,8 @@ const renderResults = (container, data) => {
     const responseColumns = getResponseColumns(columns)
     const tabs = data.rows.map((row, index) => {
         const fileId = row.file_id || `File ${index + 1}`
+        const qcFlags = Array.isArray(row.qc_flags) ? row.qc_flags : []
+        const qcLabel = qcFlags.length ? `<span class="muted small">QC: ${escapeHtml(qcFlags.join(", "))}</span>` : ""
         return `
             <button
                 class="result-file-tab${index === 0 ? " active" : ""}"
@@ -254,6 +505,7 @@ const renderResults = (container, data) => {
                 aria-selected="${index === 0 ? "true" : "false"}"
                 data-result-select="${index}">
                 <span class="mono">${escapeHtml(fileId)}</span>
+                ${qcLabel}
                 ${row.status === "failed" ? '<span class="muted small">Failed</span>' : ""}
                 ${row.status !== "failed" && row.score ? `<span class="muted small">Score: ${escapeHtml(row.score)}</span>` : ""}
             </button>
@@ -1142,13 +1394,16 @@ const handleDeleteFile = async (event) => {
     if (!button) return
     const filename = button.dataset.deleteFile
     if (!window.confirm(`Remove ${filename}?`)) return
+    const preferredSelection = filename === fileBrowserState.selectedFileName
+        ? getNeighborFileName(filename)
+        : fileBrowserState.selectedFileName
     try {
         const response = await fetch(apiUrl(`/files/${encodeURIComponent(filename)}`), { method: "DELETE" })
         if (!response.ok && response.status !== 204) {
             const data = await response.json().catch(() => ({}))
             throw new Error(data.detail || "Delete failed")
         }
-        await refreshFiles()
+        await refreshFiles(preferredSelection)
     } catch (error) {
         window.alert(error.message)
     }
@@ -1306,8 +1561,10 @@ document.addEventListener("DOMContentLoaded", () => {
     if (restartBtn) restartBtn.addEventListener("click", handleRestart)
     const rotationForm = document.getElementById("rotation-form")
     if (rotationForm) rotationForm.addEventListener("change", handleRotationChange)
+    bootstrapFileBrowser()
     applyPreviewRotation()
     document.addEventListener("click", (event) => {
+        handleFileBrowserSelect(event)
         handleDeleteFile(event)
         handleDeleteAsset(event)
         handleResultSelect(event)
@@ -1315,6 +1572,7 @@ document.addEventListener("DOMContentLoaded", () => {
         handleSaveDoc(event)
         handleClearDoc(event)
     })
+    document.addEventListener("keydown", handleFileBrowserKeyDown)
 
     document.querySelectorAll(".json-box").forEach((box) => {
         const savedMode = window.localStorage.getItem(getEditorStorageKey(box))

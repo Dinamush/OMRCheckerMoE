@@ -34,6 +34,7 @@
 
 <section class="panel">
     <h2>Input files</h2>
+    {% set selected_file = files[0] if files else none %}
 
     <form id="upload-form" class="stack">
         <label class="file-picker">
@@ -66,25 +67,115 @@
         <span class="muted small" id="rotation-feedback">Preview matches the selected runtime rotation.</span>
     </form>
 
-    <h3>Files in this batch <span class="muted small" id="file-count">({{ files|length }})</span></h3>
-    {% if files %}
-    <ul class="file-list" id="file-list">
-        {% for file in files %}
-        <li>
-            <a class="sheet-preview-link" href="/api/v1/batches/{{ batch.id }}/files/{{ file.name | urlencode }}/preview" target="_blank" rel="noopener">
-                <img class="sheet-preview-image" src="/api/v1/batches/{{ batch.id }}/files/{{ file.name | urlencode }}/preview" alt="Preview of {{ file.name }}" loading="lazy" style="--preview-rotation: {{ batch.rotation_degrees }}deg" />
-            </a>
-            <div class="file-meta">
-                <span class="mono">{{ file.name }}</span>
-                <span class="muted small">{{ (file.size_bytes / 1024)|round(1) }} KB</span>
-                <button class="btn danger small" type="button" data-delete-file="{{ file.name }}">Remove</button>
+    <div class="batch-files-toolbar">
+        <label class="sr-only" for="file-search">Filter files by name</label>
+        <input id="file-search" type="search" placeholder="Filter files by name" autocomplete="off" />
+        <span class="muted small" id="file-browser-count">Showing {{ files|length if files else 0 }} of {{ files|length }}</span>
+    </div>
+
+    <div class="batch-files-shell" data-file-browser data-selected-file="{{ selected_file.name if selected_file else '' }}">
+        <aside class="batch-files-nav" aria-label="Batch input files">
+            <div class="flex-between batch-files-nav-head">
+                <h3>File navigator</h3>
+                <span class="muted small" id="file-count">({{ files|length }})</span>
             </div>
-        </li>
-        {% endfor %}
-    </ul>
-    {% else %}
-    <p class="muted" id="no-files-msg">No files uploaded yet.</p>
-    {% endif %}
+            <div class="batch-files-nav-scroll">
+                <ul class="file-list" id="file-list" role="listbox" aria-label="Batch input files">
+                    {% for file in files %}
+                    <li class="file-list-row{% if loop.first %} active{% endif %}" data-file-row data-file-name="{{ file.name }}" data-file-size="{{ file.size_bytes }}" data-file-index="{{ loop.index0 }}">
+                        <button
+                            class="file-list-select{% if loop.first %} active{% endif %}"
+                            type="button"
+                            data-file-select="{{ file.name }}"
+                            role="option"
+                            aria-selected="{% if loop.first %}true{% else %}false{% endif %}">
+                            <span class="mono file-list-name">{{ file.name }}</span>
+                            <span class="muted small file-list-size">{{ (file.size_bytes / 1024)|round(1) }} KB</span>
+                        </button>
+                        <button class="btn danger small file-list-delete" type="button" data-delete-file="{{ file.name }}" aria-label="Remove {{ file.name }}">Remove</button>
+                    </li>
+                    {% endfor %}
+                </ul>
+            </div>
+        </aside>
+
+        <article class="batch-file-preview" aria-live="polite">
+            {% if selected_file %}
+            <div id="file-preview-content" class="batch-file-preview-content">
+                <div class="flex-between batch-file-preview-head">
+                    <div>
+                        <h3 id="selected-file-name">{{ selected_file.name }}</h3>
+                        <p id="selected-file-size" class="muted small mono">{{ (selected_file.size_bytes / 1024)|round(1) }} KB</p>
+                    </div>
+                    <div class="actions batch-file-preview-actions">
+                        <a
+                            id="selected-file-open"
+                            class="btn small"
+                            href="/api/v1/batches/{{ batch.id }}/files/{{ selected_file.name | urlencode }}/preview"
+                            target="_blank"
+                            rel="noopener">
+                            Open full preview
+                        </a>
+                        <button
+                            id="selected-file-delete"
+                            class="btn danger small"
+                            type="button"
+                            data-delete-file="{{ selected_file.name }}"
+                            aria-label="Remove {{ selected_file.name }}">
+                            Remove
+                        </button>
+                    </div>
+                </div>
+                <a
+                    id="selected-file-preview-link"
+                    class="sheet-preview-link"
+                    href="/api/v1/batches/{{ batch.id }}/files/{{ selected_file.name | urlencode }}/preview"
+                    target="_blank"
+                    rel="noopener">
+                    <img
+                        id="selected-file-preview-image"
+                        class="sheet-preview-image"
+                        src="/api/v1/batches/{{ batch.id }}/files/{{ selected_file.name | urlencode }}/preview"
+                        alt="Preview of {{ selected_file.name }}"
+                        loading="lazy"
+                        style="--preview-rotation: {{ batch.rotation_degrees }}deg" />
+                </a>
+                <p id="file-preview-hint" class="muted small">Use the search box or arrow keys to move through files. Enter opens the full preview.</p>
+            </div>
+            <div id="file-preview-empty" class="batch-file-preview-empty" {% if files %}hidden{% endif %}>
+                <h3>No files uploaded yet.</h3>
+                <p class="muted small">Upload images or PDFs to start browsing scans here.</p>
+            </div>
+            {% else %}
+            <div id="file-preview-content" class="batch-file-preview-content" hidden>
+                <div class="flex-between batch-file-preview-head">
+                    <div>
+                        <h3 id="selected-file-name"></h3>
+                        <p id="selected-file-size" class="muted small mono"></p>
+                    </div>
+                    <div class="actions batch-file-preview-actions">
+                        <a id="selected-file-open" class="btn small" href="#" target="_blank" rel="noopener">Open full preview</a>
+                        <button id="selected-file-delete" class="btn danger small" type="button" disabled>Remove</button>
+                    </div>
+                </div>
+                <a id="selected-file-preview-link" class="sheet-preview-link" href="#" target="_blank" rel="noopener">
+                    <img
+                        id="selected-file-preview-image"
+                        class="sheet-preview-image"
+                        src=""
+                        alt=""
+                        loading="lazy"
+                        style="--preview-rotation: {{ batch.rotation_degrees }}deg" />
+                </a>
+                <p id="file-preview-hint" class="muted small">Use the search box or arrow keys to move through files. Enter opens the full preview.</p>
+            </div>
+            <div id="file-preview-empty" class="batch-file-preview-empty">
+                <h3>No files uploaded yet.</h3>
+                <p class="muted small">Upload images or PDFs to start browsing scans here.</p>
+            </div>
+            {% endif %}
+        </article>
+    </div>
 </section>
 
 <section class="panel">
@@ -186,6 +277,9 @@
                     aria-selected="{% if loop.first %}true{% else %}false{% endif %}"
                     data-result-select="{{ loop.index0 }}">
                     <span class="mono">{{ row.file_id or ("File " ~ loop.index) }}</span>
+                    {% if row.qc_flags %}
+                    <span class="muted small">QC: {{ row.qc_flags|join(", ") }}</span>
+                    {% endif %}
                     {% if row.status == "failed" %}
                     <span class="muted small">Failed</span>
                     {% elif row.score %}
@@ -201,6 +295,13 @@
                         <div>
                             <h3>{{ row.file_id or ("File " ~ loop.index) }}</h3>
                             {% if row.input_path %}<p class="muted small mono">{{ row.input_path }}</p>{% endif %}
+                            {% if row.qc_flags %}
+                            <div class="result-qc">
+                                {% for flag in row.qc_flags %}
+                                <span class="pill status-cancelled">QC {{ flag }}{% if flag == "HIGH_NR" %} ({{ (row.nr_percent * 100)|round(0) }}%){% endif %}</span>
+                                {% endfor %}
+                            </div>
+                            {% endif %}
                             {% if row.status == "failed" and row.error_reason %}
                             <p class="error small">{{ row.error_reason }}</p>
                             {% endif %}

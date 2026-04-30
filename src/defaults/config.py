@@ -30,6 +30,8 @@ CONFIG_DEFAULTS = DotMap(
             "save_detections": True,
             "filter_out_multimarked_files": False,
             "multi_mark_equal_delta": 0.06,
+            "max_workers": 4,
+            "candidate_regex": None,
         },
     },
     _dynamic=False,
