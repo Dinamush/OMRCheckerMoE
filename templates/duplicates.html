@@ -45,7 +45,7 @@
 
         <section id="resultsSection" class="hidden">
             <h2 class="section-title">Results</h2>
-            <p class="help-text">Each row has a <strong>Keep</strong> box (checked = keep the file). By default one file per group stays checked; turn on more if they are not duplicates and you want to keep several. Unchecked rows are deleted when you confirm. Recognized video types show a short preview frame (browser-dependent).</p>
+            <p class="help-text">Each row has a <strong>Keep</strong> box (checked = keep the file). By default one file per group stays checked; turn on more if they are not duplicates and you want to keep several. Unchecked rows are deleted when you confirm. Recognized video types show a still frame from a few seconds into the file (not the very start) to avoid black intros; depends on browser and codec.</p>
             <div id="resultsTableWrap"></div>
             <button type="button" class="btn-danger" id="btnDelete">Delete unchecked files</button>
         </section>
@@ -90,6 +90,59 @@
         return /\.(mp4|webm|mkv|mov|avi|m4v|wmv|flv|mpeg|mpg|3gp|ogv)$/i.test(name || '');
     }
 
+    /** Seconds to seek for thumbnail: past typical black leaders; clamped to duration. */
+    function dupThumbOffsetSec(duration) {
+        if (!Number.isFinite(duration) || duration <= 0) {
+            return null;
+        }
+        if (duration === Infinity) {
+            return 10;
+        }
+        if (duration < 0.15) {
+            return 0;
+        }
+        if (duration < 1) {
+            return Math.min(Math.max(0.05, duration / 2), duration - 0.05);
+        }
+        var t = Math.min(Math.max(3, duration * 0.08), duration - 0.25);
+        if (t <= 0.05) {
+            return Math.min(Math.max(0.05, duration * 0.15), duration - 0.05);
+        }
+        return t;
+    }
+
+    function setupDupThumbSeek(video) {
+        video.addEventListener('loadedmetadata', function onLoadedMeta() {
+            video.removeEventListener('loadedmetadata', onLoadedMeta);
+            var t = dupThumbOffsetSec(video.duration);
+            var settled = false;
+            function afterSeek() {
+                if (settled) {
+                    return;
+                }
+                settled = true;
+                video.pause();
+            }
+            if (t == null || t <= 0) {
+                afterSeek();
+                return;
+            }
+            video.addEventListener('seeked', afterSeek, { once: true });
+            try {
+                video.currentTime = t;
+            } catch (err) {
+                video.removeEventListener('seeked', afterSeek);
+                afterSeek();
+                return;
+            }
+            setTimeout(function () {
+                if (!settled && !video.seeking) {
+                    afterSeek();
+                }
+            }, 80);
+        });
+    }
+
     function renderGroups(groups) {
         resultsWrap.innerHTML = '';
         if (!groups.length) {
@@ -131,7 +184,7 @@
                 let previewCell;
                 if (isVideoFileName(f.name)) {
                     const prevUrl = window.location.origin + '/api/duplicates/preview-file?path=' +
-                        encodeURIComponent(f.path) + '#t=0.1';
+                        encodeURIComponent(f.path);
                     previewCell =
                         '<td class="dup-preview-cell">' +
                         '<video class="dup-thumb" muted playsinline preload="metadata" loading="lazy" ' +
@@ -150,6 +203,7 @@
                 tbody.appendChild(tr);
                 const vid = tr.querySelector('video.dup-thumb');
                 if (vid) {
+                    setupDupThumbSeek(vid);
                     vid.addEventListener('error', function () {
                         const span = document.createElement('span');
                         span.className = 'dup-preview-placeholder';
