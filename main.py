@@ -112,6 +112,17 @@ def ensure_download_dir(directory: str) -> None:
         logging.error(f"Failed to create download directory '{directory}': {e}")
         raise
 
+def _selenium_headless_after_embedded_login() -> bool:
+    """
+    After site login inside pywebview, a visible Chrome window would cover SHUCK3R and block
+    the menu (and feels like it replaced the app). Run automation headless unless opted in.
+    """
+    show = os.environ.get("HAMSTER_SHOW_SELENIUM", "").strip().lower()
+    if show in ("1", "true", "yes"):
+        return False
+    return True
+
+
 def setup_chrome_driver(headless: bool = False) -> webdriver.Chrome:
     """Set up Chrome WebDriver with webdriver-manager."""
     options = Options()
@@ -711,7 +722,13 @@ def xhamster_workflow(favorites_url: str, download_dir: str, headless: bool, log
         use_embedded = webview_login_bridge.is_active() and webview_login_bridge.embedded_login_env_enabled()
         if use_embedded:
             webview_login_bridge.begin_embedded_login(login_url, cookie_file)
-            driver = setup_chrome_driver(headless)
+            scrape_headless = _selenium_headless_after_embedded_login()
+            if scrape_headless:
+                logging.info(
+                    "Selenium runs headless after in-app login so Chrome does not cover SHUCK3R "
+                    "(set HAMSTER_SHOW_SELENIUM=1 for a visible automation window)."
+                )
+            driver = setup_chrome_driver(scrape_headless)
             load_netscape_cookies_into_driver(driver, cookie_file, "https://xhamster.com/")
         else:
             driver = setup_chrome_driver(headless)

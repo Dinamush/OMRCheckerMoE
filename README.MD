@@ -61,6 +61,8 @@ Starts the API on **loopback** and opens the UI in an **embedded window** (pyweb
 
 When you start a download, the **same window** navigates to the site so you can **log in there**; use menu **SHUCK3R → Done logging in — continue download** when finished (cookies are saved for yt-dlp / Selenium). Set **`HAMSTER_EMBEDDED_LOGIN=0`** to use the old separate Chrome login instead.
 
+For **xHamster**, after that in-app login step, Selenium Chrome runs **headless** by default so a full Chrome window does not cover the SHUCK3R window. Set **`HAMSTER_SHOW_SELENIUM=1`** if you want a visible Chrome window while it scrapes.
+
 - **`HAMSTER_EXTERNAL_BROWSER=1`** — use your **default browser** instead and keep a terminal open (useful for debugging).
 - **`HAMSTER_HOST`** / **`HAMSTER_PORT`** — same as above.
 

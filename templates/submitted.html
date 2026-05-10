@@ -18,6 +18,9 @@
                 {% if embedded_login %}
                 <li>The app navigates to the site — sign in there</li>
                 <li>Use menu <strong>SHUCK3R → Done logging in — continue download</strong> when you are signed in</li>
+                {% if site == 'xhamster' %}
+                <li>For xHamster, Chrome automation then runs <strong>in the background</strong> so it does not cover this window</li>
+                {% endif %}
                 {% else %}
                 <li>A Chrome window will open for you to log in</li>
                 <li>After logging in, confirm in the terminal or browser flow as prompted</li>
