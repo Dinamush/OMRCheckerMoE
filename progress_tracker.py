@@ -312,10 +312,20 @@ class ProgressTracker:
 # Global tracker instances (one per session)
 _trackers: Dict[str, ProgressTracker] = {}
 
-def get_tracker(session_id: str) -> ProgressTracker:
-    """Get or create a progress tracker for a session"""
+_default_log_dir: str = "logs"
+
+
+def set_default_log_dir(log_dir: str) -> None:
+    """Called from main at startup so progress JSON/logs use the configured log_dir (absolute)."""
+    global _default_log_dir
+    _default_log_dir = log_dir
+
+
+def get_tracker(session_id: str, log_dir: Optional[str] = None) -> ProgressTracker:
+    """Get or create a progress tracker for a session."""
+    ld = log_dir if log_dir is not None else _default_log_dir
     if session_id not in _trackers:
-        _trackers[session_id] = ProgressTracker(session_id)
+        _trackers[session_id] = ProgressTracker(session_id, log_dir=ld)
     return _trackers[session_id]
 
 def cleanup_tracker(session_id: str):

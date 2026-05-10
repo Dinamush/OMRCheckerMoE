@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{% block title %}Hamster Scraper{% endblock %}</title>
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="/static/style.css">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -49,7 +50,7 @@
                     <h2 id="footer-tech" class="site-footer-heading">Running the server</h2>
                     <ul class="site-footer-list">
                         <li>Start with <code class="site-footer-code">python main.py</code> from the project folder (default UI port is shown in the terminal).</li>
-                        <li>Paths in the duplicate checker are resolved on the machine where the server runs—not in your browser.</li>
+                        <li>Default downloads/logs live under your OS user profile (e.g. Windows <code>%LOCALAPPDATA%\HamsterScraper</code>), not next to the app install.</li>
                         <li>For issues, check application logs and the download folder you configured.</li>
                     </ul>
                 </section>

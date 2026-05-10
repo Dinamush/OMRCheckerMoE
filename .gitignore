@@ -12,6 +12,12 @@ video_downloader.log
 logs/
 downloaded_videos/
 downloads/
+build/
+dist/
+
+# PyInstaller output (see build_windows.ps1)
+release/HamsterScraper.exe
+release/HamsterScraperWebView.exe
 
 # Optional Cursor ui-ux-pro-max skill bundle (install under .shared/ — see .shared/README.md)
 .shared/ui-ux-pro-max/

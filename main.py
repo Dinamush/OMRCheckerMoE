@@ -4,6 +4,8 @@ Unified Video Downloader - FastAPI Application
 Download favorites from PornHub and xHamster via a web UI.
 """
 
+from __future__ import annotations
+
 import os
 import logging
 import mimetypes
@@ -14,7 +16,7 @@ import re
 from pathlib import Path
 from typing import List, Optional, Tuple, Set
 from fastapi import FastAPI, Request, BackgroundTasks, Form, HTTPException, Query
-from fastapi.responses import RedirectResponse, FileResponse
+from fastapi.responses import RedirectResponse, FileResponse, Response
 from pydantic import BaseModel, Field
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
@@ -32,7 +34,7 @@ from urllib.parse import urljoin
 from webdriver_manager.chrome import ChromeDriverManager
 import yt_dlp
 import requests
-from progress_tracker import get_tracker, cleanup_tracker
+from paths import get_resource_root, get_user_data_dir
 from duplicate_finder import (
     resolve_scan_directory,
     resolve_deletable_file,
@@ -43,22 +45,24 @@ from duplicate_finder import (
 
 # ----------------------------- Configuration ----------------------------- #
 
+RESOURCE_ROOT = get_resource_root()
+USER_DATA_DIR = get_user_data_dir()
+USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
+LOG_DIR = str((USER_DATA_DIR / "logs").resolve())
+DOWNLOAD_DIR = str((USER_DATA_DIR / "downloads").resolve())
+Path(LOG_DIR).mkdir(parents=True, exist_ok=True)
+Path(DOWNLOAD_DIR).mkdir(parents=True, exist_ok=True)
+
+from progress_tracker import get_tracker, cleanup_tracker, set_default_log_dir
+
+set_default_log_dir(LOG_DIR)
+
 app = FastAPI(title="Unified Video Downloader", description="Download videos from PornHub and xHamster")
 
-# Absolute path for template and static directories
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
-app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
+templates = Jinja2Templates(directory=str(RESOURCE_ROOT / "templates"))
+app.mount("/static", StaticFiles(directory=str(RESOURCE_ROOT / "static")), name="static")
 
-# Directory to store logs
-LOG_DIR = "logs"
-os.makedirs(LOG_DIR, exist_ok=True)
-
-# Directory to store downloaded videos
-DOWNLOAD_DIR = "downloads"
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-
-DOWNLOADS_ROOT_RESOLVED = str((Path(BASE_DIR) / DOWNLOAD_DIR).resolve())
+DOWNLOADS_ROOT_RESOLVED = str((USER_DATA_DIR / "downloads").resolve())
 
 # Allowed suffixes for duplicate-checker inline video preview (same validation as path checks).
 DUPLICATE_PREVIEW_VIDEO_EXTENSIONS = frozenset({
@@ -826,6 +830,16 @@ def xhamster_workflow(favorites_url: str, download_dir: str, headless: bool, log
 
 # ----------------------------- FastAPI Routes ----------------------------- #
 
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon_ico():
+    """Browsers request /favicon.ico by default; serve SVG so logs stay clean."""
+    icon = RESOURCE_ROOT / "static" / "favicon.svg"
+    if icon.is_file():
+        return FileResponse(str(icon), media_type="image/svg+xml")
+    return Response(status_code=204)
+
+
 @app.get("/")
 def read_form(request: Request):
     """Display the main form."""
@@ -928,7 +942,7 @@ def duplicates_page(request: Request):
 @app.post("/api/duplicates/scan")
 def api_duplicates_scan(body: DuplicateScanBody):
     try:
-        root = resolve_scan_directory(body.directory, Path(BASE_DIR), DOWNLOAD_DIR)
+        root = resolve_scan_directory(body.directory, USER_DATA_DIR, "downloads")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     files = iter_files(root, body.recursive)
@@ -977,12 +991,25 @@ def api_duplicates_delete(body: DuplicateDeleteBody):
 
 if __name__ == "__main__":
     try:
-        from check_requirements import check_and_update_requirements
-        req_path = os.path.join(BASE_DIR, "requirements.txt")
-        if not check_and_update_requirements(req_path):
-            print("Warning: some dependencies could not be updated. Continuing anyway.")
+        import sys
+
+        if getattr(sys, "frozen", False):
+            from paths import ensure_runtime_cwd
+
+            ensure_runtime_cwd()
+
+        if not getattr(sys, "frozen", False):
+            from check_requirements import check_and_update_requirements
+
+            req_path = os.path.join(str(RESOURCE_ROOT), "requirements.txt")
+            if os.path.isfile(req_path) and not check_and_update_requirements(req_path):
+                print("Warning: some dependencies could not be updated. Continuing anyway.")
+
         import uvicorn
-        uvicorn.run(app, host="0.0.0.0", port=8001)
+
+        host = os.environ.get("HAMSTER_HOST", "0.0.0.0")
+        port = int(os.environ.get("HAMSTER_PORT", "8001"))
+        uvicorn.run(app, host=host, port=port)
     except Exception as e:
         import traceback
         traceback.print_exc()

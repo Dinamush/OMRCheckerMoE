@@ -1,0 +1,2 @@
+# Optional: PyInstaller only (install after requirements.txt — includes pywebview there)
+pyinstaller>=6.0

@@ -9,6 +9,7 @@ Web app to download videos from your **PornHub** and **xHamster** favorites. You
 - **Python 3.8+**
 - **Chrome** (installed for Selenium/automation)
 - **ChromeDriver** is installed automatically via `webdriver-manager` when you run the app
+- **WebView2** (for the desktop app window on Windows — usually already installed on Windows 11)
 
 ---
 
@@ -45,6 +46,67 @@ The server starts at **http://0.0.0.0:8001** (all interfaces). Open in your brow
 
 Leave the terminal open while you use the app.
 
+### Bind address and port (`python main.py`)
+
+- **`HAMSTER_HOST`** — default `0.0.0.0` (all interfaces). Use `127.0.0.1` if you only want local access.
+- **`HAMSTER_PORT`** — default `8001`.
+
+Example (local only): `set HAMSTER_HOST=127.0.0.1` then `python main.py`.
+
+Logs and downloads use a **per-user data folder** (same for source and the `.exe`): Windows **`%LOCALAPPDATA%\HamsterScraper`** (`downloads\`, `logs\`), macOS **`~/Library/Application Support/HamsterScraper`**, Linux **`~/.local/share/hamster_scraper`**. Set **`HAMSTER_USER_DATA`** to force a different root.
+
+### Desktop launcher (`python launcher.py`)
+
+Starts the API on **loopback** and opens the UI in an **embedded window** (pywebview / Edge WebView2), not a separate browser tab.
+
+- **`HAMSTER_EXTERNAL_BROWSER=1`** — use your **default browser** instead and keep a terminal open (useful for debugging).
+- **`HAMSTER_HOST`** / **`HAMSTER_PORT`** — same as above.
+
+The packaged **`HamsterScraper.exe`** uses this launcher with **no console window**. If startup fails, check **`hamster_scraper_error.log`** inside your **`HAMSTER_USER_DATA`** folder (default: `%LOCALAPPDATA%\HamsterScraper` on Windows); a message box may also appear.
+
+---
+
+## Building a Windows executable
+
+The default build is a **single portable `release/HamsterScraper.exe`** (one-file PyInstaller), so the repo root stays source-only.
+
+1. Install runtime and build deps:
+
+   ```powershell
+   pip install -r requirements.txt
+   pip install -r requirements-build.txt
+   ```
+
+2. From the **project root**:
+
+   ```powershell
+   .\build_windows.ps1
+   ```
+
+   When it finishes, run **`.\release\HamsterScraper.exe`**. The app opens in **its own window**. Videos and logs go under **your user profile** (see above), not next to the exe. Startup errors are written to **`hamster_scraper_error.log`** in that same user-data folder.
+
+   Equivalent manual command:
+
+   ```powershell
+   pyinstaller hamster_scraper.spec --distpath ./release --workpath build/pyinstaller --noconfirm
+   ```
+
+3. Optional second exe (**`HamsterScraperWebView.exe`**) — same embedded UI as the main build; only use **`hamster_scraper_webview.spec`** if you want a separate artifact name.
+
+   ```powershell
+   Remove-Item -Force ./release/HamsterScraperWebView.exe -ErrorAction SilentlyContinue
+   pyinstaller hamster_scraper_webview.spec --distpath ./release --workpath build/pyinstaller_webview --noconfirm
+   ```
+
+**Notes:**
+
+- When frozen, the launcher switches the working directory to your **user-data** folder so paths behave consistently.
+- The exe itself can live anywhere (Desktop, `release\`, etc.); data still goes under the **per-user** paths above.
+- **Chrome** must still be installed for downloads; PyInstaller does not bundle it.
+- First builds may hit missing modules; add names to `hiddenimports` in the `.spec` file and rebuild.
+- The bundled app skips `pip` dependency checks at startup.
+- **`build/`** is gitignored; **`release/*.exe`** is gitignored. The **`release/`** folder is kept with **`.gitkeep`** so the path exists in fresh clones.
+
 ---
 
 ## How to use
@@ -74,17 +136,13 @@ Leave the terminal open while you use the app.
    - **Start New Download** – return to the form
 
 7. **Where files go**  
-   Videos are saved under the project folder in:
+   Default **`downloads`** and **`logs`** are under your **user profile**, not the repo:
 
-   ```
-   downloads/
-   ```
+   - **Windows:** `%LOCALAPPDATA%\HamsterScraper\downloads` and `...\logs`
+   - **macOS:** `~/Library/Application Support/HamsterScraper/`
+   - **Linux:** `~/.local/share/hamster_scraper/`  
 
-   Logs and progress data are under:
-
-   ```
-   logs/
-   ```
+   Override the root with **`HAMSTER_USER_DATA`** (absolute path).
 
 ---
 
@@ -92,10 +150,18 @@ Leave the terminal open while you use the app.
 
 ```
 hamster_scraper/
-├── main.py              # Entry point: run this to start the server
+├── main.py              # Entry point: `python main.py` starts the server
+├── launcher.py          # Desktop: loopback + default browser
+├── launcher_webview.py  # Thin wrapper around launcher (embedded window)
+├── paths.py             # RESOURCE_ROOT + per-user data dir (LOCALAPPDATA etc.)
 ├── progress_tracker.py  # Used by main.py for download progress
 ├── duplicate_finder.py  # Duplicate grouping logic (duplicate checker UI)
 ├── requirements.txt     # Python dependencies
+├── requirements-build.txt  # pyinstaller, pywebview (optional builds)
+├── release/             # Build output: HamsterScraper.exe (gitignored); .gitkeep tracked
+├── build_windows.ps1    # Builds release/HamsterScraper.exe
+├── hamster_scraper.spec    # PyInstaller one-file spec (browser launcher)
+├── hamster_scraper_webview.spec  # PyInstaller one-file spec (webview)
 ├── templates/           # HTML (Jinja); extends base.html where noted
 │   ├── base.html
 │   ├── index.html
@@ -104,12 +170,12 @@ hamster_scraper/
 ├── static/              # CSS (style.css), assets
 ├── tests/               # e.g. test_duplicate_finder.py
 ├── .shared/             # Optional local tools only (see .shared/README.md)
-├── logs/                # Created at runtime (logs, progress JSON)
-├── downloads/           # Created at runtime (downloaded videos)
+├── logs/                # Gitignored; often unused — defaults go to user profile (see below)
+├── downloads/           # Gitignored; same — app uses %LOCALAPPDATA%\HamsterScraper\downloads by default
 └── archive/             # Old/standalone scripts – not used by main.py
 ```
 
-Only `main.py`, `progress_tracker.py`, `duplicate_finder.py`, `templates/`, and `static/` are required for the web app. The `archive/` folder contains legacy scripts and is not used by the running system.
+Only `main.py`, `paths.py`, `progress_tracker.py`, `duplicate_finder.py`, `templates/`, and `static/` are required for the web app. The `archive/` folder contains legacy scripts and is not used by the running system.
 
 ---
 
@@ -128,6 +194,6 @@ In the terminal where you ran `python main.py`, press **Ctrl+C**.
 ## If something goes wrong
 
 - **“Press Enter to exit”** – the app prints the error and waits; read the traceback in the terminal.
-- **Port 8001 in use** – close the other app using 8001 or change the port in `main.py` (last line: `uvicorn.run(app, host="0.0.0.0", port=8001)`).
+- **Port 8001 in use** – close the other app using that port or set **`HAMSTER_PORT`** (e.g. `set HAMSTER_PORT=8002` before `python main.py` or `python launcher.py`).
 - **Chrome/ChromeDriver issues** – ensure Chrome is installed and that no other automation is blocking it. ChromeDriver is auto-downloaded on first run.
 - **Login required** – both sites need you to be logged in (in the window the app opens) so it can see your favorites.
