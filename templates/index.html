@@ -1,19 +1,10 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Unified Video Downloader</title>
-    <link rel="stylesheet" href="/static/style.css">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-</head>
-<body>
-    <main class="container">
+{% extends "base.html" %}
+{% block title %}Unified Video Downloader · Hamster Scraper{% endblock %}
+{% block content %}
+        <p class="page-eyebrow">Local utilities</p>
         <h1>Unified Video Downloader</h1>
         <p class="subtitle">Download videos from PornHub and xHamster</p>
-        
+
         <form action="/download" method="post" id="downloadForm">
             <div class="form-group">
                 <label>Select Site:</label>
@@ -48,11 +39,8 @@
             <button type="submit">Start Download</button>
         </form>
 
-        <p class="subtitle" style="margin-top: 28px;">
-            <a href="/duplicates" class="nav-link">Duplicate file checker</a>
+        <p class="subtitle subtitle-push">
+            <a href="/duplicates" class="link-accent">Duplicate file checker</a>
             — find similar filenames in any folder you choose and remove extras.
         </p>
-    </main>
-
-</body>
-</html>
+{% endblock %}

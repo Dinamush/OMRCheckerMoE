@@ -1,39 +1,30 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Download Started</title>
-    <link rel="stylesheet" href="/static/style.css">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-</head>
-<body>
-    <main class="container">
+{% extends "base.html" %}
+{% block title %}Download started · Hamster Scraper{% endblock %}
+{% block content %}
+        <p class="page-eyebrow">Hamster Scraper</p>
         <h1>Download Started</h1>
         <div class="success-message">
             <p>Your download has been initiated for <strong>{{ site.title() }}</strong>.</p>
             <p>The browser will open shortly for you to log in manually.</p>
         </div>
-        
+
         <div class="info-box">
             <h3>What happens next:</h3>
             <ul>
                 <li>A browser window will open for you to log in</li>
                 <li>After logging in, the download process will begin automatically</li>
-                    <li>Videos will be saved to the <code>downloads</code> folder</li>
+                <li>Videos will be saved to the <code>downloads</code> folder</li>
                 <li>You can monitor progress by checking the log file</li>
             </ul>
         </div>
-        
+
         <div class="action-buttons">
             <a href="/download/log/{{ timestamp }}" class="btn btn-primary">View Logs</a>
             <a href="/progress/{{ session_id }}" class="btn btn-info">View Progress</a>
             <a href="/progress/{{ session_id }}/json" class="btn btn-success">Download Progress JSON</a>
             <a href="/" class="btn btn-secondary">Start New Download</a>
         </div>
-        
+
         <div class="progress-container" id="progressContainer">
             <h3>Download Progress</h3>
             <div class="progress-bar">
@@ -43,12 +34,13 @@
                 <p>Initializing...</p>
             </div>
         </div>
-    </main>
+{% endblock %}
 
+{% block scripts %}
     <script>
         const sessionId = '{{ session_id }}';
         let progressInterval;
-        
+
         function updateProgress() {
             fetch(`/progress/${sessionId}/summary`)
                 .then(response => response.json())
@@ -58,40 +50,36 @@
                         clearInterval(progressInterval);
                         return;
                     }
-                    
+
                     const progressFill = document.getElementById('progressFill');
                     const progressStats = document.getElementById('progressStats');
-                    
-                    // Update progress bar
+
                     const percentage = Math.round(data.progress_percentage || 0);
                     const titleFetchPercentage = Math.round(data.title_fetch_progress || 0);
                     progressFill.style.width = percentage + '%';
-                    
-                    // Update stats
+
                     let statsHtml = '';
-                    
-                    // Show title fetching progress if still in progress
+
                     if (data.title_fetch_progress < 100) {
                         statsHtml += `<p><strong>Fetching Titles:</strong> ${titleFetchPercentage}% (${data.urls_collected}/${data.total_urls})</p>`;
                     }
-                    
+
                     statsHtml += `
                         <p><strong>Download Progress:</strong> ${percentage}% (${data.downloads_completed + data.downloads_failed + data.files_skipped}/${data.total_urls})</p>
                         <p><strong>Completed:</strong> ${data.downloads_completed} | <strong>Failed:</strong> ${data.downloads_failed} | <strong>Skipped:</strong> ${data.files_skipped}</p>
                         <p><strong>Success Rate:</strong> ${Math.round(data.success_rate || 0)}%</p>
                         <p><strong>Remaining:</strong> ${data.remaining_downloads}</p>
                     `;
-                    
+
                     if (data.total_size_downloaded > 0) {
                         const sizeMB = (data.total_size_downloaded / 1024 / 1024).toFixed(1);
                         statsHtml += `<p><strong>Downloaded:</strong> ${sizeMB} MB</p>`;
                     }
-                    
+
                     progressStats.innerHTML = statsHtml;
-                    
-                    // Check if completed
+
                     if (data.is_complete) {
-                        progressFill.style.backgroundColor = '#059669';
+                        progressFill.style.backgroundColor = '#2563eb';
                         progressStats.innerHTML += '<p><strong class="progress-complete-msg">Download session completed.</strong></p>';
                         clearInterval(progressInterval);
                     }
@@ -101,19 +89,14 @@
                     document.getElementById('progressStats').innerHTML = '<p>Error loading progress. Check logs for details.</p>';
                 });
         }
-        
-        // Start progress updates
+
         progressInterval = setInterval(updateProgress, 2000);
-        
-        // Initial update
         updateProgress();
-        
-        // Clean up on page unload
+
         window.addEventListener('beforeunload', function() {
             if (progressInterval) {
                 clearInterval(progressInterval);
             }
         });
     </script>
-</body>
-</html>
+{% endblock %}

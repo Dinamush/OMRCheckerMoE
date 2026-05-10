@@ -1,19 +1,8 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Duplicate file checker</title>
-    <link rel="stylesheet" href="/static/style.css">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-</head>
-<body>
-    <main class="container container-wide">
-        <nav class="nav-top">
-            <a href="/" class="nav-link">Home</a>
-        </nav>
+{% extends "base.html" %}
+{% block title %}Duplicate file checker · Hamster Scraper{% endblock %}
+{% block main_class %}container container-wide{% endblock %}
+{% block content %}
+        <p class="page-eyebrow">Hamster Scraper</p>
         <h1>Duplicate file checker</h1>
         <p class="subtitle">Scan any folder on this PC, review likely duplicates, then delete extras.</p>
 
@@ -49,8 +38,9 @@
             <div id="resultsTableWrap"></div>
             <button type="button" class="btn-danger" id="btnDelete">Delete unchecked files</button>
         </section>
-    </main>
+{% endblock %}
 
+{% block scripts %}
     <script>
 (function () {
     const thresholdInput = document.getElementById('threshold');
@@ -446,5 +436,4 @@
     });
 })();
     </script>
-</body>
-</html>
+{% endblock %}

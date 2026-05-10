@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}Hamster Scraper{% endblock %}</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    {% block extra_head %}{% endblock %}
+</head>
+<body>
+    <a class="skip-link" href="#main-content">Skip to content</a>
+    <header class="site-header">
+        <div class="site-header-inner">
+            <a href="/" class="site-brand" {% if request.url.path == '/' %}aria-current="page"{% endif %}>Hamster Scraper</a>
+            <nav class="site-nav" aria-label="Site">
+                <a href="/" class="site-nav-link" {% if request.url.path == '/' %}aria-current="page"{% endif %}>Downloader</a>
+                <a href="/duplicates" class="site-nav-link" {% if request.url.path.startswith('/duplicates') %}aria-current="page"{% endif %}>Duplicate checker</a>
+                <a href="#important-information" class="site-nav-link site-nav-link-muted">Important info</a>
+            </nav>
+        </div>
+    </header>
+
+    <main id="main-content" class="{% block main_class %}container{% endblock %}" tabindex="-1">
+        {% block content %}{% endblock %}
+    </main>
+
+    <footer class="site-footer" id="important-information">
+        <div class="site-footer-inner">
+            <div class="site-footer-grid">
+                <section class="site-footer-col" aria-labelledby="footer-safety">
+                    <h2 id="footer-safety" class="site-footer-heading">Safety &amp; responsibility</h2>
+                    <ul class="site-footer-list">
+                        <li>Use this app only for content you are allowed to download and store. Respect each site&apos;s terms of service and copyright.</li>
+                        <li>This tool automates a browser on <strong>your PC</strong>; credentials and sessions stay local to your machine.</li>
+                        <li>Deleting files in the duplicate checker is <strong>permanent</strong>. Confirm paths before you confirm deletion.</li>
+                    </ul>
+                </section>
+                <section class="site-footer-col" aria-labelledby="footer-tools">
+                    <h2 id="footer-tools" class="site-footer-heading">Tools</h2>
+                    <ul class="site-footer-list site-footer-links">
+                        <li><a href="/">Video downloader</a> — favourites-based downloads (manual login in browser).</li>
+                        <li><a href="/duplicates">Duplicate file checker</a> — scan any folder, preview videos, remove extras.</li>
+                    </ul>
+                </section>
+                <section class="site-footer-col" aria-labelledby="footer-tech">
+                    <h2 id="footer-tech" class="site-footer-heading">Running the server</h2>
+                    <ul class="site-footer-list">
+                        <li>Start with <code class="site-footer-code">python main.py</code> from the project folder (default UI port is shown in the terminal).</li>
+                        <li>Paths in the duplicate checker are resolved on the machine where the server runs—not in your browser.</li>
+                        <li>For issues, check application logs and the download folder you configured.</li>
+                    </ul>
+                </section>
+            </div>
+            <p class="site-footer-meta">Hamster Scraper · Local utilities · No affiliation with third-party sites</p>
+        </div>
+    </footer>
+
+    {% block scripts %}{% endblock %}
+</body>
+</html>
