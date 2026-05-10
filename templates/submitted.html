@@ -1,18 +1,28 @@
 {% extends "base.html" %}
-{% block title %}Download started · Hamster Scraper{% endblock %}
+{% block title %}Download started · SHUCK3R{% endblock %}
 {% block content %}
-        <p class="page-eyebrow">Hamster Scraper</p>
+        <p class="page-eyebrow">SHUCK3R</p>
         <h1>Download Started</h1>
         <div class="success-message">
             <p>Your download has been initiated for <strong>{{ site.title() }}</strong>.</p>
-            <p>The browser will open shortly for you to log in manually.</p>
+            {% if embedded_login %}
+            <p>This window will switch to the site so you can log in <strong>inside the app</strong>.</p>
+            {% else %}
+            <p>A separate Chrome window will open for you to log in manually.</p>
+            {% endif %}
         </div>
 
         <div class="info-box">
             <h3>What happens next:</h3>
             <ul>
-                <li>A browser window will open for you to log in</li>
-                <li>After logging in, the download process will begin automatically</li>
+                {% if embedded_login %}
+                <li>The app navigates to the site — sign in there</li>
+                <li>Use menu <strong>SHUCK3R → Done logging in — continue download</strong> when you are signed in</li>
+                {% else %}
+                <li>A Chrome window will open for you to log in</li>
+                <li>After logging in, confirm in the terminal or browser flow as prompted</li>
+                {% endif %}
+                <li>After cookies are saved, the download process continues automatically</li>
                 <li>Videos save under your user profile (same default folder as the duplicate checker; Windows: <code>%LOCALAPPDATA%\HamsterScraper\downloads</code>)</li>
                 <li>You can monitor progress by checking the log file</li>
             </ul>

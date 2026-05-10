@@ -55,7 +55,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='HamsterScraper',
+    name='SHUCK3R',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

@@ -10,4 +10,4 @@ These scripts are **not used** by the main web application (`main.py` in the pro
 - **telegram.py** – Telegram-related script
 - **UI_version/** – Alternate UI implementation (main.py, downloader.py)
 
-The active system is the **Unified Video Downloader** run via `main.py` at the project root. See the main [README.md](../README.md) for usage.
+The active system is **SHUCK3R** (`main.py` at the project root). See the main [README.md](../README.md) for usage.

@@ -19,7 +19,7 @@ from urllib.request import urlopen
 
 from paths import ensure_runtime_cwd, get_user_data_dir
 
-# Help PyInstaller trace pywebview when building HamsterScraper.exe
+# Help PyInstaller trace pywebview when building SHUCK3R.exe
 try:
     import webview as _webview_pkg  # noqa: F401
 except ImportError:
@@ -52,7 +52,7 @@ def _fatal_exit(message: str, exc: BaseException | None = None) -> None:
         try:
             import ctypes
 
-            ctypes.windll.user32.MessageBoxW(0, text[:2000], "Hamster Scraper", 0x10)
+            ctypes.windll.user32.MessageBoxW(0, text[:2000], "SHUCK3R", 0x10)
         except Exception:
             pass
     else:
@@ -140,9 +140,45 @@ def run_desktop(*, external_browser: bool | None = None) -> None:
     if not external_browser:
         try:
             import webview
+            from webview.menu import Menu, MenuAction
 
-            webview.create_window("Hamster Scraper", url, width=1100, height=800)
-            webview.start(debug=False)
+            import webview_login_bridge
+
+            # Keep third-party flows inside the embedded WebView (login UX).
+            webview.settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] = False
+
+            ud = get_user_data_dir()
+            ud.mkdir(parents=True, exist_ok=True)
+            webview_storage = str(ud / "webview_profile")
+
+            def _menu_login_done() -> None:
+                webview_login_bridge.finish_embedded_login()
+
+            menu = [
+                Menu(
+                    "SHUCK3R",
+                    [
+                        MenuAction(
+                            "Done logging in — continue download",
+                            _menu_login_done,
+                        ),
+                    ],
+                ),
+            ]
+
+            win = webview.create_window(
+                "SHUCK3R",
+                url,
+                width=1100,
+                height=800,
+                menu=menu,
+            )
+            webview_login_bridge.configure(win, url)
+            webview.start(
+                debug=False,
+                private_mode=False,
+                storage_path=webview_storage,
+            )
             return
         except ImportError:
             if _is_frozen():
@@ -161,7 +197,7 @@ def run_desktop(*, external_browser: bool | None = None) -> None:
             print(f"Embedded window failed ({e}); opening browser.", file=sys.stderr)
 
     webbrowser.open(url)
-    print(f"Hamster Scraper is running at {url}")
+    print(f"SHUCK3R is running at {url}")
     print("Press Ctrl+C to stop.")
 
     try:

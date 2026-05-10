@@ -1,6 +1,6 @@
-# Unified Video Downloader
+# SHUCK3R
 
-Web app to download videos from your **PornHub** and **xHamster** favorites. You log in once in a browser window; the app collects video URLs and downloads them with progress tracking.
+Download videos from your **PornHub** and **xHamster** favorites. You log in once in a browser window; the app collects video URLs and downloads them with progress tracking.
 
 ---
 
@@ -53,22 +53,24 @@ Leave the terminal open while you use the app.
 
 Example (local only): `set HAMSTER_HOST=127.0.0.1` then `python main.py`.
 
-Logs and downloads use a **per-user data folder** (same for source and the `.exe`): Windows **`%LOCALAPPDATA%\HamsterScraper`** (`downloads\`, `logs\`), macOS **`~/Library/Application Support/HamsterScraper`**, Linux **`~/.local/share/hamster_scraper`**. Set **`HAMSTER_USER_DATA`** to force a different root.
+Logs and downloads use a **per-user data folder** (same for source and the `.exe`): Windows **`%LOCALAPPDATA%\HamsterScraper`** (`downloads\`, `logs\`), macOS **`~/Library/Application Support/HamsterScraper`**, Linux **`~/.local/share/hamster_scraper`**. Set **`HAMSTER_USER_DATA`** to force a different root. (Those folder names are legacy; the app is **SHUCK3R**.)
 
 ### Desktop launcher (`python launcher.py`)
 
 Starts the API on **loopback** and opens the UI in an **embedded window** (pywebview / Edge WebView2), not a separate browser tab.
 
+When you start a download, the **same window** navigates to the site so you can **log in there**; use menu **SHUCK3R → Done logging in — continue download** when finished (cookies are saved for yt-dlp / Selenium). Set **`HAMSTER_EMBEDDED_LOGIN=0`** to use the old separate Chrome login instead.
+
 - **`HAMSTER_EXTERNAL_BROWSER=1`** — use your **default browser** instead and keep a terminal open (useful for debugging).
 - **`HAMSTER_HOST`** / **`HAMSTER_PORT`** — same as above.
 
-The packaged **`HamsterScraper.exe`** uses this launcher with **no console window**. If startup fails, check **`hamster_scraper_error.log`** inside your **`HAMSTER_USER_DATA`** folder (default: `%LOCALAPPDATA%\HamsterScraper` on Windows); a message box may also appear.
+The packaged **`SHUCK3R.exe`** uses this launcher with **no console window**. If startup fails, check **`hamster_scraper_error.log`** inside your **`HAMSTER_USER_DATA`** folder (default: `%LOCALAPPDATA%\HamsterScraper` on Windows); a message box may also appear.
 
 ---
 
 ## Building a Windows executable
 
-The default build is a **single portable `release/HamsterScraper.exe`** (one-file PyInstaller), so the repo root stays source-only.
+The default build is a **single portable `release/SHUCK3R.exe`** (one-file PyInstaller), so the repo root stays source-only.
 
 1. Install runtime and build deps:
 
@@ -83,7 +85,7 @@ The default build is a **single portable `release/HamsterScraper.exe`** (one-fil
    .\build_windows.ps1
    ```
 
-   When it finishes, run **`.\release\HamsterScraper.exe`**. The app opens in **its own window**. Videos and logs go under **your user profile** (see above), not next to the exe. Startup errors are written to **`hamster_scraper_error.log`** in that same user-data folder.
+   When it finishes, run **`.\release\SHUCK3R.exe`**. The app opens in **its own window**. Videos and logs go under **your user profile** (see above), not next to the exe. Startup errors are written to **`hamster_scraper_error.log`** in that same user-data folder.
 
    Equivalent manual command:
 
@@ -91,10 +93,10 @@ The default build is a **single portable `release/HamsterScraper.exe`** (one-fil
    pyinstaller hamster_scraper.spec --distpath ./release --workpath build/pyinstaller --noconfirm
    ```
 
-3. Optional second exe (**`HamsterScraperWebView.exe`**) — same embedded UI as the main build; only use **`hamster_scraper_webview.spec`** if you want a separate artifact name.
+3. Optional second exe (**`SHUCK3RWebView.exe`**) — same embedded UI as the main build; only use **`hamster_scraper_webview.spec`** if you want a separate artifact name.
 
    ```powershell
-   Remove-Item -Force ./release/HamsterScraperWebView.exe -ErrorAction SilentlyContinue
+   Remove-Item -Force ./release/SHUCK3RWebView.exe -ErrorAction SilentlyContinue
    pyinstaller hamster_scraper_webview.spec --distpath ./release --workpath build/pyinstaller_webview --noconfirm
    ```
 
@@ -153,13 +155,14 @@ hamster_scraper/
 ├── main.py              # Entry point: `python main.py` starts the server
 ├── launcher.py          # Desktop: loopback + default browser
 ├── launcher_webview.py  # Thin wrapper around launcher (embedded window)
+├── webview_login_bridge.py  # Embedded WebView site login + cookie export (exe / launcher.py)
 ├── paths.py             # RESOURCE_ROOT + per-user data dir (LOCALAPPDATA etc.)
 ├── progress_tracker.py  # Used by main.py for download progress
 ├── duplicate_finder.py  # Duplicate grouping logic (duplicate checker UI)
 ├── requirements.txt     # Python dependencies
 ├── requirements-build.txt  # pyinstaller, pywebview (optional builds)
-├── release/             # Build output: HamsterScraper.exe (gitignored); .gitkeep tracked
-├── build_windows.ps1    # Builds release/HamsterScraper.exe
+├── release/             # Build output: SHUCK3R.exe (gitignored); .gitkeep tracked
+├── build_windows.ps1    # Builds release/SHUCK3R.exe
 ├── hamster_scraper.spec    # PyInstaller one-file spec (browser launcher)
 ├── hamster_scraper_webview.spec  # PyInstaller one-file spec (webview)
 ├── templates/           # HTML (Jinja); extends base.html where noted

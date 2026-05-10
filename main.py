@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Unified Video Downloader - FastAPI Application
+SHUCK3R — FastAPI application
 Download favorites from PornHub and xHamster via a web UI.
 """
 
@@ -42,6 +42,7 @@ from duplicate_finder import (
     cluster_duplicates,
     build_groups_payload,
 )
+import webview_login_bridge
 
 # ----------------------------- Configuration ----------------------------- #
 
@@ -57,7 +58,7 @@ from progress_tracker import get_tracker, cleanup_tracker, set_default_log_dir
 
 set_default_log_dir(LOG_DIR)
 
-app = FastAPI(title="Unified Video Downloader", description="Download videos from PornHub and xHamster")
+app = FastAPI(title="SHUCK3R", description="Download videos from PornHub and xHamster favorites")
 
 templates = Jinja2Templates(directory=str(RESOURCE_ROOT / "templates"))
 app.mount("/static", StaticFiles(directory=str(RESOURCE_ROOT / "static")), name="static")
@@ -179,6 +180,44 @@ def save_cookies_netscape(driver, cookie_file: str) -> None:
             value = cookie.get("value", "")
             f.write(f"{domain}\t{flag}\t{path}\t{secure}\t{expiry}\t{name}\t{value}\n")
     logging.info(f"Cookies saved to {cookie_file}")
+
+
+def load_netscape_cookies_into_driver(driver: webdriver.Chrome, cookie_file: str, landing_url: str) -> None:
+    """Apply a Netscape cookie jar to Selenium after opening landing_url (same registrable domain)."""
+    driver.get(landing_url)
+    time.sleep(1.5)
+    try:
+        with open(cookie_file, "r", encoding="utf-8") as f:
+            lines = [ln.strip() for ln in f if ln.strip() and not ln.startswith("#")]
+    except OSError as e:
+        logging.error("Could not read cookie file for Selenium: %s", e)
+        return
+
+    for line in lines:
+        parts = line.split("\t")
+        if len(parts) < 7:
+            continue
+        domain, _flag, path, secure, expiry_s, name, value = parts[:7]
+        spec: dict = {
+            "name": name,
+            "value": value,
+            "domain": domain,
+            "path": path or "/",
+            "secure": secure.upper() == "TRUE",
+        }
+        try:
+            exp_int = int(expiry_s)
+            if exp_int > 0:
+                spec["expiry"] = exp_int
+        except ValueError:
+            pass
+        try:
+            driver.add_cookie(spec)
+        except Exception as e:
+            logging.debug("Skipping cookie %s: %s", name, e)
+
+    driver.get(landing_url)
+    time.sleep(1.0)
 
 def extract_video_urls_ytdlp(cookie_file: str, playlist_url: str) -> List[str]:
     """Extract video URLs using yt-dlp (for PornHub)."""
@@ -608,14 +647,18 @@ def pornhub_workflow(playlist_url: str, download_dir: str, headless: bool, log_f
     driver = None
     
     try:
-        driver = setup_chrome_driver(headless)
-        driver.get("https://www.pornhub.com")
-        logging.info("Please log in to PornHub in the opened browser.")
-        input("After logging in, press Enter to continue...")
-        
-        time.sleep(5)  # Wait for cookies to be set
-        save_cookies_netscape(driver, cookie_file)
-        
+        use_embedded = webview_login_bridge.is_active() and webview_login_bridge.embedded_login_env_enabled()
+        if use_embedded:
+            webview_login_bridge.begin_embedded_login("https://www.pornhub.com/", cookie_file)
+            time.sleep(1.0)
+        else:
+            driver = setup_chrome_driver(headless)
+            driver.get("https://www.pornhub.com")
+            logging.info("Please log in to PornHub in the opened browser.")
+            input("After logging in, press Enter to continue...")
+            time.sleep(5)
+            save_cookies_netscape(driver, cookie_file)
+
         video_urls = extract_video_urls_ytdlp(cookie_file, playlist_url)
         if not video_urls:
             logging.error("No video URLs extracted.")
@@ -664,13 +707,17 @@ def xhamster_workflow(favorites_url: str, download_dir: str, headless: bool, log
     cookie_file = os.path.join(LOG_DIR, f"xhamster_cookies_{session_id}.txt")
     driver = None
     try:
-        driver = setup_chrome_driver(headless)
         login_url = "https://xhamster.com/login"
-        wait_for_manual_login(driver, login_url)
-        
-        # Save cookies for yt-dlp authentication
-        time.sleep(5)  # Wait for cookies to be set
-        save_cookies_netscape(driver, cookie_file)
+        use_embedded = webview_login_bridge.is_active() and webview_login_bridge.embedded_login_env_enabled()
+        if use_embedded:
+            webview_login_bridge.begin_embedded_login(login_url, cookie_file)
+            driver = setup_chrome_driver(headless)
+            load_netscape_cookies_into_driver(driver, cookie_file, "https://xhamster.com/")
+        else:
+            driver = setup_chrome_driver(headless)
+            wait_for_manual_login(driver, login_url)
+            time.sleep(5)
+            save_cookies_netscape(driver, cookie_file)
         
         # Initialize progress tracking
         tracker = get_tracker(session_id)
@@ -869,6 +916,7 @@ def handle_form(request: Request,
     else:
         return {"error": "Invalid site selected"}
     
+    embedded_login = webview_login_bridge.is_active() and webview_login_bridge.embedded_login_env_enabled()
     return templates.TemplateResponse(
         request,
         "submitted.html",
@@ -876,6 +924,7 @@ def handle_form(request: Request,
             "timestamp": timestamp,
             "session_id": session_id,
             "site": site,
+            "embedded_login": embedded_login,
         },
     )
 

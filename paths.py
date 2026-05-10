@@ -1,10 +1,10 @@
 """
-Resolve read-only bundle assets vs writable per-user data.
+Resolve read-only bundle assets vs writable per-user data (SHUCK3R).
 
 - RESOURCE_ROOT: templates/, static/ (MEIPASS when frozen).
 - USER_DATA_DIR (via get_user_data_dir): logs/, downloads/ under the current user's profile
   (Windows %LOCALAPPDATA%\\HamsterScraper, macOS Application Support, Linux XDG).
-  Override with env HAMSTER_USER_DATA if needed.
+  Folder names are legacy; override with env HAMSTER_USER_DATA if needed.
 """
 
 from __future__ import annotations
