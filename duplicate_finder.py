@@ -154,6 +154,49 @@ def _collapse_ws(s: str) -> str:
     return re.sub(r"\s+", " ", s.strip()).lower()
 
 
+# Trailing tokens removed before episode / page-index detection (whole-token, case-insensitive).
+_RELEASE_TAIL_TOKENS = frozenset({
+    "720p", "1080p", "480p", "360p", "2160p", "4320p", "4k", "8k", "uhd", "fhd", "hd",
+    "eng", "english", "sub", "subbed", "dub", "dubbed", "raw",
+    "uncen", "uncensored", "cen", "censored",
+    "x264", "x265", "hevc", "h264", "h265", "aac", "opus",
+    "bluray", "bdrip", "webrip", "webdl", "dvdrip",
+    "underhentai", "hanime", "xvideos", "pornhub",
+})
+
+
+def _strip_release_metadata(norm: str) -> str:
+    """Drop resolution / encoder / site noise from the end so episode digits can be parsed."""
+    parts = norm.strip().split()
+    if not parts:
+        return ""
+    changed = True
+    while changed and parts:
+        changed = False
+        last = parts[-1].lower()
+        if last in _RELEASE_TAIL_TOKENS:
+            parts.pop()
+            changed = True
+            continue
+        if re.fullmatch(r"v\d+x", last):
+            parts.pop()
+            changed = True
+            continue
+        if last in ("net", "com", "org", "tv", "io") and len(parts) >= 2:
+            parts.pop()
+            changed = True
+            continue
+        if last == "www" and len(parts) >= 2:
+            parts.pop()
+            changed = True
+            continue
+    return " ".join(parts).strip()
+
+
+def _hex_like_token(tok: str) -> bool:
+    return bool(re.fullmatch(r"[0-9a-f]{16,}", tok.lower()))
+
+
 def _series_episode_split(norm: str) -> Optional[Tuple[str, Tuple[int, ...]]]:
     """
     If the normalized name looks like the same title with an episode/sequel index,
@@ -162,7 +205,7 @@ def _series_episode_split(norm: str) -> Optional[Tuple[str, Tuple[int, ...]]]:
     Order matters: try SxxEyy before a plain trailing number so names like ..._s01e02
     are not split on the final digits only.
     """
-    n = norm.strip()
+    n = _strip_release_metadata(norm.strip())
     if not n:
         return None
 
@@ -187,7 +230,21 @@ def _series_episode_split(norm: str) -> Optional[Tuple[str, Tuple[int, ...]]]:
         if base:
             return (base, (int(m.group(2)),))
 
-    # ..._12 / ...-03 at end (video_1, sequel_2)
+    # Pixiv / gallery page index: ..._p7 / ... p12 (underscore may survive normalize_name)
+    m = re.match(r"^(.*)[_\s]p(\d+)$", n, re.I)
+    if m:
+        base = _collapse_ws(m.group(1))
+        if base and not base.endswith("p"):  # avoid splitting "... ep12" wrongly if ep normalized odd
+            return (base, (int(m.group(2)),))
+
+    # ...Series_05 / ...series 05 (episode before ENG etc.)
+    m = re.match(r"^(.*?)[_\s]series[_\s](\d+)$", n, re.I)
+    if m:
+        base = _collapse_ws(m.group(1))
+        if base:
+            return (base, (int(m.group(2)),))
+
+    # ..._12 / ...-03 at end (video_1, sequel_2, "... kankei 1" after strip)
     m = re.match(r"^(.*)[_\s-](\d+)$", n)
     if m:
         base = _collapse_ws(m.group(1))
@@ -195,6 +252,74 @@ def _series_episode_split(norm: str) -> Optional[Tuple[str, Tuple[int, ...]]]:
             return (base, (int(m.group(2)),))
 
     return None
+
+
+def _is_likely_duplicate_copy(norm_a: str, norm_b: str, sa: int, sb: int) -> bool:
+    """
+    Windows-style copy: same stem except trailing ' (n)' → normalized as extra trailing digit group.
+    Require nearly identical file sizes so we do not treat episode 2 vs episode 1 as 'copy'.
+    """
+    a, b = norm_a.strip(), norm_b.strip()
+    if a == b:
+        return True
+    mlen = max(sa, sb, 1)
+    if abs(sa - sb) / mlen > 0.03:
+        return False
+    for x, y in ((a, b), (b, a)):
+        mt = re.match(r"^(.+?)\s+(\d+)$", x)
+        if mt:
+            base = mt.group(1).strip()
+            num = int(mt.group(2))
+            if base == y and num >= 2:
+                return True
+    return False
+
+
+def _numeric_token_installment_mismatch(norm_a: str, norm_b: str, min_ratio: float = 0.92) -> bool:
+    """
+    High-similarity names whose token streams differ only in one numeric slot (same length).
+    Also one-extra trailing numeric token (episode suffix on one side only), if not hex-heavy.
+    """
+    a, b = _strip_release_metadata(norm_a.strip()), _strip_release_metadata(norm_b.strip())
+    if not a or not b:
+        return False
+
+    def _too_hex(s: str) -> bool:
+        toks = [t for t in re.split(r"[\s_-]+", s) if t]
+        if len(toks) == 1 and _hex_like_token(toks[0]):
+            return True
+        if toks and _hex_like_token(toks[0]) and len(toks[0]) >= 24:
+            return True
+        return False
+
+    if _too_hex(a) or _too_hex(b):
+        return False
+
+    if SequenceMatcher(None, a, b).ratio() < min_ratio:
+        return False
+
+    ta = [t for t in re.split(r"[\s_-]+", a) if t]
+    tb = [t for t in re.split(r"[\s_-]+", b) if t]
+
+    if len(ta) == len(tb):
+        for i in range(len(ta)):
+            if ta[i] != tb[i]:
+                if (
+                    ta[i].isdigit()
+                    and tb[i].isdigit()
+                    and int(ta[i]) != int(tb[i])
+                    and ta[i + 1 :] == tb[i + 1 :]
+                ):
+                    return True
+                return False
+        return False
+
+    if len(ta) == len(tb) + 1 and ta[-1].isdigit() and ta[:-1] == tb:
+        return True
+    if len(tb) == len(ta) + 1 and tb[-1].isdigit() and tb[:-1] == ta:
+        return True
+
+    return False
 
 
 def _same_series_different_installment(norm_a: str, norm_b: str) -> bool:
@@ -251,8 +376,11 @@ def cluster_duplicates(
         for j in range(i + 1, n):
             if not _size_gate(sizes[i], sizes[j], max_size_ratio_diff):
                 continue
-            if _same_series_different_installment(norms[i], norms[j]):
-                continue
+            if not _is_likely_duplicate_copy(norms[i], norms[j], sizes[i], sizes[j]):
+                if _same_series_different_installment(norms[i], norms[j]):
+                    continue
+                if _numeric_token_installment_mismatch(norms[i], norms[j]):
+                    continue
             score = _pair_score(
                 norms[i], norms[j], sizes[i], sizes[j], name_weight, size_weight
             )
