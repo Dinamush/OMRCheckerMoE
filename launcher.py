@@ -154,6 +154,12 @@ def run_desktop(*, external_browser: bool | None = None) -> None:
             def _menu_login_done() -> None:
                 webview_login_bridge.finish_embedded_login()
 
+            def _menu_show_main() -> None:
+                webview_login_bridge.show_main_window()
+
+            def _menu_show_login() -> None:
+                webview_login_bridge.show_login_window()
+
             menu = [
                 Menu(
                     "SHUCK3R",
@@ -161,6 +167,14 @@ def run_desktop(*, external_browser: bool | None = None) -> None:
                         MenuAction(
                             "Done logging in — continue download",
                             _menu_login_done,
+                        ),
+                        MenuAction(
+                            "Show main window",
+                            _menu_show_main,
+                        ),
+                        MenuAction(
+                            "Show site login window",
+                            _menu_show_login,
                         ),
                     ],
                 ),

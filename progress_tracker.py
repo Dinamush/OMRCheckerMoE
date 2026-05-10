@@ -292,7 +292,12 @@ class ProgressTracker:
             title_fetch_progress = 0
             if self.stats.total_urls > 0:
                 title_fetch_progress = (self.stats.urls_collected / self.stats.total_urls) * 100
-            
+
+            # Never treat total_urls==0 as "complete" — xHamster uses 0 while favorites are still being scanned.
+            is_complete = (
+                self.stats.total_urls > 0 and self.stats.remaining_downloads == 0
+            )
+
             return {
                 "total_urls": self.stats.total_urls,
                 "urls_collected": self.stats.urls_collected,
@@ -306,7 +311,13 @@ class ProgressTracker:
                 "title_fetch_progress": round(title_fetch_progress, 2),
                 "remaining_downloads": self.stats.remaining_downloads,
                 "total_size_downloaded": self.stats.total_size_downloaded,
-                "is_complete": self.stats.remaining_downloads == 0
+                "is_complete": is_complete,
+                "start_time": self.stats.start_time.isoformat()
+                if self.stats.start_time
+                else None,
+                "end_time": self.stats.end_time.isoformat()
+                if self.stats.end_time
+                else None,
             }
 
 # Global tracker instances (one per session)

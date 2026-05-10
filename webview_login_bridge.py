@@ -1,9 +1,11 @@
 """
-Embedded site login inside the pywebview window (Windows / Edge WebView2).
+Embedded site login via a separate pywebview window (Windows / Edge WebView2).
 
-FastAPI background threads call begin_embedded_login(); the user logs in on the
-remote site in the same window, then chooses menu *SHUCK3R → Done logging in*
-which saves cookies (including HttpOnly via WebView2) and returns to the app URL.
+The main SHUCK3R window stays on the local UI. A popup loads the third-party
+login URL; the user switches between windows with the SHUCK3R menu.
+
+Use SHUCK3R → Done logging in — continue download when finished (reads cookies
+from the login window, then closes it).
 
 Set HAMSTER_EMBEDDED_LOGIN=0 to force the legacy Selenium login window instead.
 """
@@ -12,30 +14,62 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import threading
 from email.utils import parsedate_to_datetime
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_window: Any = None
+_main_window: Any = None
+_login_window: Any | None = None
 _app_base_url: str = "http://127.0.0.1:8001/"
 _cookie_target_path: str | None = None
+_progress_page_url: str | None = None
 _done_event = threading.Event()
 _login_slot = threading.Lock()
 _finish_guard = threading.Lock()
+_finish_in_progress = False
 
 
-def configure(window: Any, app_base_url: str) -> None:
+def _user_confirms_login_finished() -> bool:
+    """Frozen desktop only: confirm before saving cookies so mis-clicks do not end the session."""
+    if not getattr(sys, "frozen", False):
+        return True
+    try:
+        import ctypes
+
+        MB_YESNO = 0x4
+        MB_ICONQUESTION = 0x20
+        IDYES = 6
+        r = ctypes.windll.user32.MessageBoxW(
+            0,
+            "Have you finished signing in on the site?\n\n"
+            "Choose Yes to save cookies and continue the download.\n"
+            "Choose No to go back to the login window.",
+            "SHUCK3R — Confirm login",
+            MB_YESNO | MB_ICONQUESTION,
+        )
+        return r == IDYES
+    except Exception:
+        return True
+
+
+def configure(main_window: Any, app_base_url: str) -> None:
     """Call from the desktop launcher after create_window (before webview.start)."""
-    global _window, _app_base_url
-    _window = window
+    global _main_window, _app_base_url
+    _main_window = main_window
     base = app_base_url.rstrip("/")
     _app_base_url = base + "/"
 
 
 def is_active() -> bool:
-    return _window is not None
+    return _main_window is not None
+
+
+def has_pending_login() -> bool:
+    """True while a download workflow is waiting for cookie confirmation (menu or on-page button)."""
+    return _cookie_target_path is not None
 
 
 def embedded_login_env_enabled() -> bool:
@@ -43,6 +77,30 @@ def embedded_login_env_enabled() -> bool:
     if v in ("0", "false", "no", "off"):
         return False
     return True
+
+
+def show_main_window() -> None:
+    """Menu: bring the SHUCK3R UI window forward."""
+    threading.Thread(target=_safe_show_window, args=(_main_window,), name="wv-show-main", daemon=True).start()
+
+
+def show_login_window() -> None:
+    """Menu: bring the site login popup forward (if open)."""
+    lw = _login_window
+    if lw is None:
+        logger.debug("show_login_window: no login popup")
+        return
+    threading.Thread(target=_safe_show_window, args=(lw,), name="wv-show-login", daemon=True).start()
+
+
+def _safe_show_window(win: Any) -> None:
+    if win is None:
+        return
+    try:
+        win.show()
+        win.restore()
+    except Exception as e:
+        logger.debug("show/restore window: %s", e)
 
 
 def simplecookie_list_to_netscape_file(cookies: list, path: str) -> None:
@@ -58,7 +116,7 @@ def simplecookie_list_to_netscape_file(cookies: list, path: str) -> None:
                 secure = "TRUE" if morsel.get("secure", False) else "FALSE"
                 expiry_unix = _morsel_expires_unix(morsel)
                 f.write(f"{domain}\t{flag}\t{path_c}\t{secure}\t{expiry_unix}\t{name}\t{morsel.value}\n")
-    logger.info("Saved %s cookie(s) to %s", len(cookies), path)
+    logger.info("Saved %s cookie jar row(s) to %s", len(cookies), path)
 
 
 def _morsel_expires_unix(morsel: Any) -> int:
@@ -76,11 +134,41 @@ def _morsel_expires_unix(morsel: Any) -> int:
         return 0
 
 
-def begin_embedded_login(login_url: str, cookie_file: str, *, timeout: float = 1800.0) -> None:
+def _open_login_popup(login_url: str) -> Any | None:
+    """Create a secondary WebView with login_url. Returns None if creation fails."""
+    try:
+        import webview
+
+        return webview.create_window(
+            "SHUCK3R — Site login",
+            login_url,
+            width=960,
+            height=820,
+            resizable=True,
+            shadow=True,
+            confirm_close=False,
+        )
+    except Exception as e:
+        logger.warning("Could not create login popup (%s); falling back to main window.", e)
+        return None
+
+
+def begin_embedded_login(
+    login_url: str,
+    cookie_file: str,
+    *,
+    progress_url: str | None = None,
+    timeout: float = 1800.0,
+) -> None:
     """
-    Navigate the WebView to login_url and block until the user completes the menu action
-    or timeout. Writes cookies to cookie_file (Netscape format).
+    Open a popup WebView for login_url (or fall back to navigating the main window).
+    Block until menu Done or timeout. Writes cookies to cookie_file (Netscape format).
+
+    progress_url: GET URL of the download progress page; after login we navigate the main
+    window here so the WebView reliably shows progress (POST responses are often mishandled).
     """
+    global _login_window, _progress_page_url
+
     if not is_active():
         raise RuntimeError("Embedded login is not available (no WebView window).")
     if not embedded_login_env_enabled():
@@ -94,59 +182,143 @@ def begin_embedded_login(login_url: str, cookie_file: str, *, timeout: float = 1
     global _cookie_target_path
     _done_event.clear()
     _cookie_target_path = cookie_file
+    _progress_page_url = progress_url
+    _login_window = None
+
     try:
-        try:
-            _window.set_title("Log in (embedded) — SHUCK3R")
-        except Exception as e:
-            logger.debug("set_title: %s", e)
-        _window.load_url(login_url)
-        logger.info(
-            "Embedded login: open the site in the app window, sign in, then use menu "
-            "'SHUCK3R → Done logging in — continue download'."
-        )
+        popup = _open_login_popup(login_url)
+        if popup is None:
+            try:
+                _main_window.set_title("Log in — SHUCK3R (main window)")
+            except Exception:
+                pass
+            _main_window.load_url(login_url)
+            _login_window = None
+            logger.info(
+                "Login loaded in the main window (popup unavailable). "
+                "After signing in, use SHUCK3R → Done logging in — continue download."
+            )
+        else:
+            _login_window = popup
+            logger.info(
+                "Site login opened in a separate window. Sign in there, then use "
+                "SHUCK3R → Done logging in — continue download. "
+                "Use SHUCK3R → Show main window / Show site login window to switch."
+            )
+
         if _done_event.wait(timeout):
             return
-        logger.warning("Embedded login timed out after %s s; returning to app.", timeout)
-        try:
-            _window.load_url(_app_base_url)
-            _window.set_title("SHUCK3R")
-        except Exception as e:
-            logger.error("Could not restore app URL after login timeout: %s", e)
+
+        logger.warning("Embedded login timed out after %s s.", timeout)
+        _cleanup_login_ui()
         raise TimeoutError(
             f"Embedded login timed out after {timeout:.0f} seconds. "
-            "Use menu 'SHUCK3R → Done logging in — continue download' when finished."
+            "Use SHUCK3R → Done logging in — continue download when finished."
         )
     finally:
         _cookie_target_path = None
         _login_slot.release()
 
 
-def finish_embedded_login() -> None:
-    """Menu handler: run cookie export off the GUI thread (avoids WinForms nested Invoke deadlocks)."""
-    threading.Thread(target=_finish_embedded_login_impl, name="webview-login-finish", daemon=True).start()
+def _cleanup_login_ui() -> None:
+    """Close popup after cancel/error; return main window to the progress page when known."""
+    global _login_window, _progress_page_url
+
+    lw = _login_window
+    had_popup = lw is not None
+    resume = _progress_page_url
+    _login_window = None
+
+    if lw is not None:
+        try:
+            lw.destroy()
+        except Exception as e:
+            logger.debug("destroy login popup: %s", e)
+
+    try:
+        if resume:
+            _main_window.load_url(resume)
+            _main_window.set_title("SHUCK3R")
+            show_main_window()
+        elif had_popup:
+            _main_window.set_title("SHUCK3R")
+            show_main_window()
+        else:
+            _main_window.load_url(_app_base_url)
+            _main_window.set_title("SHUCK3R")
+    except Exception as e:
+        logger.error("Could not restore main window after login: %s", e)
+    finally:
+        _progress_page_url = None
 
 
-def _finish_embedded_login_impl() -> None:
+def finish_embedded_login(*, skip_native_confirm: bool = False) -> None:
+    """
+    Save cookies and unblock the download workflow.
+
+    Menu uses native Yes/No on frozen builds unless skip_native_confirm is True.
+    The progress page uses skip_native_confirm=True (the button click is the confirmation).
+    """
+    threading.Thread(
+        target=_finish_embedded_login_impl,
+        kwargs={"skip_native_confirm": skip_native_confirm},
+        name="webview-login-finish",
+        daemon=True,
+    ).start()
+
+
+def _finish_embedded_login_impl(*, skip_native_confirm: bool = False) -> None:
+    global _finish_in_progress, _login_window, _progress_page_url
+
     with _finish_guard:
         path = _cookie_target_path
         if path is None:
             logger.debug("finish_embedded_login: no session in progress")
             return
 
-        win = _window
-        if win is None:
+        main = _main_window
+        if main is None:
             _done_event.set()
             return
 
+        if not skip_native_confirm and not _user_confirms_login_finished():
+            logger.info("Login confirmation cancelled; login window left open.")
+            return
+
+        resume = _progress_page_url
+        _progress_page_url = None
+
+        lw = _login_window
+        cookie_source = lw if lw is not None else main
+        _finish_in_progress = True
+
         try:
-            cookies = win.get_cookies()
+            cookies = cookie_source.get_cookies()
             simplecookie_list_to_netscape_file(cookies, path)
         except Exception as e:
             logger.exception("Failed to save cookies from WebView: %s", e)
         finally:
+            had_popup = lw is not None
+            if lw is not None:
+                try:
+                    lw.destroy()
+                except Exception as e:
+                    logger.debug("destroy login popup after save: %s", e)
+                _login_window = None
+
             try:
-                win.load_url(_app_base_url)
-                win.set_title("SHUCK3R")
+                if resume:
+                    main.load_url(resume)
+                    main.set_title("SHUCK3R")
+                    show_main_window()
+                elif had_popup:
+                    main.set_title("SHUCK3R")
+                    show_main_window()
+                else:
+                    main.load_url(_app_base_url)
+                    main.set_title("SHUCK3R")
             except Exception as e:
-                logger.error("Could not return WebView to app after login: %s", e)
+                logger.error("Could not restore main SHUCK3R window: %s", e)
+
+            _finish_in_progress = False
             _done_event.set()

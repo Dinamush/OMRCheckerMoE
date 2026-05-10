@@ -14,9 +14,9 @@ import subprocess
 import concurrent.futures
 import re
 from pathlib import Path
-from typing import List, Optional, Tuple, Set
+from typing import Any, Dict, List, Optional, Tuple, Set
 from fastapi import FastAPI, Request, BackgroundTasks, Form, HTTPException, Query
-from fastapi.responses import RedirectResponse, FileResponse, Response
+from fastapi.responses import RedirectResponse, FileResponse, Response, PlainTextResponse
 from pydantic import BaseModel, Field
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
@@ -43,6 +43,7 @@ from duplicate_finder import (
     build_groups_payload,
 )
 import webview_login_bridge
+import workflow_heuristics
 
 # ----------------------------- Configuration ----------------------------- #
 
@@ -59,6 +60,15 @@ from progress_tracker import get_tracker, cleanup_tracker, set_default_log_dir
 set_default_log_dir(LOG_DIR)
 
 app = FastAPI(title="SHUCK3R", description="Download videos from PornHub and xHamster favorites")
+
+
+def _desktop_session_progress_url(session_id: str, site: str) -> str:
+    """Stable GET URL for the post-submit progress page (WebView-friendly after POST redirect)."""
+    host = os.environ.get("HAMSTER_HOST", "127.0.0.1").strip()
+    if host in ("0.0.0.0", "::", "[::]"):
+        host = "127.0.0.1"
+    port = int(os.environ.get("HAMSTER_PORT", "8001"))
+    return f"http://{host}:{port}/download/session/{session_id}?timestamp={session_id}&site={site}"
 
 templates = Jinja2Templates(directory=str(RESOURCE_ROOT / "templates"))
 app.mount("/static", StaticFiles(directory=str(RESOURCE_ROOT / "static")), name="static")
@@ -650,19 +660,26 @@ def pornhub_workflow(playlist_url: str, download_dir: str, headless: bool, log_f
     """PornHub workflow using Chrome and yt-dlp."""
     if not session_id:
         session_id = str(int(time.time()))
-        
+
     setup_logging(log_file)
     ensure_download_dir(download_dir)
-    
+
     cookie_file = os.path.join(LOG_DIR, f"pornhub_cookies_{session_id}.txt")
     driver = None
-    
+    ok = False
+
     try:
         use_embedded = webview_login_bridge.is_active() and webview_login_bridge.embedded_login_env_enabled()
         if use_embedded:
-            webview_login_bridge.begin_embedded_login("https://www.pornhub.com/", cookie_file)
+            workflow_heuristics.advance(session_id, "site_login")
+            webview_login_bridge.begin_embedded_login(
+                "https://www.pornhub.com/",
+                cookie_file,
+                progress_url=_desktop_session_progress_url(session_id, "pornhub"),
+            )
             time.sleep(1.0)
         else:
+            workflow_heuristics.advance(session_id, "chrome_login")
             driver = setup_chrome_driver(headless)
             driver.get("https://www.pornhub.com")
             logging.info("Please log in to PornHub in the opened browser.")
@@ -670,17 +687,29 @@ def pornhub_workflow(playlist_url: str, download_dir: str, headless: bool, log_f
             time.sleep(5)
             save_cookies_netscape(driver, cookie_file)
 
+        workflow_heuristics.advance(session_id, "extract_list")
+        workflow_heuristics.set_detail(session_id, "Reading your favorites playlist with yt-dlp…")
+
         video_urls = extract_video_urls_ytdlp(cookie_file, playlist_url)
         if not video_urls:
             logging.error("No video URLs extracted.")
+            workflow_heuristics.mark_error(
+                session_id,
+                "No videos found in favorites (empty list or yt-dlp could not read the playlist).",
+            )
             return
-        
-        # Download videos
+
+        workflow_heuristics.set_detail(session_id, f"Found {len(video_urls)} videos · starting downloads")
+
+        workflow_heuristics.advance(session_id, "download")
         video_info_list = [(url, f"video_{i}") for i, url in enumerate(video_urls)]
         download_videos_parallel(video_info_list, download_dir, cookie_file=cookie_file, session_id=session_id)
-        
+
+        ok = True
+
     except Exception as e:
         logging.critical(f"Error in PornHub workflow: {e}")
+        workflow_heuristics.mark_error(session_id, str(e))
     finally:
         if driver:
             try:
@@ -688,6 +717,8 @@ def pornhub_workflow(playlist_url: str, download_dir: str, headless: bool, log_f
                 logging.info("Chrome WebDriver closed successfully.")
             except Exception as e:
                 logging.error(f"Error closing Chrome WebDriver: {e}")
+        if ok:
+            workflow_heuristics.complete_success(session_id)
 
 def extract_video_info_sequential(driver, video_urls: List[str]) -> List[Tuple[str, str, str]]:
     """Extract video info sequentially to avoid driver conflicts."""
@@ -717,29 +748,42 @@ def xhamster_workflow(favorites_url: str, download_dir: str, headless: bool, log
     
     cookie_file = os.path.join(LOG_DIR, f"xhamster_cookies_{session_id}.txt")
     driver = None
+    ok = False
     try:
         login_url = "https://xhamster.com/login"
         use_embedded = webview_login_bridge.is_active() and webview_login_bridge.embedded_login_env_enabled()
         if use_embedded:
-            webview_login_bridge.begin_embedded_login(login_url, cookie_file)
+            workflow_heuristics.advance(session_id, "site_login")
+            webview_login_bridge.begin_embedded_login(
+                login_url,
+                cookie_file,
+                progress_url=_desktop_session_progress_url(session_id, "xhamster"),
+            )
             scrape_headless = _selenium_headless_after_embedded_login()
             if scrape_headless:
                 logging.info(
                     "Selenium runs headless after in-app login so Chrome does not cover SHUCK3R "
                     "(set HAMSTER_SHOW_SELENIUM=1 for a visible automation window)."
                 )
+            workflow_heuristics.advance(session_id, "save_cookies")
+            workflow_heuristics.set_detail(session_id, None)
+            workflow_heuristics.advance(session_id, "browser_start")
             driver = setup_chrome_driver(scrape_headless)
             load_netscape_cookies_into_driver(driver, cookie_file, "https://xhamster.com/")
         else:
+            workflow_heuristics.advance(session_id, "chrome_login")
             driver = setup_chrome_driver(headless)
             wait_for_manual_login(driver, login_url)
             time.sleep(5)
             save_cookies_netscape(driver, cookie_file)
-        
-        # Initialize progress tracking
+            workflow_heuristics.advance(session_id, "save_cookies")
+            workflow_heuristics.advance(session_id, "browser_start")
+
         tracker = get_tracker(session_id)
-        tracker.start_session(0)  # We'll update this as we find videos
-        
+        tracker.start_session(0)
+        workflow_heuristics.advance(session_id, "collect_urls")
+        workflow_heuristics.set_detail(session_id, "Loading your favorites pages…")
+
         # PHASE 1: Collect all video URLs from all pages
         logging.info("=== PHASE 1: Collecting all video URLs from all pages ===")
         all_video_links: Set[str] = set()
@@ -831,30 +875,42 @@ def xhamster_workflow(favorites_url: str, download_dir: str, headless: bool, log
                 logging.info(f"Found {len(new_links)} new videos on page {page_number}")
             
             all_video_links.update(video_links)  # Update with all links from this page
+            workflow_heuristics.set_detail(
+                session_id,
+                f"Favorites page {page_number} · {len(all_video_links)} links collected so far",
+            )
             page_number += 1
-            
+
             # Safety limit to prevent infinite loops
             if page_number > 100:
                 logging.warning("Reached maximum page limit (100), stopping pagination")
                 break
         
         logging.info(f"=== PHASE 1 COMPLETE: Collected {len(all_video_links)} unique video URLs from {page_number-1} pages ===")
-        
+
         # PHASE 2: Download all videos
         logging.info("=== PHASE 2: Downloading all videos ===")
         all_video_links_list = list(all_video_links)
         tracker.start_session(len(all_video_links_list))
-        
-        # Process videos in batches for better performance
-        batch_size = 10  # Process 10 videos at a time
+        workflow_heuristics.advance(session_id, "download")
+        workflow_heuristics.set_detail(
+            session_id,
+            f"{len(all_video_links_list)} videos queued · processing in batches",
+        )
+
+        batch_size = 10
         total_downloaded = 0
-        
+
         for i in range(0, len(all_video_links_list), batch_size):
             batch = all_video_links_list[i:i + batch_size]
             batch_num = i // batch_size + 1
             total_batches = (len(all_video_links_list) + batch_size - 1) // batch_size
-            
+
             logging.info(f"Processing batch {batch_num}/{total_batches} ({len(batch)} videos)")
+            workflow_heuristics.set_detail(
+                session_id,
+                f"Batch {batch_num} of {total_batches} · resolving streams and downloading",
+            )
             
             # Extract video info sequentially (to avoid driver conflicts)
             video_info_results = extract_video_info_sequential(driver, batch)
@@ -881,9 +937,13 @@ def xhamster_workflow(favorites_url: str, download_dir: str, headless: bool, log
         
         logging.info(f"=== PHASE 2 COMPLETE: Downloaded {total_downloaded} videos ===")
         logging.info(f"xHamster workflow completed. Total videos processed: {total_downloaded}")
-        
+
+        workflow_heuristics.set_detail(session_id, None)
+        ok = True
+
     except Exception as e:
         logging.critical(f"Error in xHamster workflow: {e}")
+        workflow_heuristics.mark_error(session_id, str(e))
     finally:
         if driver:
             try:
@@ -891,6 +951,8 @@ def xhamster_workflow(favorites_url: str, download_dir: str, headless: bool, log
                 logging.info("Chrome WebDriver closed successfully.")
             except Exception as e:
                 logging.error(f"Error closing Chrome WebDriver: {e}")
+        if ok:
+            workflow_heuristics.complete_success(session_id)
 
 # ----------------------------- FastAPI Routes ----------------------------- #
 
@@ -932,7 +994,25 @@ def handle_form(request: Request,
         background_tasks.add_task(xhamster_workflow, favorites_url, DOWNLOAD_DIR, headless_bool, log_file, session_id)
     else:
         return {"error": "Invalid site selected"}
-    
+
+    embedded_login = webview_login_bridge.is_active() and webview_login_bridge.embedded_login_env_enabled()
+    workflow_heuristics.register_session(session_id, site, embedded=embedded_login)
+    dest = f"/download/session/{session_id}?timestamp={timestamp}&site={site}"
+    return RedirectResponse(url=dest, status_code=303)
+
+
+@app.get("/download/session/{session_id}")
+def download_session_progress(
+    request: Request,
+    session_id: str,
+    timestamp: int = Query(...),
+    site: str = Query(...),
+):
+    """Bookmarkable progress page (GET) so the desktop WebView keeps the download UI after login."""
+    if site not in ("pornhub", "xhamster"):
+        raise HTTPException(status_code=400, detail="Invalid site")
+    if str(timestamp) != session_id:
+        raise HTTPException(status_code=400, detail="Session mismatch")
     embedded_login = webview_login_bridge.is_active() and webview_login_bridge.embedded_login_env_enabled()
     return templates.TemplateResponse(
         request,
@@ -945,6 +1025,24 @@ def handle_form(request: Request,
         },
     )
 
+
+@app.post("/api/embedded-login/confirm")
+def api_embedded_login_confirm():
+    """Same as menu 'Done logging in' — on-page button for users who do not see the native menu bar."""
+    if not webview_login_bridge.is_active() or not webview_login_bridge.embedded_login_env_enabled():
+        raise HTTPException(
+            status_code=400,
+            detail="Embedded login is not active here. Use the SHUCK3R desktop window.",
+        )
+    if not webview_login_bridge.has_pending_login():
+        raise HTTPException(
+            status_code=400,
+            detail="Nothing is waiting for login confirmation. If you already continued, watch progress below.",
+        )
+    webview_login_bridge.finish_embedded_login(skip_native_confirm=True)
+    return {"ok": True}
+
+
 @app.get("/download/log/{timestamp}")
 def get_log(timestamp: int):
     """Download log file."""
@@ -953,6 +1051,36 @@ def get_log(timestamp: int):
         return FileResponse(path=log_file, filename=os.path.basename(log_file), media_type='text/plain')
     else:
         return {"error": "Log file not found."}
+
+
+def _read_log_tail_text(log_path: Path, *, lines: int, max_bytes: int = 56_000) -> str:
+    """Return the last `lines` lines without loading huge files whole."""
+    try:
+        raw = log_path.read_bytes()
+    except OSError:
+        return ""
+    if len(raw) <= max_bytes:
+        text = raw.decode("utf-8", errors="replace")
+    else:
+        chunk = raw[-max_bytes:]
+        nl = chunk.find(b"\n")
+        if nl != -1:
+            chunk = chunk[nl + 1 :]
+        text = chunk.decode("utf-8", errors="replace")
+    all_lines = text.splitlines()
+    if len(all_lines) <= lines:
+        return "\n".join(all_lines)
+    return "\n".join(all_lines[-lines:])
+
+
+@app.get("/download/log/{timestamp}/tail", response_class=PlainTextResponse)
+def get_log_tail(timestamp: int, lines: int = Query(48, ge=8, le=200)):
+    """Last lines of the session log for the live dashboard (plain text)."""
+    log_file = Path(LOG_DIR) / f"video_downloader_{timestamp}.log"
+    if not log_file.is_file():
+        raise HTTPException(status_code=404, detail="Log file not found.")
+    body = _read_log_tail_text(log_file, lines=lines)
+    return body or "(log is empty so far)"
 
 @app.get("/downloaded/{filename}")
 def get_downloaded_file(filename: str):
@@ -965,7 +1093,17 @@ def get_downloaded_file(filename: str):
 
 @app.get("/progress/{session_id}")
 def get_progress(session_id: str):
-    """Get progress information for a download session."""
+    """JSON snapshot of progress (machine-readable). Prefer /api/progress for new integrations."""
+    try:
+        tracker = get_tracker(session_id)
+        return tracker.get_progress()
+    except Exception as e:
+        return {"error": f"Session not found: {e}"}
+
+
+@app.get("/api/progress/{session_id}")
+def api_get_progress(session_id: str):
+    """Same payload as /progress/{session_id}; use this path in docs and UI so users are not sent here by mistake."""
     try:
         tracker = get_tracker(session_id)
         return tracker.get_progress()
@@ -975,11 +1113,16 @@ def get_progress(session_id: str):
 @app.get("/progress/{session_id}/summary")
 def get_progress_summary(session_id: str):
     """Get progress summary for a download session."""
+    summary: Dict[str, Any]
     try:
         tracker = get_tracker(session_id)
-        return tracker.get_summary()
+        summary = tracker.get_summary()
     except Exception as e:
-        return {"error": f"Session not found: {e}"}
+        summary = {"error": f"Session not found: {e}"}
+    wf = workflow_heuristics.get_timeline(session_id)
+    if wf is not None:
+        summary["workflow"] = wf
+    return summary
 
 @app.get("/progress/{session_id}/json")
 def get_progress_json(session_id: str):

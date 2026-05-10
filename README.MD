@@ -59,9 +59,15 @@ Logs and downloads use a **per-user data folder** (same for source and the `.exe
 
 Starts the API on **loopback** and opens the UI in an **embedded window** (pywebview / Edge WebView2), not a separate browser tab.
 
-When you start a download, the **same window** navigates to the site so you can **log in there**; use menu **SHUCK3R → Done logging in — continue download** when finished (cookies are saved for yt-dlp / Selenium). Set **`HAMSTER_EMBEDDED_LOGIN=0`** to use the old separate Chrome login instead.
+When you start a download, a **popup WebView window** opens for the site login while the **main window stays on SHUCK3R**. Use the menu to switch (**SHUCK3R → Show main window** / **Show site login window**), then **SHUCK3R → Done logging in — continue download** when finished (cookies are saved for yt-dlp / Selenium). If the popup cannot be created, login falls back to the main window. Set **`HAMSTER_EMBEDDED_LOGIN=0`** to use the old separate Chrome login instead.
 
 For **xHamster**, after that in-app login step, Selenium Chrome runs **headless** by default so a full Chrome window does not cover the SHUCK3R window. Set **`HAMSTER_SHOW_SELENIUM=1`** if you want a visible Chrome window while it scrapes.
+
+The packaged app asks for **Yes/No confirmation** after **Done logging in** so you can verify you finished signing in before cookies are saved.
+
+Submitting the form **redirects** to a stable **`GET /download/session/{id}`** progress URL so the embedded browser reliably keeps the progress UI (then returns there again after login). That page is the **live session dashboard**: an ordered **workflow timeline** (linked steps with plain-language copy), live metrics, and recent log lines. **`/progress/{id}`** is JSON for tools only — use **Open full log** or **Load progress JSON** on the dashboard instead of opening `/progress/...` in a browser (you would only see raw JSON).
+
+After signing in on the site popup, use the **Continue download — I'm logged in** button on that page (not only the SHUCK3R menu), especially if the menu bar is hidden. The **site login window closes** after cookies are saved; the main window stays on the dashboard.
 
 - **`HAMSTER_EXTERNAL_BROWSER=1`** — use your **default browser** instead and keep a terminal open (useful for debugging).
 - **`HAMSTER_HOST`** / **`HAMSTER_PORT`** — same as above.

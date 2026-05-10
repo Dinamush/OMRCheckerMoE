@@ -188,6 +188,18 @@ h1 {
     outline-offset: 2px;
 }
 
+.visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
 .site-header {
     position: sticky;
     top: 0;
@@ -1039,4 +1051,567 @@ video.dup-thumb {
 
 .progress-complete-msg {
     color: var(--color-primary-hover);
+}
+
+/* -------- Download session dashboard (ui-ux-pro-max: data clarity + status visibility) -------- */
+
+.session-progress-layout {
+    max-width: 52rem;
+}
+
+.session-progress-layout .subtitle {
+    text-align: center;
+    margin: 0 0 20px;
+    color: var(--color-text-muted);
+    font-size: 14px;
+}
+
+.session-id-chip {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 500;
+    padding: 2px 8px;
+    border-radius: 6px;
+    background: var(--color-muted);
+    border: 1px solid var(--color-border);
+    color: var(--color-foreground);
+}
+
+.session-intro-banner {
+    text-align: left;
+}
+
+.session-dashboard {
+    --dashboard-accent: #16a34a;
+    --dashboard-accent-soft: rgba(22, 163, 74, 0.12);
+    --dashboard-surface: #f8fafc;
+    --dashboard-border: #e2e8f0;
+    --dashboard-ink: #0f172a;
+    --dashboard-muted: #475569;
+    font-family: "Fira Sans", var(--font-sans);
+    margin-top: 28px;
+    padding: 24px;
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--dashboard-border);
+    background: linear-gradient(165deg, #ffffff 0%, #f1f5f9 100%);
+    box-shadow: var(--shadow-md);
+}
+
+.dashboard-status-card {
+    padding: 20px 22px;
+    border-radius: var(--radius-md);
+    background: var(--dashboard-surface);
+    border: 1px solid var(--dashboard-border);
+    margin-bottom: 20px;
+}
+
+.dashboard-status-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 10px;
+}
+
+.dashboard-phase-badge {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 4px 10px;
+    border-radius: 999px;
+    background: var(--color-info-bg);
+    color: var(--color-info-text);
+    border: 1px solid var(--color-info-border);
+}
+
+.dashboard-phase-badge[data-phase="collect"],
+.dashboard-phase-badge[data-phase="titles"] {
+    background: #fffbeb;
+    color: #92400e;
+    border-color: #fcd34d;
+}
+
+.dashboard-phase-badge[data-phase="download"] {
+    background: var(--dashboard-accent-soft);
+    color: #15803d;
+    border-color: #86efac;
+}
+
+.dashboard-phase-badge[data-phase="complete"] {
+    background: #ecfdf5;
+    color: #047857;
+    border-color: #6ee7b7;
+}
+
+.dashboard-phase-badge[data-phase="error"],
+.dashboard-phase-badge[data-phase="starting"] {
+    background: #fef2f2;
+    color: #b91c1c;
+    border-color: #fecaca;
+}
+
+.dashboard-live-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--dashboard-muted);
+}
+
+.dashboard-live-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--dashboard-accent);
+    box-shadow: 0 0 0 0 rgba(22, 163, 74, 0.45);
+    animation: dashboard-pulse 1.8s ease-out infinite;
+}
+
+.dashboard-phase-title {
+    margin: 0 0 8px;
+    font-size: 1.35rem;
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    color: var(--dashboard-ink);
+}
+
+.dashboard-phase-detail {
+    margin: 0;
+    font-size: 14px;
+    line-height: 1.55;
+    color: var(--dashboard-muted);
+}
+
+.dashboard-metrics {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 12px;
+    margin-bottom: 22px;
+}
+
+@media (min-width: 640px) {
+    .dashboard-metrics {
+        grid-template-columns: repeat(4, 1fr);
+    }
+}
+
+.dashboard-metric {
+    padding: 14px 16px;
+    border-radius: var(--radius-md);
+    background: #fff;
+    border: 1px solid var(--dashboard-border);
+}
+
+.dashboard-metric-label {
+    display: block;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--dashboard-muted);
+    margin-bottom: 6px;
+}
+
+.dashboard-metric-value {
+    font-family: "Fira Code", var(--font-mono);
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: var(--dashboard-ink);
+}
+
+.dashboard-metric-value-success {
+    color: #15803d;
+}
+
+.dashboard-metric-value-danger {
+    color: #b91c1c;
+}
+
+.dashboard-progress-block {
+    margin-bottom: 22px;
+}
+
+.dashboard-progress-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 8px;
+}
+
+.dashboard-progress-label {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--dashboard-muted);
+}
+
+.dashboard-progress-percent {
+    font-family: "Fira Code", var(--font-mono);
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--dashboard-ink);
+}
+
+.dashboard-progress-bar {
+    margin: 0 0 10px;
+    height: 12px;
+}
+
+.dashboard-progress-subline {
+    margin: 0;
+    font-size: 13px;
+    color: var(--dashboard-muted);
+}
+
+.progress-bar-indeterminate .progress-fill {
+    position: relative;
+    width: 38% !important;
+    transition: none;
+    animation: dashboard-indeterminate 1.35s ease-in-out infinite;
+}
+
+.dashboard-log-card {
+    padding: 18px 20px;
+    border-radius: var(--radius-md);
+    background: #0f172a;
+    color: #e2e8f0;
+    margin-bottom: 16px;
+    border: 1px solid #1e293b;
+}
+
+.dashboard-log-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+}
+
+.dashboard-log-head .dashboard-icon {
+    color: #94a3b8;
+}
+
+.dashboard-log-title {
+    margin: 0;
+    flex: 1 1 auto;
+    font-size: 15px;
+    font-weight: 700;
+    color: #f8fafc;
+}
+
+.dashboard-log-hint {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #64748b;
+}
+
+.dashboard-log-pre {
+    margin: 0;
+    padding: 14px;
+    max-height: 240px;
+    overflow: auto;
+    font-family: "Fira Code", var(--font-mono);
+    font-size: 11px;
+    line-height: 1.45;
+    background: #020617;
+    border-radius: var(--radius-sm);
+    border: 1px solid #334155;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.dashboard-log-note {
+    margin: 12px 0 0;
+    font-size: 12px;
+    color: #94a3b8;
+    line-height: 1.45;
+}
+
+.dashboard-details {
+    margin-bottom: 10px;
+    padding: 12px 16px;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--dashboard-border);
+    background: #fff;
+}
+
+.dashboard-details summary {
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 14px;
+    color: var(--dashboard-ink);
+    transition: color 0.2s ease;
+}
+
+.dashboard-details summary:hover {
+    color: var(--color-primary);
+}
+
+.dashboard-details-dev .dashboard-json-pre {
+    margin-top: 12px;
+}
+
+.dashboard-details-list {
+    margin: 12px 0 0;
+    padding-left: 1.2rem;
+    font-size: 13px;
+    color: var(--dashboard-muted);
+    line-height: 1.55;
+}
+
+.dashboard-json-pre {
+    max-height: 280px;
+    overflow: auto;
+    padding: 14px;
+    font-family: "Fira Code", var(--font-mono);
+    font-size: 11px;
+    background: var(--color-muted);
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--color-border);
+}
+
+.session-actions-footer {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    justify-content: center;
+    margin-top: 28px;
+}
+
+.btn-small {
+    padding: 8px 14px;
+    font-size: 13px;
+    min-height: unset;
+}
+
+.embedded-login-cta-head {
+    display: flex;
+    gap: 14px;
+    align-items: flex-start;
+    margin-bottom: 14px;
+}
+
+.embedded-login-cta-title {
+    margin: 0 0 6px;
+    font-size: 16px;
+}
+
+.embedded-login-cta-desc {
+    margin: 0;
+}
+
+.dashboard-icon-lock {
+    flex-shrink: 0;
+    color: var(--color-primary);
+}
+
+@keyframes dashboard-pulse {
+    0% {
+        box-shadow: 0 0 0 0 rgba(22, 163, 74, 0.45);
+    }
+    70% {
+        box-shadow: 0 0 0 10px rgba(22, 163, 74, 0);
+    }
+    100% {
+        box-shadow: 0 0 0 0 rgba(22, 163, 74, 0);
+    }
+}
+
+@keyframes dashboard-indeterminate {
+    0% {
+        transform: translateX(-100%);
+    }
+    100% {
+        transform: translateX(220%);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .dashboard-live-dot {
+        animation: none;
+    }
+
+    .progress-bar-indeterminate .progress-fill {
+        animation: none;
+        width: 35% !important;
+    }
+
+    .workflow-step-pulse {
+        animation: none !important;
+        opacity: 1;
+    }
+}
+
+/* -------- Workflow timeline (linked-list steps / user heuristics) -------- */
+
+.workflow-error-banner {
+    padding: 12px 16px;
+    margin-bottom: 16px;
+    border-radius: var(--radius-md);
+    font-size: 14px;
+    font-weight: 600;
+    color: #991b1b;
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+}
+
+.workflow-timeline-card {
+    margin-bottom: 22px;
+    padding: 20px 22px;
+    border-radius: var(--radius-md);
+    background: #fff;
+    border: 1px solid var(--dashboard-border, #e2e8f0);
+    box-shadow: var(--shadow-sm);
+}
+
+.workflow-timeline-header {
+    margin-bottom: 18px;
+}
+
+.workflow-timeline-header h3 {
+    margin: 0 0 8px;
+    font-size: 1.05rem;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    color: var(--dashboard-ink, #0f172a);
+}
+
+.workflow-timeline-lead {
+    margin: 0;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--dashboard-muted, #475569);
+}
+
+.workflow-step-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.workflow-step {
+    position: relative;
+    display: grid;
+    grid-template-columns: 40px 1fr;
+    gap: 12px;
+    padding-bottom: 18px;
+}
+
+.workflow-step:last-child {
+    padding-bottom: 0;
+}
+
+.workflow-step:not(:last-child)::before {
+    content: "";
+    position: absolute;
+    left: 19px;
+    top: 36px;
+    bottom: 0;
+    width: 2px;
+    background: linear-gradient(180deg, #cbd5e1 0%, #e2e8f0 100%);
+    border-radius: 1px;
+}
+
+.workflow-step--done:not(:last-child)::before {
+    background: linear-gradient(180deg, #86efac 0%, #bbf7d0 100%);
+}
+
+.workflow-step-marker {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: "Fira Code", var(--font-mono);
+    font-size: 13px;
+    font-weight: 600;
+    color: #64748b;
+    background: #f1f5f9;
+    border: 2px solid #e2e8f0;
+    flex-shrink: 0;
+    z-index: 1;
+}
+
+.workflow-step--done .workflow-step-marker {
+    color: #15803d;
+    background: #ecfdf5;
+    border-color: #86efac;
+}
+
+.workflow-step--active .workflow-step-marker {
+    color: var(--color-primary);
+    background: #eff6ff;
+    border-color: #93c5fd;
+    box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.15);
+}
+
+.workflow-step--error .workflow-step-marker {
+    color: #b91c1c;
+    background: #fef2f2;
+    border-color: #fecaca;
+}
+
+.workflow-step-pulse {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--color-primary);
+    animation: workflow-pulse 1.5s ease-out infinite;
+}
+
+.workflow-step-body {
+    padding-top: 2px;
+}
+
+.workflow-step-title {
+    margin: 0 0 4px;
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--dashboard-ink, #0f172a);
+}
+
+.workflow-step--pending .workflow-step-title {
+    color: #64748b;
+}
+
+.workflow-step-msg {
+    margin: 0;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--dashboard-muted, #475569);
+}
+
+.workflow-step--active .workflow-step-msg {
+    color: #334155;
+}
+
+@keyframes workflow-pulse {
+    0% {
+        transform: scale(1);
+        opacity: 1;
+    }
+    70% {
+        transform: scale(1.35);
+        opacity: 0.35;
+    }
+    100% {
+        transform: scale(1);
+        opacity: 1;
+    }
+}
+
+/* Download-started page: in-app login continuation (no reliance on OS menu bar) */
+.embedded-login-cta .embedded-login-done-btn {
+    margin-top: 0.25rem;
+}
+
+.embedded-login-cta .embedded-login-status {
+    margin-top: 0.75rem;
+    margin-bottom: 0;
 }
