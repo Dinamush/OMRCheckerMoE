@@ -6,13 +6,16 @@ Download favorites from PornHub and xHamster via a web UI.
 
 import os
 import logging
+import mimetypes
 import time
 import subprocess
 import concurrent.futures
 import re
+from pathlib import Path
 from typing import List, Optional, Tuple, Set
-from fastapi import FastAPI, Request, BackgroundTasks, Form
+from fastapi import FastAPI, Request, BackgroundTasks, Form, HTTPException, Query
 from fastapi.responses import RedirectResponse, FileResponse
+from pydantic import BaseModel, Field
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from bs4 import BeautifulSoup
@@ -30,6 +33,13 @@ from webdriver_manager.chrome import ChromeDriverManager
 import yt_dlp
 import requests
 from progress_tracker import get_tracker, cleanup_tracker
+from duplicate_finder import (
+    resolve_scan_directory,
+    resolve_deletable_file,
+    iter_files,
+    cluster_duplicates,
+    build_groups_payload,
+)
 
 # ----------------------------- Configuration ----------------------------- #
 
@@ -47,6 +57,24 @@ os.makedirs(LOG_DIR, exist_ok=True)
 # Directory to store downloaded videos
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+DOWNLOADS_ROOT_RESOLVED = str((Path(BASE_DIR) / DOWNLOAD_DIR).resolve())
+
+# Allowed suffixes for duplicate-checker inline video preview (same validation as path checks).
+DUPLICATE_PREVIEW_VIDEO_EXTENSIONS = frozenset({
+    ".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v", ".wmv", ".flv", ".mpeg", ".mpg", ".3gp", ".ogv",
+})
+
+
+class DuplicateScanBody(BaseModel):
+    directory: str = ""
+    recursive: bool = False
+    threshold: float = Field(0.72, ge=0.5, le=1.0)
+
+
+class DuplicateDeleteBody(BaseModel):
+    paths: List[str]
+
 
 # ----------------------------- Helper Functions ----------------------------- #
 
@@ -801,7 +829,7 @@ def xhamster_workflow(favorites_url: str, download_dir: str, headless: bool, log
 @app.get("/")
 def read_form(request: Request):
     """Display the main form."""
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(request, "index.html")
 
 @app.post("/download")
 def handle_form(request: Request,
@@ -827,12 +855,15 @@ def handle_form(request: Request,
     else:
         return {"error": "Invalid site selected"}
     
-    return templates.TemplateResponse("submitted.html", {
-        "request": request, 
-        "timestamp": timestamp,
-        "session_id": session_id,
-        "site": site
-    })
+    return templates.TemplateResponse(
+        request,
+        "submitted.html",
+        context={
+            "timestamp": timestamp,
+            "session_id": session_id,
+            "site": site,
+        },
+    )
 
 @app.get("/download/log/{timestamp}")
 def get_log(timestamp: int):
@@ -878,6 +909,71 @@ def get_progress_json(session_id: str):
         return FileResponse(path=progress_file, filename=f"progress_{session_id}.json", media_type='application/json')
     else:
         return {"error": "Progress file not found."}
+
+
+@app.get("/duplicates")
+def duplicates_page(request: Request):
+    """Duplicate file checker UI — scan any directory; empty field uses project downloads."""
+    return templates.TemplateResponse(
+        request,
+        "duplicates.html",
+        context={
+            "default_scan_directory": DOWNLOADS_ROOT_RESOLVED,
+            # Alias for older cached templates / mixed deploys
+            "allowed_downloads_root": DOWNLOADS_ROOT_RESOLVED,
+        },
+    )
+
+
+@app.post("/api/duplicates/scan")
+def api_duplicates_scan(body: DuplicateScanBody):
+    try:
+        root = resolve_scan_directory(body.directory, Path(BASE_DIR), DOWNLOAD_DIR)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    files = iter_files(root, body.recursive)
+    groups = cluster_duplicates(files, threshold=body.threshold)
+    payload = build_groups_payload(files, groups)
+    return {
+        "groups": payload,
+        "scanned_root": str(root),
+        "file_count": len(files),
+        "group_count": len(payload),
+    }
+
+
+@app.get("/api/duplicates/preview-file")
+def api_duplicates_preview_file(path: str = Query(..., description="Absolute path to a video file")):
+    """Stream a video file for HTML5 preview thumbnails (validated path, video extensions only)."""
+    try:
+        fp = resolve_deletable_file(path)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    ext = fp.suffix.lower()
+    if ext not in DUPLICATE_PREVIEW_VIDEO_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail="Preview is only available for common video file types.",
+        )
+    media_type, _ = mimetypes.guess_type(str(fp))
+    return FileResponse(path=str(fp), media_type=media_type or "video/mp4")
+
+
+@app.post("/api/duplicates/delete")
+def api_duplicates_delete(body: DuplicateDeleteBody):
+    deleted: List[str] = []
+    errors: List[dict] = []
+    for path_str in body.paths:
+        try:
+            fp = resolve_deletable_file(path_str)
+            fp.unlink()
+            deleted.append(str(fp))
+        except ValueError as e:
+            errors.append({"path": path_str, "error": str(e)})
+        except OSError as e:
+            errors.append({"path": path_str, "error": str(e)})
+    return {"deleted": deleted, "errors": errors}
+
 
 if __name__ == "__main__":
     try:

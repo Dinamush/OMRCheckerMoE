@@ -165,3 +165,257 @@ button[type="submit"]:disabled {
     background-color: #cccccc;
     cursor: not-allowed;
 }
+
+@media (prefers-reduced-motion: reduce) {
+    .radio-option {
+        transition: none;
+    }
+}
+
+.container-wide {
+    max-width: 960px;
+}
+
+.nav-top {
+    margin-bottom: 16px;
+}
+
+.nav-link {
+    color: #2e7d32;
+    font-weight: 500;
+    text-decoration: none;
+    cursor: pointer;
+    transition: color 0.2s ease;
+}
+
+.nav-link:hover {
+    color: #1b5e20;
+    text-decoration: underline;
+}
+
+.nav-link:focus-visible {
+    outline: 2px solid #4CAF50;
+    outline-offset: 2px;
+}
+
+.mono-path {
+    font-family: 'Courier New', monospace;
+    font-size: 13px;
+    word-break: break-all;
+    background-color: #e9ecef;
+    padding: 10px;
+    border-radius: 4px;
+    margin: 8px 0 0;
+}
+
+.help-text.no-margin {
+    margin-top: 0;
+}
+
+.hidden {
+    display: none !important;
+}
+
+.scan-meta {
+    margin-top: 20px;
+    padding: 12px;
+    background-color: #e8f5e9;
+    border-radius: 4px;
+    font-size: 14px;
+    color: #1b5e20;
+}
+
+.section-title {
+    margin-top: 28px;
+    margin-bottom: 8px;
+    font-size: 20px;
+    color: #333;
+}
+
+.btn-primary,
+.btn-danger {
+    width: 100%;
+    padding: 14px;
+    font-size: 16px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: 500;
+    margin-top: 8px;
+}
+
+.btn-primary {
+    background-color: #4CAF50;
+    color: white;
+}
+
+.btn-primary:hover:not(:disabled) {
+    background-color: #45a049;
+}
+
+.btn-danger {
+    background-color: #c62828;
+    color: white;
+    margin-top: 24px;
+}
+
+.btn-danger:hover:not(:disabled) {
+    background-color: #b71c1c;
+}
+
+.btn-primary:focus-visible,
+.btn-danger:focus-visible {
+    outline: 2px solid #0d47a1;
+    outline-offset: 2px;
+}
+
+.btn-primary:disabled,
+.btn-danger:disabled {
+    background-color: #cccccc;
+    cursor: not-allowed;
+}
+
+input[type="range"] {
+    width: 100%;
+    margin-top: 8px;
+    cursor: pointer;
+}
+
+.cursor-pointer {
+    cursor: pointer;
+}
+
+.alert-area {
+    margin-top: 16px;
+}
+
+.alert {
+    padding: 12px 14px;
+    border-radius: 4px;
+    font-size: 14px;
+    margin: 0;
+}
+
+.alert-info {
+    background-color: #e3f2fd;
+    color: #0d47a1;
+    border: 1px solid #90caf9;
+}
+
+.alert-success {
+    background-color: #e8f5e9;
+    color: #1b5e20;
+    border: 1px solid #a5d6a7;
+}
+
+.alert-warn {
+    background-color: #fff8e1;
+    color: #e65100;
+    border: 1px solid #ffcc80;
+}
+
+.alert-error {
+    background-color: #ffebee;
+    color: #b71c1c;
+    border: 1px solid #ef9a9a;
+}
+
+.dup-group-card {
+    margin-bottom: 24px;
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+    overflow: hidden;
+    background: #fafafa;
+}
+
+.dup-group-head {
+    padding: 12px 16px;
+    background: #eceff1;
+    border-bottom: 1px solid #e0e0e0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 16px;
+    align-items: baseline;
+    font-size: 14px;
+}
+
+.dup-group-title {
+    font-weight: 700;
+    color: #333;
+}
+
+.dup-group-confidence {
+    color: #455a64;
+}
+
+.dup-group-hint {
+    flex-basis: 100%;
+    font-size: 13px;
+    color: #546e7a;
+}
+
+.dup-group-hint code {
+    background: #fff;
+    padding: 2px 6px;
+    border-radius: 3px;
+}
+
+.dup-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14px;
+}
+
+.dup-table th {
+    text-align: left;
+    padding: 10px 12px;
+    background: #fff;
+    border-bottom: 2px solid #cfd8dc;
+    color: #37474f;
+}
+
+.dup-table td {
+    padding: 10px 12px;
+    border-bottom: 1px solid #eceff1;
+    vertical-align: middle;
+}
+
+.dup-row:hover {
+    background-color: #f5f5f5;
+}
+
+.dup-path {
+    word-break: break-word;
+    max-width: 420px;
+}
+
+.dup-preview-cell {
+    width: 168px;
+    vertical-align: middle;
+    text-align: center;
+}
+
+video.dup-thumb {
+    display: block;
+    max-width: 160px;
+    max-height: 90px;
+    width: auto;
+    height: auto;
+    margin: 0 auto;
+    object-fit: contain;
+    background: #1a1a1a;
+    border-radius: 4px;
+}
+
+.dup-preview-placeholder {
+    display: inline-block;
+    color: #78909c;
+    font-size: 13px;
+    padding: 8px 4px;
+}
+
+.dup-table input[type="radio"]:focus-visible,
+.dup-table input[type="checkbox"]:focus-visible {
+    outline: 2px solid #4CAF50;
+    outline-offset: 2px;
+}

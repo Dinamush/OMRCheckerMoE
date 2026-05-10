@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Duplicate file checker</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="container container-wide">
+        <nav class="nav-top">
+            <a href="/" class="nav-link">Home</a>
+        </nav>
+        <h1>Duplicate file checker</h1>
+        <p class="subtitle">Scan any folder on this PC, review likely duplicates, then delete extras.</p>
+
+        <div class="info-box">
+            <h3>Default folder</h3>
+            <p class="help-text no-margin">If you leave Directory empty, this folder is scanned:</p>
+            <p class="mono-path">{{ default_scan_directory or allowed_downloads_root }}</p>
+            <p class="help-text">You can also enter any path: an absolute path (e.g. <code>D:\Videos\my-folder</code>) or a path relative to <strong>the server&apos;s current working directory</strong> (often the project folder when you run <code>main.py</code>). Files removed by &quot;Delete unselected duplicates&quot; must exist as normal files at the paths returned by the scan.</p>
+        </div>
+
+        <div class="form-group">
+            <label for="scanDirectory">Directory (optional)</label>
+            <input type="text" id="scanDirectory" name="directory" placeholder="Empty = default above, or any folder path" autocomplete="off">
+        </div>
+        <div class="form-group checkbox-group">
+            <input type="checkbox" id="recursive">
+            <label for="recursive">Include subfolders (recursive scan)</label>
+        </div>
+        <div class="form-group">
+            <label for="threshold">Similarity threshold (name + size combined score)</label>
+            <input type="range" id="threshold" min="0.5" max="1" step="0.01" value="0.72">
+            <span id="thresholdLabel" class="help-text">0.72</span>
+            <span class="help-text">Higher = stricter (fewer matches). Max pairwise score per group is shown as &quot;Group confidence&quot;.</span>
+        </div>
+        <button type="button" class="btn-primary" id="btnScan">Scan for duplicates</button>
+
+        <div id="scanMeta" class="scan-meta hidden" aria-live="polite"></div>
+        <div id="alertArea" class="alert-area" role="status"></div>
+
+        <section id="resultsSection" class="hidden">
+            <h2 class="section-title">Results</h2>
+            <p class="help-text">Each row has a <strong>Keep</strong> box (checked = keep the file). By default one file per group stays checked; turn on more if they are not duplicates and you want to keep several. Unchecked rows are deleted when you confirm. Recognized video types show a short preview frame (browser-dependent).</p>
+            <div id="resultsTableWrap"></div>
+            <button type="button" class="btn-danger" id="btnDelete">Delete unchecked files</button>
+        </section>
+    </div>
+
+    <script>
+(function () {
+    const thresholdInput = document.getElementById('threshold');
+    const thresholdLabel = document.getElementById('thresholdLabel');
+    const btnScan = document.getElementById('btnScan');
+    const btnDelete = document.getElementById('btnDelete');
+    const resultsSection = document.getElementById('resultsSection');
+    const resultsWrap = document.getElementById('resultsTableWrap');
+    const scanMeta = document.getElementById('scanMeta');
+    const alertArea = document.getElementById('alertArea');
+
+    let lastGroups = [];
+
+    thresholdInput.addEventListener('input', function () {
+        thresholdLabel.textContent = thresholdInput.value;
+    });
+
+    function showAlert(msg, kind) {
+        alertArea.innerHTML = '';
+        const p = document.createElement('p');
+        p.className = 'alert alert-' + (kind || 'info');
+        p.textContent = msg;
+        alertArea.appendChild(p);
+    }
+
+    function clearAlert() {
+        alertArea.innerHTML = '';
+    }
+
+    function escapeHtml(s) {
+        const d = document.createElement('div');
+        d.textContent = s;
+        return d.innerHTML;
+    }
+
+    function isVideoFileName(name) {
+        return /\.(mp4|webm|mkv|mov|avi|m4v|wmv|flv|mpeg|mpg|3gp|ogv)$/i.test(name || '');
+    }
+
+    function renderGroups(groups) {
+        resultsWrap.innerHTML = '';
+        if (!groups.length) {
+            resultsWrap.innerHTML = '<p class="help-text">No duplicate groups found at this threshold.</p>';
+            btnDelete.disabled = true;
+            return;
+        }
+        btnDelete.disabled = false;
+
+        groups.forEach(function (g) {
+            const card = document.createElement('div');
+            card.className = 'dup-group-card';
+
+            const head = document.createElement('div');
+            head.className = 'dup-group-head';
+            head.innerHTML =
+                '<span class="dup-group-title">Group ' + (g.group_id + 1) + '</span>' +
+                '<span class="dup-group-confidence">Group confidence (max pairwise score): <strong>' +
+                g.confidence + '</strong></span>' +
+                '<span class="dup-group-hint">Normalized hint: <code>' + escapeHtml(g.normalized_hint || '') + '</code></span>';
+
+            const table = document.createElement('table');
+            table.className = 'dup-table';
+            table.innerHTML =
+                '<thead><tr>' +
+                '<th scope="col">Keep</th>' +
+                '<th scope="col">Preview</th>' +
+                '<th scope="col">Filename</th>' +
+                '<th scope="col">Size</th>' +
+                '<th scope="col">Match vs best peer</th>' +
+                '</tr></thead><tbody></tbody>';
+            const tbody = table.querySelector('tbody');
+
+            g.files.forEach(function (f, idx) {
+                const tr = document.createElement('tr');
+                tr.className = 'dup-row';
+                const cid = 'keep_' + g.group_id + '_' + idx;
+                const keepChecked = idx === 0 ? ' checked' : '';
+                let previewCell;
+                if (isVideoFileName(f.name)) {
+                    const prevUrl = window.location.origin + '/api/duplicates/preview-file?path=' +
+                        encodeURIComponent(f.path) + '#t=0.1';
+                    previewCell =
+                        '<td class="dup-preview-cell">' +
+                        '<video class="dup-thumb" muted playsinline preload="metadata" loading="lazy" ' +
+                        'src="' + prevUrl + '" title="' + escapeHtml(f.name) + '"></video></td>';
+                } else {
+                    previewCell = '<td class="dup-preview-cell"><span class="dup-preview-placeholder">—</span></td>';
+                }
+                tr.innerHTML =
+                    '<td><input type="checkbox" id="' + escapeHtml(cid) +
+                    '" class="cursor-pointer dup-keep-cb"' + keepChecked +
+                    ' aria-label="Keep ' + escapeHtml(f.name) + '"></td>' +
+                    previewCell +
+                    '<td class="dup-path" title="' + escapeHtml(f.path) + '">' + escapeHtml(f.name) + '</td>' +
+                    '<td>' + escapeHtml(f.size_display) + '</td>' +
+                    '<td>' + escapeHtml(String(f.match_score)) + '</td>';
+                tbody.appendChild(tr);
+                const vid = tr.querySelector('video.dup-thumb');
+                if (vid) {
+                    vid.addEventListener('error', function () {
+                        const span = document.createElement('span');
+                        span.className = 'dup-preview-placeholder';
+                        span.textContent = 'No preview';
+                        vid.parentNode.replaceChild(span, vid);
+                    });
+                }
+            });
+
+            card.appendChild(head);
+            card.appendChild(table);
+            resultsWrap.appendChild(card);
+        });
+    }
+
+    btnScan.addEventListener('click', async function () {
+        clearAlert();
+        btnScan.disabled = true;
+        resultsSection.classList.add('hidden');
+        lastGroups = [];
+
+        const body = {
+            directory: document.getElementById('scanDirectory').value.trim(),
+            recursive: document.getElementById('recursive').checked,
+            threshold: parseFloat(thresholdInput.value, 10)
+        };
+
+        try {
+            const res = await fetch('/api/duplicates/scan', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            });
+            const data = await res.json().catch(function () { return {}; });
+            if (!res.ok) {
+                showAlert(data.detail || data.message || 'Scan failed', 'error');
+                return;
+            }
+            lastGroups = data.groups || [];
+            scanMeta.textContent =
+                'Scanned: ' + (data.scanned_root || '') +
+                ' — ' + (data.file_count || 0) + ' file(s), ' +
+                (data.group_count || 0) + ' duplicate group(s).';
+            scanMeta.classList.remove('hidden');
+            renderGroups(lastGroups);
+            resultsSection.classList.remove('hidden');
+            if (!lastGroups.length) {
+                showAlert('No duplicate groups at this threshold.', 'info');
+            }
+        } catch (e) {
+            showAlert('Network error: ' + e.message, 'error');
+        } finally {
+            btnScan.disabled = false;
+        }
+    });
+
+    btnDelete.addEventListener('click', async function () {
+        clearAlert();
+        if (!lastGroups.length) return;
+
+        const toDelete = [];
+        for (let i = 0; i < lastGroups.length; i++) {
+            const g = lastGroups[i];
+            g.files.forEach(function (f, idx) {
+                const cb = document.getElementById('keep_' + g.group_id + '_' + idx);
+                if (cb && !cb.checked) {
+                    toDelete.push(f.path);
+                }
+            });
+        }
+
+        if (!toDelete.length) {
+            showAlert('Nothing to delete.', 'info');
+            return;
+        }
+
+        if (!window.confirm('Permanently delete ' + toDelete.length + ' file(s)? This cannot be undone.')) {
+            return;
+        }
+
+        btnDelete.disabled = true;
+        try {
+            const res = await fetch('/api/duplicates/delete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ paths: toDelete })
+            });
+            const data = await res.json().catch(function () { return {}; });
+            if (!res.ok) {
+                showAlert(data.detail || 'Delete request failed', 'error');
+                return;
+            }
+            const deleted = (data.deleted || []).length;
+            const errCount = (data.errors || []).length;
+            let msg = 'Deleted ' + deleted + ' file(s).';
+            if (errCount) {
+                msg += ' ' + errCount + ' error(s).';
+                console.warn(data.errors);
+            }
+            showAlert(msg, errCount ? 'warn' : 'success');
+            btnScan.click();
+        } catch (e) {
+            showAlert('Network error: ' + e.message, 'error');
+        } finally {
+            btnDelete.disabled = false;
+        }
+    });
+})();
+    </script>
+</body>
+</html>
