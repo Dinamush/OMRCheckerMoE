@@ -438,6 +438,20 @@ h1 {
 
 /* -------- Forms -------- */
 
+.form-error-banner {
+    padding: 14px 18px;
+    margin-bottom: 22px;
+    border-radius: var(--radius-md);
+    border: 1px solid #fecaca;
+    background: #fef2f2;
+    color: #991b1b;
+    font-size: 14px;
+}
+
+.form-error-banner p {
+    margin: 0;
+}
+
 form .form-group {
     margin-bottom: 22px;
 }

@@ -5,6 +5,12 @@
         <h1>Downloader</h1>
         <p class="subtitle">Download videos from PornHub and xHamster</p>
 
+        {% if form_error %}
+        <div class="form-error-banner" role="alert">
+            <p><strong>Could not start download.</strong> {{ form_error }}</p>
+        </div>
+        {% endif %}
+
         <form action="/download" method="post" id="downloadForm">
             <div class="form-group">
                 <label>Select Site:</label>
@@ -25,6 +31,17 @@
                 <label for="headless">Run Headlessly (Browser won't be visible)</label>
             </div>
 
+            <div class="form-group">
+                <label for="existing_library_dir">Only download what I don&apos;t have yet (optional)</label>
+                <input type="text" id="existing_library_dir" name="existing_library_dir" autocomplete="off" placeholder="Folder where your existing videos are stored">
+                <p class="help-text">Leave blank to download everything from favorites. If you set a folder, SHUCK3R compares each favorite&apos;s title to video filenames there (mp4, mkv, webm, …) and <strong>skips</strong> matches so only new ones download.</p>
+            </div>
+
+            <div class="form-group checkbox-group">
+                <input type="checkbox" id="library_recursive" name="library_recursive" value="true">
+                <label for="library_recursive">Include subfolders when scanning the library path above</label>
+            </div>
+
             <div class="info-box">
                 <h3>Instructions:</h3>
                 <ul>
@@ -32,6 +49,7 @@
                     <li><strong>xHamster:</strong> Downloads from your favorites page (requires login)</li>
                     <li>You'll need to log in manually in the browser window that opens</li>
                     <li>Videos save under your user profile (Windows: <code>%LOCALAPPDATA%\HamsterScraper\downloads</code>; override with <code>HAMSTER_USER_DATA</code>)</li>
+                    <li><strong>Library skip:</strong> PornHub resolves each title via yt-dlp (slower but accurate). xHamster uses titles from the page. Matching is by normalized filename — very different names may still download.</li>
                     <li>Make sure you're logged into the selected site before starting</li>
                 </ul>
             </div>

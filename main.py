@@ -42,6 +42,11 @@ from duplicate_finder import (
     cluster_duplicates,
     build_groups_payload,
 )
+from existing_library import (
+    build_library_normalized_names,
+    matches_existing_library,
+    resolve_optional_library_directory,
+)
 import webview_login_bridge
 import workflow_heuristics
 
@@ -260,6 +265,28 @@ def extract_video_urls_ytdlp(cookie_file: str, playlist_url: str) -> List[str]:
     urls = result.stdout.strip().splitlines()
     logging.info(f"Extracted {len(urls)} video URLs with yt-dlp.")
     return urls
+
+
+def fetch_video_title_ytdlp(url: str, cookie_file: Optional[str]) -> str:
+    """Resolve display/filename title via yt-dlp (no download). Used for library dedupe on PornHub."""
+    opts: dict = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+    }
+    if cookie_file:
+        opts["cookiefile"] = cookie_file
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            raw = (info or {}).get("title") or ""
+            t = re.sub(r'[<>:"/\\|?*]', "_", str(raw).strip())
+            t = re.sub(r"\s+", "_", t)
+            return t[:100] if t else f"video_{abs(hash(url)) % 10_000_000}"
+    except Exception as e:
+        logging.warning("yt-dlp could not read title for %s: %s", url, e)
+        return f"video_{abs(hash(url)) % 10_000_000}"
+
 
 def fetch_html_selenium(driver, url: str) -> Optional[str]:
     """Fetch HTML content using Selenium with scrolling."""
@@ -641,22 +668,24 @@ def download_videos_parallel(video_info_list: List[Tuple[str, str]], download_di
                     future.result()
                 except Exception as e:
                     logging.error(f"Error in video download: {e}")
-        
-        # End the session
-        tracker.end_session()
-        logging.info("Download session completed successfully")
-        
+
+        logging.info("Parallel download workers finished for this batch.")
+
     except Exception as e:
         logging.critical(f"Critical error in download_videos_parallel: {e}")
-    finally:
-        try:
-            cleanup_tracker(session_id)
-        except Exception as e:
-            logging.error(f"Error cleaning up tracker: {e}")
 
 # ----------------------------- Site-Specific Workflows ----------------------------- #
 
-def pornhub_workflow(playlist_url: str, download_dir: str, headless: bool, log_file: str, session_id: str = None) -> None:
+def pornhub_workflow(
+    playlist_url: str,
+    download_dir: str,
+    headless: bool,
+    log_file: str,
+    session_id: str = None,
+    *,
+    library_dir: Optional[str] = None,
+    library_recursive: bool = False,
+) -> None:
     """PornHub workflow using Chrome and yt-dlp."""
     if not session_id:
         session_id = str(int(time.time()))
@@ -699,11 +728,61 @@ def pornhub_workflow(playlist_url: str, download_dir: str, headless: bool, log_f
             )
             return
 
-        workflow_heuristics.set_detail(session_id, f"Found {len(video_urls)} videos · starting downloads")
+        workflow_heuristics.set_detail(session_id, f"Found {len(video_urls)} videos in favorites")
 
         workflow_heuristics.advance(session_id, "download")
-        video_info_list = [(url, f"video_{i}") for i, url in enumerate(video_urls)]
-        download_videos_parallel(video_info_list, download_dir, cookie_file=cookie_file, session_id=session_id)
+
+        if library_dir:
+            tracker = get_tracker(session_id)
+            tracker.start_session(len(video_urls))
+            norms = build_library_normalized_names(
+                Path(library_dir), recursive=library_recursive
+            )
+            workflow_heuristics.set_detail(
+                session_id,
+                f"Resolving titles ({len(video_urls)} videos) · comparing to your library folder…",
+            )
+            to_download: List[Tuple[str, str]] = []
+            skipped_n = 0
+            for i, url in enumerate(video_urls):
+                title = fetch_video_title_ytdlp(url, cookie_file)
+                if matches_existing_library(title, norms):
+                    tracker.add_urls([url], [title])
+                    tracker.skip_download(url, "Already in library folder")
+                    skipped_n += 1
+                else:
+                    to_download.append((url, title))
+                if (i + 1) % 40 == 0 or (i + 1) == len(video_urls):
+                    logging.info(
+                        "Library compare: %s/%s URLs (skipped %s matches so far)",
+                        i + 1,
+                        len(video_urls),
+                        skipped_n,
+                    )
+            logging.info(
+                "Library filter complete: %s skipped (already on disk), %s to download",
+                skipped_n,
+                len(to_download),
+            )
+            workflow_heuristics.set_detail(
+                session_id,
+                f"Downloading {len(to_download)} new videos ({skipped_n} skipped · already in library)",
+            )
+            if to_download:
+                tracker.add_urls(
+                    [pair[0] for pair in to_download],
+                    [pair[1] for pair in to_download],
+                )
+                download_videos_parallel(
+                    to_download, download_dir, cookie_file=cookie_file, session_id=session_id
+                )
+            else:
+                logging.info("All favorites matched files in the library folder; nothing to download.")
+        else:
+            video_info_list = [(url, f"video_{i}") for i, url in enumerate(video_urls)]
+            download_videos_parallel(
+                video_info_list, download_dir, cookie_file=cookie_file, session_id=session_id
+            )
 
         ok = True
 
@@ -718,6 +797,10 @@ def pornhub_workflow(playlist_url: str, download_dir: str, headless: bool, log_f
             except Exception as e:
                 logging.error(f"Error closing Chrome WebDriver: {e}")
         if ok:
+            try:
+                cleanup_tracker(session_id)
+            except Exception as e:
+                logging.error(f"Error cleaning up tracker: {e}")
             workflow_heuristics.complete_success(session_id)
 
 def extract_video_info_sequential(driver, video_urls: List[str]) -> List[Tuple[str, str, str]]:
@@ -738,7 +821,16 @@ def extract_video_info_sequential(driver, video_urls: List[str]) -> List[Tuple[s
     
     return results
 
-def xhamster_workflow(favorites_url: str, download_dir: str, headless: bool, log_file: str, session_id: str = None) -> None:
+def xhamster_workflow(
+    favorites_url: str,
+    download_dir: str,
+    headless: bool,
+    log_file: str,
+    session_id: str = None,
+    *,
+    library_dir: Optional[str] = None,
+    library_recursive: bool = False,
+) -> None:
     """xHamster workflow using Chrome and yt-dlp with two-phase approach."""
     if not session_id:
         session_id = str(int(time.time()))
@@ -893,10 +985,26 @@ def xhamster_workflow(favorites_url: str, download_dir: str, headless: bool, log
         all_video_links_list = list(all_video_links)
         tracker.start_session(len(all_video_links_list))
         workflow_heuristics.advance(session_id, "download")
-        workflow_heuristics.set_detail(
-            session_id,
-            f"{len(all_video_links_list)} videos queued · processing in batches",
-        )
+
+        library_norms = None
+        if library_dir:
+            library_norms = build_library_normalized_names(
+                Path(library_dir), recursive=library_recursive
+            )
+            logging.info(
+                "Existing-library filter active: %s normalized video names under %s",
+                len(library_norms),
+                library_dir,
+            )
+            workflow_heuristics.set_detail(
+                session_id,
+                f"{len(all_video_links_list)} favorites · skipping names already in your library folder",
+            )
+        else:
+            workflow_heuristics.set_detail(
+                session_id,
+                f"{len(all_video_links_list)} videos queued · processing in batches",
+            )
 
         batch_size = 10
         total_downloaded = 0
@@ -915,10 +1023,20 @@ def xhamster_workflow(favorites_url: str, download_dir: str, headless: bool, log
             # Extract video info sequentially (to avoid driver conflicts)
             video_info_results = extract_video_info_sequential(driver, batch)
             
-            # Prepare videos for download
             videos_to_download = []
             for original_url, direct_url, video_title in video_info_results:
                 if direct_url:
+                    if library_norms and matches_existing_library(
+                        video_title, library_norms
+                    ):
+                        tracker.add_urls([direct_url], [video_title])
+                        tracker.skip_download(
+                            direct_url, "Already in library folder"
+                        )
+                        logging.info(
+                            "Skipping download (library match): %s", video_title
+                        )
+                        continue
                     videos_to_download.append((direct_url, video_title))
                     tracker.add_urls([direct_url], [video_title])
                 else:
@@ -952,6 +1070,10 @@ def xhamster_workflow(favorites_url: str, download_dir: str, headless: bool, log
             except Exception as e:
                 logging.error(f"Error closing Chrome WebDriver: {e}")
         if ok:
+            try:
+                cleanup_tracker(session_id)
+            except Exception as e:
+                logging.error(f"Error cleaning up tracker: {e}")
             workflow_heuristics.complete_success(session_id)
 
 # ----------------------------- FastAPI Routes ----------------------------- #
@@ -969,29 +1091,63 @@ def favicon_ico():
 @app.get("/")
 def read_form(request: Request):
     """Display the main form."""
-    return templates.TemplateResponse(request, "index.html")
+    return templates.TemplateResponse(request, "index.html", {"form_error": None})
 
 @app.post("/download")
-def handle_form(request: Request,
-                background_tasks: BackgroundTasks,
-                site: str = Form(...),
-                headless: str = Form("false")):
+def handle_form(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    site: str = Form(...),
+    headless: str = Form("false"),
+    existing_library_dir: str = Form(""),
+    library_recursive: str = Form("false"),
+):
     """Handle form submission and start the appropriate workflow."""
     timestamp = int(time.time())
     session_id = str(timestamp)
     log_file = os.path.join(LOG_DIR, f"video_downloader_{timestamp}.log")
-    
-    # Convert headless string to boolean
+
     headless_bool = headless.lower() == "true"
-    
+    library_recursive_bool = library_recursive.lower() == "true"
+
+    try:
+        library_path = resolve_optional_library_directory(
+            existing_library_dir, USER_DATA_DIR
+        )
+    except ValueError as e:
+        return templates.TemplateResponse(
+            request,
+            "index.html",
+            {"form_error": str(e)},
+            status_code=400,
+        )
+
+    library_dir_arg = str(library_path) if library_path else None
+
     if site == "pornhub":
-        # PornHub favorites URL - user will need to be logged in to their account
         playlist_url = "https://www.pornhub.com/my/favorites/videos"
-        background_tasks.add_task(pornhub_workflow, playlist_url, DOWNLOAD_DIR, headless_bool, log_file, session_id)
+        background_tasks.add_task(
+            pornhub_workflow,
+            playlist_url,
+            DOWNLOAD_DIR,
+            headless_bool,
+            log_file,
+            session_id,
+            library_dir=library_dir_arg,
+            library_recursive=library_recursive_bool,
+        )
     elif site == "xhamster":
-        # Default xHamster favorites URL - user will need to be logged in
         favorites_url = "https://xhamster.com/my/favorites/videos"
-        background_tasks.add_task(xhamster_workflow, favorites_url, DOWNLOAD_DIR, headless_bool, log_file, session_id)
+        background_tasks.add_task(
+            xhamster_workflow,
+            favorites_url,
+            DOWNLOAD_DIR,
+            headless_bool,
+            log_file,
+            session_id,
+            library_dir=library_dir_arg,
+            library_recursive=library_recursive_bool,
+        )
     else:
         return {"error": "Invalid site selected"}
 

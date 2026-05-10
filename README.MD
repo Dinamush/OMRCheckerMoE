@@ -1,6 +1,6 @@
 # SHUCK3R
 
-Download videos from your **PornHub** and **xHamster** favorites. You log in once in a browser window; the app collects video URLs and downloads them with progress tracking.
+Download videos from your **PornHub** and **xHamster** favorites. You log in once in a browser window; the app collects video URLs and downloads them with progress tracking. Optionally point at a folder of videos you already have: SHUCK3R **skips** favorites whose titles match those filenames and only downloads what’s missing.
 
 ---
 
