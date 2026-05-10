@@ -162,9 +162,10 @@ def setup_chrome_driver(headless: bool = False) -> webdriver.Chrome:
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=options)
         
-        # Set timeouts to prevent hanging
+        # Page load cap; avoid implicit wait — it applies to find_elements too, so a missing
+        # <video> on xHamster would block ~implicit_wait seconds per video (felt as "10s stalls").
         driver.set_page_load_timeout(30)
-        driver.implicitly_wait(10)
+        driver.implicitly_wait(0)
         
         # Execute script to remove webdriver property
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
