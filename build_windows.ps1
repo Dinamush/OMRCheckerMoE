@@ -13,6 +13,8 @@ foreach ($procName in @("SHUCK3R", "HamsterScraper")) {
 Start-Sleep -Seconds 1
 Remove-Item -Force -ErrorAction SilentlyContinue "./release/SHUCK3R.exe"
 Remove-Item -Force -ErrorAction SilentlyContinue "./release/HamsterScraper.exe"
+Write-Host "Regenerating static/app.ico from favicon layout …"
+python scripts/build_app_icon.py
 pyinstaller hamster_scraper.spec --distpath ./release --workpath build/pyinstaller --noconfirm
 if ($LASTEXITCODE -ne 0) {
     Write-Error "PyInstaller failed (exit $LASTEXITCODE)."

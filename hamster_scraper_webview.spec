@@ -55,6 +55,7 @@ exe = EXE(
     a.datas,
     [],
     name='SHUCK3RWebView',
+    icon='static/app.ico',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

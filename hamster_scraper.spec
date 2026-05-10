@@ -56,6 +56,7 @@ exe = EXE(
     a.datas,
     [],
     name='SHUCK3R',
+    icon='static/app.ico',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
