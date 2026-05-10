@@ -7,10 +7,10 @@
     <link rel="stylesheet" href="/static/style.css">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 </head>
 <body>
-    <div class="container container-wide">
+    <main class="container container-wide">
         <nav class="nav-top">
             <a href="/" class="nav-link">Home</a>
         </nav>
@@ -45,11 +45,11 @@
 
         <section id="resultsSection" class="hidden">
             <h2 class="section-title">Results</h2>
-            <p class="help-text">Each row has a <strong>Keep</strong> box (checked = keep the file). By default one file per group stays checked; turn on more if they are not duplicates and you want to keep several. Unchecked rows are deleted when you confirm. Recognized video types show a still frame from a few seconds into the file (not the very start) to avoid black intros; depends on browser and codec.</p>
+            <p class="help-text">Each row has a <strong>Keep</strong> box (checked = keep the file). By default one file per group stays checked; turn on more if they are not duplicates and you want to keep several. Unchecked rows are deleted when you confirm. Video previews load as you scroll (to avoid the browser stalling dozens of requests at once), seek to 12&nbsp;s when the file is long enough, then fall back to earlier times if decoding fails. Some codecs or files may still show &quot;No preview&quot;.</p>
             <div id="resultsTableWrap"></div>
             <button type="button" class="btn-danger" id="btnDelete">Delete unchecked files</button>
         </section>
-    </div>
+    </main>
 
     <script>
 (function () {
@@ -90,13 +90,15 @@
         return /\.(mp4|webm|mkv|mov|avi|m4v|wmv|flv|mpeg|mpg|3gp|ogv)$/i.test(name || '');
     }
 
-    /** Seconds to seek for thumbnail: past typical black leaders; clamped to duration. */
+    /** Same second for every long clip so duplicate rows match; short clips use a safe fraction. */
+    var DUP_PREVIEW_FIXED_SEC = 12;
+
     function dupThumbOffsetSec(duration) {
         if (!Number.isFinite(duration) || duration <= 0) {
             return null;
         }
         if (duration === Infinity) {
-            return 10;
+            return DUP_PREVIEW_FIXED_SEC;
         }
         if (duration < 0.15) {
             return 0;
@@ -104,46 +106,163 @@
         if (duration < 1) {
             return Math.min(Math.max(0.05, duration / 2), duration - 0.05);
         }
+        /* Long enough: everyone seeks to the same timestamp (easier to compare duplicates). */
+        if (duration >= DUP_PREVIEW_FIXED_SEC + 0.25) {
+            return DUP_PREVIEW_FIXED_SEC;
+        }
+        /* Between ~1s and fixed offset: stay off the black leader without exceeding duration. */
         var t = Math.min(Math.max(3, duration * 0.08), duration - 0.25);
         if (t <= 0.05) {
-            return Math.min(Math.max(0.05, duration * 0.15), duration - 0.05);
+            return Math.min(Math.max(0.05, duration * 0.35), duration - 0.05);
         }
         return t;
+    }
+
+    var dupPreviewObserver = null;
+
+    function ensureDupPreviewObserver() {
+        if (dupPreviewObserver || !('IntersectionObserver' in window)) {
+            return;
+        }
+        dupPreviewObserver = new IntersectionObserver(
+            function (entries) {
+                entries.forEach(function (entry) {
+                    if (!entry.isIntersecting) {
+                        return;
+                    }
+                    var el = entry.target;
+                    var url = el.getAttribute('data-preview-src');
+                    if (!url) {
+                        return;
+                    }
+                    dupPreviewObserver.unobserve(el);
+                    el.removeAttribute('data-preview-src');
+                    el.preload = 'auto';
+                    el.src = url;
+                });
+            },
+            { root: null, rootMargin: '240px', threshold: 0.01 }
+        );
+    }
+
+    /** Defer assigning src until near viewport so many rows do not overload parallel connections. */
+    function setupDupThumbDeferredSrc(video, url) {
+        ensureDupPreviewObserver();
+        if (dupPreviewObserver) {
+            video.setAttribute('data-preview-src', url);
+            dupPreviewObserver.observe(video);
+        } else {
+            video.preload = 'auto';
+            video.src = url;
+        }
     }
 
     function setupDupThumbSeek(video) {
         video.addEventListener('loadedmetadata', function onLoadedMeta() {
             video.removeEventListener('loadedmetadata', onLoadedMeta);
-            var t = dupThumbOffsetSec(video.duration);
+            var duration = video.duration;
+            var primary = dupThumbOffsetSec(duration);
+            var targets = [];
+            if (primary != null && primary > 0) {
+                targets.push(primary);
+            }
+            if (Number.isFinite(duration) && duration > 2) {
+                var mid = Math.min(3, Math.max(0.5, duration * 0.05));
+                if (!targets.length || Math.abs(mid - targets[targets.length - 1]) > 0.35) {
+                    targets.push(mid);
+                }
+            }
+            targets.push(0);
+
             var settled = false;
-            function afterSeek() {
+            var idx = 0;
+
+            function finish() {
                 if (settled) {
                     return;
                 }
                 settled = true;
-                video.pause();
-            }
-            if (t == null || t <= 0) {
-                afterSeek();
-                return;
-            }
-            video.addEventListener('seeked', afterSeek, { once: true });
-            try {
-                video.currentTime = t;
-            } catch (err) {
-                video.removeEventListener('seeked', afterSeek);
-                afterSeek();
-                return;
-            }
-            setTimeout(function () {
-                if (!settled && !video.seeking) {
-                    afterSeek();
+                /* Pause after a frame is composited; immediate pause after seeked often leaves a black texture. */
+                var v = video;
+                if (typeof v.requestVideoFrameCallback === 'function') {
+                    v.requestVideoFrameCallback(function () {
+                        requestAnimationFrame(function () {
+                            v.pause();
+                        });
+                    });
+                } else {
+                    requestAnimationFrame(function () {
+                        requestAnimationFrame(function () {
+                            v.pause();
+                        });
+                    });
                 }
-            }, 80);
+            }
+
+            function clampTime(t) {
+                if (!Number.isFinite(duration) || duration <= 0) {
+                    return Math.max(0, t);
+                }
+                return Math.min(Math.max(0, t), Math.max(0, duration - 0.05));
+            }
+
+            function scheduleAttempt() {
+                if (settled) {
+                    return;
+                }
+                if (idx >= targets.length) {
+                    finish();
+                    return;
+                }
+                var raw = targets[idx];
+                idx += 1;
+                var t = clampTime(raw);
+
+                var to = window.setTimeout(function () {
+                    video.removeEventListener('seeked', onSeeked);
+                    scheduleAttempt();
+                }, 4000);
+
+                function onSeeked() {
+                    window.clearTimeout(to);
+                    video.removeEventListener('seeked', onSeeked);
+                    finish();
+                }
+                video.addEventListener('seeked', onSeeked, { once: true });
+                try {
+                    video.currentTime = t;
+                } catch (err) {
+                    window.clearTimeout(to);
+                    video.removeEventListener('seeked', onSeeked);
+                    scheduleAttempt();
+                }
+            }
+
+            function startSeekChain() {
+                scheduleAttempt();
+            }
+
+            /* HAVE_CURRENT_DATA === 2 */
+            if (video.readyState >= 2) {
+                startSeekChain();
+            } else {
+                video.addEventListener(
+                    'canplay',
+                    function onCanPlay() {
+                        video.removeEventListener('canplay', onCanPlay);
+                        startSeekChain();
+                    },
+                    { once: true }
+                );
+            }
         });
     }
 
     function renderGroups(groups) {
+        if (dupPreviewObserver) {
+            dupPreviewObserver.disconnect();
+            dupPreviewObserver = null;
+        }
         resultsWrap.innerHTML = '';
         if (!groups.length) {
             resultsWrap.innerHTML = '<p class="help-text">No duplicate groups found at this threshold.</p>';
@@ -176,6 +295,8 @@
                 '</tr></thead><tbody></tbody>';
             const tbody = table.querySelector('tbody');
 
+            var thumbMountQueue = [];
+
             g.files.forEach(function (f, idx) {
                 const tr = document.createElement('tr');
                 tr.className = 'dup-row';
@@ -183,12 +304,7 @@
                 const keepChecked = idx === 0 ? ' checked' : '';
                 let previewCell;
                 if (isVideoFileName(f.name)) {
-                    const prevUrl = window.location.origin + '/api/duplicates/preview-file?path=' +
-                        encodeURIComponent(f.path);
-                    previewCell =
-                        '<td class="dup-preview-cell">' +
-                        '<video class="dup-thumb" muted playsinline preload="metadata" loading="lazy" ' +
-                        'src="' + prevUrl + '" title="' + escapeHtml(f.name) + '"></video></td>';
+                    previewCell = '<td class="dup-preview-cell"></td>';
                 } else {
                     previewCell = '<td class="dup-preview-cell"><span class="dup-preview-placeholder">—</span></td>';
                 }
@@ -201,14 +317,26 @@
                     '<td>' + escapeHtml(f.size_display) + '</td>' +
                     '<td>' + escapeHtml(String(f.match_score)) + '</td>';
                 tbody.appendChild(tr);
-                const vid = tr.querySelector('video.dup-thumb');
-                if (vid) {
+                if (isVideoFileName(f.name)) {
+                    const prevUrl =
+                        window.location.origin +
+                        '/api/duplicates/preview-file?path=' +
+                        encodeURIComponent(f.path);
+                    const tdPrev = tr.querySelector('.dup-preview-cell');
+                    const vid = document.createElement('video');
+                    vid.className = 'dup-thumb';
+                    vid.muted = true;
+                    vid.playsInline = true;
+                    vid.preload = 'none';
+                    vid.title = f.name;
+                    tdPrev.appendChild(vid);
                     setupDupThumbSeek(vid);
+                    thumbMountQueue.push({ vid: vid, url: prevUrl });
                     vid.addEventListener('error', function () {
                         const span = document.createElement('span');
                         span.className = 'dup-preview-placeholder';
                         span.textContent = 'No preview';
-                        vid.parentNode.replaceChild(span, vid);
+                        vid.replaceWith(span);
                     });
                 }
             });
@@ -216,6 +344,10 @@
             card.appendChild(head);
             card.appendChild(table);
             resultsWrap.appendChild(card);
+
+            thumbMountQueue.forEach(function (item) {
+                setupDupThumbDeferredSrc(item.vid, item.url);
+            });
         });
     }
 
@@ -248,8 +380,9 @@
                 ' — ' + (data.file_count || 0) + ' file(s), ' +
                 (data.group_count || 0) + ' duplicate group(s).';
             scanMeta.classList.remove('hidden');
-            renderGroups(lastGroups);
+            /* Results must be visible before IntersectionObserver runs; hidden ancestors get zero intersection. */
             resultsSection.classList.remove('hidden');
+            renderGroups(lastGroups);
             if (!lastGroups.length) {
                 showAlert('No duplicate groups at this threshold.', 'info');
             }

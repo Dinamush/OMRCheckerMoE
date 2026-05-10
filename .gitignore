@@ -12,3 +12,6 @@ video_downloader.log
 logs/
 downloaded_videos/
 downloads/
+
+# Bundled UI/UX Pro Max skill (clone upstream locally; see project docs)
+.shared/ui-ux-pro-max/
