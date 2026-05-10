@@ -94,17 +94,28 @@ Leave the terminal open while you use the app.
 hamster_scraper/
 ├── main.py              # Entry point: run this to start the server
 ├── progress_tracker.py  # Used by main.py for download progress
-├── requirements.txt    # Python dependencies
-├── templates/           # HTML (index, submitted)
+├── duplicate_finder.py  # Duplicate grouping logic (duplicate checker UI)
+├── requirements.txt     # Python dependencies
+├── templates/           # HTML (Jinja); extends base.html where noted
+│   ├── base.html
 │   ├── index.html
-│   └── submitted.html
-├── static/              # CSS, JS
+│   ├── submitted.html
+│   └── duplicates.html
+├── static/              # CSS (style.css), assets
+├── tests/               # e.g. test_duplicate_finder.py
+├── .shared/             # Optional local tools only (see .shared/README.md)
 ├── logs/                # Created at runtime (logs, progress JSON)
 ├── downloads/           # Created at runtime (downloaded videos)
 └── archive/             # Old/standalone scripts – not used by main.py
 ```
 
-Only `main.py`, `progress_tracker.py`, `templates/`, and `static/` are required for the web app. The `archive/` folder contains legacy scripts and is not used by the running system.
+Only `main.py`, `progress_tracker.py`, `duplicate_finder.py`, `templates/`, and `static/` are required for the web app. The `archive/` folder contains legacy scripts and is not used by the running system.
+
+---
+
+## UI design tooling (optional)
+
+This repo can use the Cursor **ui-ux-pro-max** workflow (design-system search scripts). The bundle is **not** committed: clone it into `.shared/ui-ux-pro-max/` when you want it. See **[`.shared/README.md`](.shared/README.md)** for install steps and **[upstream ui-ux-pro-max-skill](https://github.com/nextlevelbuilder/ui-ux-pro-max-skill)** for the source.
 
 ---
 

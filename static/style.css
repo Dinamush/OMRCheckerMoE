@@ -1,8 +1,6 @@
 /*
- * Hamster Scraper — UI tokens from ui-ux-pro-max --design-system
- * Query: "video downloader utility internal tool duplicate file manager"
- * Pattern: Video-first hero → adapted as bold utility shell | Style: Exaggerated minimalism (tamed for forms)
- * Typography: Inter | Palette: folder blue + amber accent (design-system CSV)
+ * Hamster Scraper — design tokens aligned with ui-ux-pro-max --design-system
+ * (internal utility / duplicate-manager query → Inter, blue + amber, crisp surfaces)
  */
 :root {
     --font-sans: "Inter", system-ui, -apple-system, sans-serif;

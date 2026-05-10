@@ -13,5 +13,5 @@ logs/
 downloaded_videos/
 downloads/
 
-# Bundled UI/UX Pro Max skill (clone upstream locally; see project docs)
+# Optional Cursor ui-ux-pro-max skill bundle (install under .shared/ — see .shared/README.md)
 .shared/ui-ux-pro-max/
