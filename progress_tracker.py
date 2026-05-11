@@ -25,6 +25,14 @@ class DownloadStatus(str, Enum):
     SKIPPED = "skipped"
     NOT_FOUND = "not_found"
 
+
+_TERMINAL_STATUSES: frozenset["DownloadStatus"] = frozenset({
+    DownloadStatus.COMPLETED,
+    DownloadStatus.SKIPPED,
+    DownloadStatus.NOT_FOUND,
+})
+
+
 @dataclass
 class DownloadStats:
     """Statistics for download progress"""
@@ -38,7 +46,16 @@ class DownloadStats:
     total_size_downloaded: int = 0
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
-    
+
+    def __post_init__(self) -> None:
+        for _field in (
+            "total_urls", "urls_collected", "downloads_started",
+            "downloads_completed", "downloads_failed", "files_not_found",
+            "files_skipped", "total_size_downloaded",
+        ):
+            if getattr(self, _field) < 0:
+                raise ValueError(f"DownloadStats.{_field} must be >= 0, got {getattr(self, _field)}")
+
     @property
     def progress_percentage(self) -> float:
         """Calculate progress percentage"""
@@ -63,13 +80,18 @@ class DownloadItem:
     """Individual download item tracking"""
     url: str
     title: str
-    status: DownloadStatus = DownloadStatus.PENDING  # pending, downloading, completed, failed, skipped, not_found
+    status: DownloadStatus = DownloadStatus.PENDING
     file_path: Optional[str] = None
     file_size: int = 0
     error_message: Optional[str] = None
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
     retry_count: int = 0
+
+    def __post_init__(self) -> None:
+        if self.retry_count < 0:
+            raise ValueError(f"retry_count must be >= 0, got {self.retry_count}")
+
 
 class ProgressTracker:
     """Main progress tracking class"""
@@ -95,7 +117,16 @@ class ProgressTracker:
         
         # Progress file for web interface
         self.progress_file = self.log_dir / f"progress_{session_id}.json"
-        
+
+    def _can_transition(self, item: "DownloadItem", new_status: "DownloadStatus") -> bool:
+        if item.status in _TERMINAL_STATUSES:
+            self.logger.warning(
+                f"Attempted to transition {item.title!r} from terminal status "
+                f"{item.status!r} to {new_status!r} — ignored"
+            )
+            return False
+        return True
+
     def _setup_logging(self):
         """Setup detailed logging for this session"""
         log_file = self.log_dir / f"download_progress_{self.session_id}.log"
@@ -151,10 +182,13 @@ class ProgressTracker:
         """Mark a download as started"""
         with self._lock:
             if url in self.download_items:
-                self.download_items[url].status = DownloadStatus.DOWNLOADING
-                self.download_items[url].start_time = datetime.now()
+                item = self.download_items[url]
+                if not self._can_transition(item, DownloadStatus.DOWNLOADING):
+                    return
+                item.status = DownloadStatus.DOWNLOADING
+                item.start_time = datetime.now()
                 self.stats.downloads_started += 1
-                self.logger.info(f"Started downloading: {self.download_items[url].title}")
+                self.logger.info(f"Started downloading: {item.title}")
                 self._save_progress()
                 
     def complete_download(self, url: str, file_path: str, file_size: int = 0):
@@ -162,6 +196,8 @@ class ProgressTracker:
         with self._lock:
             if url in self.download_items:
                 item = self.download_items[url]
+                if not self._can_transition(item, DownloadStatus.COMPLETED):
+                    return
                 item.status = DownloadStatus.COMPLETED
                 item.file_path = file_path
                 item.file_size = file_size
@@ -181,7 +217,10 @@ class ProgressTracker:
         with self._lock:
             if url in self.download_items:
                 item = self.download_items[url]
-                item.status = DownloadStatus.FAILED if not retry else DownloadStatus.PENDING
+                new_status = DownloadStatus.FAILED if not retry else DownloadStatus.PENDING
+                if not self._can_transition(item, new_status):
+                    return
+                item.status = new_status
                 item.error_message = error_message
                 item.end_time = datetime.now()
                 
@@ -200,6 +239,8 @@ class ProgressTracker:
         with self._lock:
             if url in self.download_items:
                 item = self.download_items[url]
+                if not self._can_transition(item, DownloadStatus.SKIPPED):
+                    return
                 item.status = DownloadStatus.SKIPPED
                 item.error_message = reason
                 item.end_time = datetime.now()
@@ -214,6 +255,8 @@ class ProgressTracker:
         with self._lock:
             if url in self.download_items:
                 item = self.download_items[url]
+                if not self._can_transition(item, DownloadStatus.NOT_FOUND):
+                    return
                 item.status = DownloadStatus.NOT_FOUND
                 item.error_message = reason
                 item.end_time = datetime.now()

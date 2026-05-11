@@ -402,6 +402,8 @@ def _same_series_different_installment(norm_a: str, norm_b: str) -> bool:
 
 class _UnionFind:
     def __init__(self, n: int) -> None:
+        if n <= 0:
+            raise ValueError(f"_UnionFind requires n > 0, got {n}")
         self._n = n
         self._parent = list(range(n))
 
@@ -413,10 +415,12 @@ class _UnionFind:
             x = self._parent[x]
         return x
 
-    def union(self, a: int, b: int) -> None:
+    def union(self, a: int, b: int) -> bool:
         ra, rb = self.find(a), self.find(b)
         if ra != rb:
             self._parent[rb] = ra
+            return True
+        return False
 
 
 def cluster_duplicates(
@@ -545,6 +549,7 @@ def build_groups_payload(
 
     payload: List[DuplicateGroup] = []
     for gid, indices in enumerate(groups):
+        assert len(indices) >= 2, f"Group {gid} has fewer than 2 members: {indices}"
         conf = _group_max_pairwise_score(
             indices, files, norms, sizes, name_weight, size_weight
         )
@@ -564,6 +569,9 @@ def build_groups_payload(
                         3,
                     ),
                 }
+            )
+            assert 0.0 <= rows[-1]["match_score"] <= 1.0, (
+                f"match_score out of range for {files[i]['path']!r}: {rows[-1]['match_score']}"
             )
         payload.append(
             {

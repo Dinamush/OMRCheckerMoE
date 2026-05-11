@@ -16,6 +16,7 @@ StepStatus = Literal["pending", "active", "done", "error"]
 
 SITE_XHAMSTER = "xhamster"
 SITE_PORNHUB = "pornhub"
+SiteId = Literal["xhamster", "pornhub"]
 
 
 @dataclass(frozen=True)
@@ -195,7 +196,7 @@ _PH_LEGACY = _chain(
 )
 
 
-def _template(site: str, embedded: bool) -> List[StepDefinition]:
+def _template(site: SiteId, embedded: bool) -> List[StepDefinition]:
     if site == SITE_XHAMSTER:
         return list(_XH_EMB if embedded else _XH_LEGACY)
     if site == SITE_PORNHUB:
@@ -206,7 +207,7 @@ def _template(site: str, embedded: bool) -> List[StepDefinition]:
 class _Runtime:
     __slots__ = ("site", "embedded", "steps", "order", "status", "current_id", "detail", "error_message")
 
-    def __init__(self, site: str, embedded: bool) -> None:
+    def __init__(self, site: SiteId, embedded: bool) -> None:
         self.site = site
         self.embedded = embedded
         self.steps = _template(site, embedded)
@@ -268,7 +269,7 @@ _lock = threading.Lock()
 _sessions: Dict[str, _Runtime] = {}
 
 
-def register_session(session_id: str, site: str, *, embedded: bool) -> None:
+def register_session(session_id: str, site: SiteId, *, embedded: bool) -> None:
     """Call from POST /download before returning redirect (so first poll has steps)."""
     with _lock:
         _sessions[session_id] = _Runtime(site, embedded)

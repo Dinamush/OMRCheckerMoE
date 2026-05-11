@@ -89,13 +89,13 @@ DUPLICATE_PREVIEW_VIDEO_EXTENSIONS = frozenset({
 
 
 class DuplicateScanBody(BaseModel):
-    directory: str = ""
+    directory: Optional[str] = None
     recursive: bool = False
     threshold: float = Field(0.72, ge=0.5, le=1.0)
 
 
 class DuplicateDeleteBody(BaseModel):
-    paths: List[str]
+    paths: List[str] = Field(..., min_length=1)
 
 
 # ----------------------------- Helper Functions ----------------------------- #
@@ -1349,7 +1349,7 @@ def duplicates_page(request: Request):
 @app.post("/api/duplicates/scan")
 def api_duplicates_scan(body: DuplicateScanBody):
     try:
-        root = resolve_scan_directory(body.directory, USER_DATA_DIR, "downloads")
+        root = resolve_scan_directory(body.directory or "", USER_DATA_DIR, "downloads")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     files = iter_files(root, body.recursive)
