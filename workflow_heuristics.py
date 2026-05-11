@@ -14,9 +14,9 @@ from typing import Any, Dict, List, Literal, Optional, Tuple
 
 StepStatus = Literal["pending", "active", "done", "error"]
 
-SITE_XHAMSTER = "xhamster"
-SITE_PORNHUB = "pornhub"
 SiteId = Literal["xhamster", "pornhub"]
+SITE_XHAMSTER: SiteId = "xhamster"
+SITE_PORNHUB: SiteId = "pornhub"
 
 
 @dataclass(frozen=True)

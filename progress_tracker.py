@@ -26,7 +26,7 @@ class DownloadStatus(str, Enum):
     NOT_FOUND = "not_found"
 
 
-_TERMINAL_STATUSES: frozenset["DownloadStatus"] = frozenset({
+_TERMINAL_STATUSES: frozenset[DownloadStatus] = frozenset({
     DownloadStatus.COMPLETED,
     DownloadStatus.SKIPPED,
     DownloadStatus.NOT_FOUND,
@@ -91,6 +91,8 @@ class DownloadItem:
     def __post_init__(self) -> None:
         if self.retry_count < 0:
             raise ValueError(f"retry_count must be >= 0, got {self.retry_count}")
+        if self.file_size < 0:
+            raise ValueError(f"file_size must be >= 0, got {self.file_size}")
 
 
 class ProgressTracker:
