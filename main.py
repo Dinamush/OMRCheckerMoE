@@ -13,6 +13,7 @@ import time
 import subprocess
 import concurrent.futures
 import re
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Set
 from fastapi import FastAPI, Request, BackgroundTasks, Form, HTTPException, Query
@@ -73,7 +74,8 @@ def _desktop_session_progress_url(session_id: str, site: str) -> str:
     if host in ("0.0.0.0", "::", "[::]"):
         host = "127.0.0.1"
     port = int(os.environ.get("HAMSTER_PORT", "8001"))
-    return f"http://{host}:{port}/download/session/{session_id}?timestamp={session_id}&site={site}"
+    timestamp = int(time.time())
+    return f"http://{host}:{port}/download/session/{session_id}?timestamp={timestamp}&site={site}"
 
 templates = Jinja2Templates(directory=str(RESOURCE_ROOT / "templates"))
 app.mount("/static", StaticFiles(directory=str(RESOURCE_ROOT / "static")), name="static")
@@ -247,7 +249,10 @@ def load_netscape_cookies_into_driver(driver: webdriver.Chrome, cookie_file: str
     time.sleep(1.0)
 
 def extract_video_urls_ytdlp(cookie_file: str, playlist_url: str) -> List[str]:
-    """Extract video URLs using yt-dlp (for PornHub)."""
+    """Extract individual video URLs from a PornHub playlist/favourites page via yt-dlp.
+
+    Returns an empty list if yt-dlp exits with a non-zero status.
+    """
     command = [
         "python", "-m", "yt_dlp",
         "--cookies", cookie_file,
@@ -290,7 +295,11 @@ def fetch_video_title_ytdlp(url: str, cookie_file: Optional[str]) -> str:
 
 
 def fetch_html_selenium(driver, url: str) -> Optional[str]:
-    """Fetch HTML content using Selenium with scrolling."""
+    """Fetch HTML via Selenium with a full scroll to trigger lazy-loaded content.
+
+    Returns None when the resulting page looks like a 404, generic error page, or a
+    login redirect — callers should treat None as "no usable content at this URL".
+    """
     try:
         driver.get(url)
         logging.info(f"Navigated to {url}")
@@ -335,7 +344,11 @@ def scroll_to_bottom(driver, pause_time: float = 2.0) -> None:
         logging.error(f"Error during scrolling: {e}")
 
 def try_click_next_button(driver) -> bool:
-    """Try to click the next page button if it exists."""
+    """Click the next-page button if one is visible and enabled.
+
+    Tries a prioritised list of xHamster-specific and generic CSS selectors.
+    Returns True if a button was found and clicked, False if pagination is exhausted.
+    """
     try:
         # Look for xHamster-specific next page button selectors
         next_selectors = [
@@ -423,9 +436,9 @@ def extract_direct_video_url(driver, video_page_url: str) -> Tuple[Optional[str]
             elif page_title:
                 video_title = page_title.replace(" | xHamster", "").strip()
             
-            # Clean up the title for filename
-            video_title = re.sub(r'[<>:"/\\|?*]', '_', video_title)  # Replace invalid filename chars
-            video_title = re.sub(r'\s+', '_', video_title)  # Replace spaces with underscores
+            # Sanitise title for use as a filename
+            video_title = re.sub(r'[<>:"/\\|?*]', '_', video_title)
+            video_title = re.sub(r'\s+', '_', video_title)
             video_title = video_title[:100]  # Limit length
             
             logging.info(f"Extracted video title: {video_title}")
@@ -535,14 +548,14 @@ def download_video_ytdlp(video_url: str, title: str, cookie_file: str, download_
         'merge_output_format': 'mp4',   # Convert to MP4
         'hls_prefer_native': True,      # Use native HLS support for better compatibility
         'quiet': False,
-        'no_warnings': False,           # Show warnings for debugging
+        'no_warnings': False,
         'retries': 3,
-        'ignoreerrors': False,          # Don't ignore errors for debugging
+        'ignoreerrors': False,
         'extractor_retries': 3,
         'fragment_retries': 3,
-        'writeinfojson': False,         # Don't write info JSON files
-        'writesubtitles': False,        # Don't download subtitles
-        'writeautomaticsub': False,     # Don't download auto-generated subtitles
+        'writeinfojson': False,
+        'writesubtitles': False,
+        'writeautomaticsub': False,
     }
     
     def progress_hook(d):
@@ -592,14 +605,14 @@ def download_video_direct(video_url: str, title: str, download_dir: str, session
         'merge_output_format': 'mp4',   # Convert to MP4
         'hls_prefer_native': True,      # Use native HLS support for better compatibility
         'quiet': False,
-        'no_warnings': False,           # Show warnings for debugging
+        'no_warnings': False,
         'retries': 3,
-        'ignoreerrors': False,          # Don't ignore errors for debugging
+        'ignoreerrors': False,
         'extractor_retries': 3,
         'fragment_retries': 3,
-        'writeinfojson': False,         # Don't write info JSON files
-        'writesubtitles': False,        # Don't download subtitles
-        'writeautomaticsub': False,     # Don't download auto-generated subtitles
+        'writeinfojson': False,
+        'writesubtitles': False,
+        'writeautomaticsub': False,
     }
     
     def progress_hook(d):
@@ -637,9 +650,21 @@ def download_video_direct(video_url: str, title: str, download_dir: str, session
         tracker.fail_download(video_url, str(e))
         logging.error(f"Exception downloading {video_url}: {e}")
 
-def download_videos_parallel(video_info_list: List[Tuple[str, str]], download_dir: str, 
+def download_videos_parallel(video_info_list: List[Tuple[str, str]], download_dir: str,
                            max_workers: int = 4, cookie_file: str = None, session_id: str = None) -> None:
-    """Download videos in parallel with progress tracking."""
+    """Download a batch of videos in parallel and track progress.
+
+    Args:
+        video_info_list: list of (url, title) pairs to download.
+        download_dir: destination directory for downloaded files.
+        max_workers: thread-pool size (default 4).
+        cookie_file: path to a Netscape cookie file; if provided each worker calls
+            download_video_ytdlp, otherwise download_video_direct.
+        session_id: progress-tracker session key; a timestamp-based fallback is used
+            when None.
+
+    Each worker is given a 1-hour timeout; stragglers are cancelled on exit.
+    """
     if not session_id:
         session_id = str(int(time.time()))
         
@@ -655,20 +680,25 @@ def download_videos_parallel(video_info_list: List[Tuple[str, str]], download_di
             tracker.add_urls(urls, titles)
         
         logging.info(f"Starting download of {len(video_info_list)} videos with {max_workers} workers")
-        
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+        try:
             futures = []
             for video_url, title in video_info_list:
                 if cookie_file:
                     futures.append(executor.submit(download_video_ytdlp, video_url, title, cookie_file, download_dir, session_id))
                 else:
                     futures.append(executor.submit(download_video_direct, video_url, title, download_dir, session_id))
-            
+
             for future in concurrent.futures.as_completed(futures):
                 try:
-                    future.result()
+                    future.result(timeout=3600)
+                except concurrent.futures.TimeoutError:
+                    logging.error("A download worker timed out after 1 hour; skipping.")
                 except Exception as e:
                     logging.error(f"Error in video download: {e}")
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
         logging.info("Parallel download workers finished for this batch.")
 
@@ -797,6 +827,11 @@ def pornhub_workflow(
                 logging.info("Chrome WebDriver closed successfully.")
             except Exception as e:
                 logging.error(f"Error closing Chrome WebDriver: {e}")
+        try:
+            if os.path.exists(cookie_file):
+                os.unlink(cookie_file)
+        except Exception as e:
+            logging.warning(f"Could not delete cookie file {cookie_file}: {e}")
         if ok:
             try:
                 cleanup_tracker(session_id)
@@ -873,7 +908,6 @@ def xhamster_workflow(
             workflow_heuristics.advance(session_id, "browser_start")
 
         tracker = get_tracker(session_id)
-        tracker.start_session(0)
         workflow_heuristics.advance(session_id, "collect_urls")
         workflow_heuristics.set_detail(session_id, "Loading your favorites pages…")
 
@@ -1070,6 +1104,11 @@ def xhamster_workflow(
                 logging.info("Chrome WebDriver closed successfully.")
             except Exception as e:
                 logging.error(f"Error closing Chrome WebDriver: {e}")
+        try:
+            if os.path.exists(cookie_file):
+                os.unlink(cookie_file)
+        except Exception as e:
+            logging.warning(f"Could not delete cookie file {cookie_file}: {e}")
         if ok:
             try:
                 cleanup_tracker(session_id)
@@ -1105,8 +1144,8 @@ def handle_form(
 ):
     """Handle form submission and start the appropriate workflow."""
     timestamp = int(time.time())
-    session_id = str(timestamp)
-    log_file = os.path.join(LOG_DIR, f"video_downloader_{timestamp}.log")
+    session_id = str(uuid.uuid4())
+    log_file = os.path.join(LOG_DIR, f"video_downloader_{session_id}.log")
 
     headless_bool = headless.lower() == "true"
     library_recursive_bool = library_recursive.lower() == "true"
@@ -1168,8 +1207,7 @@ def download_session_progress(
     """Bookmarkable progress page (GET) so the desktop WebView keeps the download UI after login."""
     if site not in ("pornhub", "xhamster"):
         raise HTTPException(status_code=400, detail="Invalid site")
-    if str(timestamp) != session_id:
-        raise HTTPException(status_code=400, detail="Session mismatch")
+
     embedded_login = webview_login_bridge.is_active() and webview_login_bridge.embedded_login_env_enabled()
     return templates.TemplateResponse(
         request,
@@ -1200,10 +1238,10 @@ def api_embedded_login_confirm():
     return {"ok": True}
 
 
-@app.get("/download/log/{timestamp}")
-def get_log(timestamp: int):
+@app.get("/download/log/{session_id}")
+def get_log(session_id: str):
     """Download log file."""
-    log_file = os.path.join(LOG_DIR, f"video_downloader_{timestamp}.log")
+    log_file = os.path.join(LOG_DIR, f"video_downloader_{session_id}.log")
     if os.path.exists(log_file):
         return FileResponse(path=log_file, filename=os.path.basename(log_file), media_type='text/plain')
     else:
@@ -1230,10 +1268,10 @@ def _read_log_tail_text(log_path: Path, *, lines: int, max_bytes: int = 56_000) 
     return "\n".join(all_lines[-lines:])
 
 
-@app.get("/download/log/{timestamp}/tail", response_class=PlainTextResponse)
-def get_log_tail(timestamp: int, lines: int = Query(48, ge=8, le=200)):
+@app.get("/download/log/{session_id}/tail", response_class=PlainTextResponse)
+def get_log_tail(session_id: str, lines: int = Query(48, ge=8, le=200)):
     """Last lines of the session log for the live dashboard (plain text)."""
-    log_file = Path(LOG_DIR) / f"video_downloader_{timestamp}.log"
+    log_file = Path(LOG_DIR) / f"video_downloader_{session_id}.log"
     if not log_file.is_file():
         raise HTTPException(status_code=404, detail="Log file not found.")
     body = _read_log_tail_text(log_file, lines=lines)
@@ -1243,8 +1281,11 @@ def get_log_tail(timestamp: int, lines: int = Query(48, ge=8, le=200)):
 def get_downloaded_file(filename: str):
     """Serve downloaded video files."""
     file_path = os.path.join(DOWNLOAD_DIR, filename)
-    if os.path.exists(file_path):
-        return FileResponse(path=file_path, filename=filename, media_type='video/mp4')
+    resolved = Path(file_path).resolve()
+    if not str(resolved).startswith(str(Path(DOWNLOAD_DIR).resolve()) + os.sep):
+        raise HTTPException(status_code=400, detail="Invalid path.")
+    if resolved.exists():
+        return FileResponse(path=str(resolved), filename=resolved.name, media_type='video/mp4')
     else:
         return {"error": "File not found."}
 

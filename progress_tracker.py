@@ -8,11 +8,22 @@ import os
 import time
 import json
 import logging
+from enum import Enum
 from typing import List, Dict, Set, Optional, Tuple
 from dataclasses import dataclass, asdict
 from datetime import datetime
 import threading
 from pathlib import Path
+
+
+class DownloadStatus(str, Enum):
+    """Valid statuses for a DownloadItem, ordered by lifecycle."""
+    PENDING = "pending"
+    DOWNLOADING = "downloading"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+    NOT_FOUND = "not_found"
 
 @dataclass
 class DownloadStats:
@@ -52,7 +63,7 @@ class DownloadItem:
     """Individual download item tracking"""
     url: str
     title: str
-    status: str = "pending"  # pending, downloading, completed, failed, skipped, not_found
+    status: DownloadStatus = DownloadStatus.PENDING  # pending, downloading, completed, failed, skipped, not_found
     file_path: Optional[str] = None
     file_size: int = 0
     error_message: Optional[str] = None
@@ -140,7 +151,7 @@ class ProgressTracker:
         """Mark a download as started"""
         with self._lock:
             if url in self.download_items:
-                self.download_items[url].status = "downloading"
+                self.download_items[url].status = DownloadStatus.DOWNLOADING
                 self.download_items[url].start_time = datetime.now()
                 self.stats.downloads_started += 1
                 self.logger.info(f"Started downloading: {self.download_items[url].title}")
@@ -151,7 +162,7 @@ class ProgressTracker:
         with self._lock:
             if url in self.download_items:
                 item = self.download_items[url]
-                item.status = "completed"
+                item.status = DownloadStatus.COMPLETED
                 item.file_path = file_path
                 item.file_size = file_size
                 item.end_time = datetime.now()
@@ -170,7 +181,7 @@ class ProgressTracker:
         with self._lock:
             if url in self.download_items:
                 item = self.download_items[url]
-                item.status = "failed" if not retry else "pending"
+                item.status = DownloadStatus.FAILED if not retry else DownloadStatus.PENDING
                 item.error_message = error_message
                 item.end_time = datetime.now()
                 
@@ -189,7 +200,7 @@ class ProgressTracker:
         with self._lock:
             if url in self.download_items:
                 item = self.download_items[url]
-                item.status = "skipped"
+                item.status = DownloadStatus.SKIPPED
                 item.error_message = reason
                 item.end_time = datetime.now()
                 
@@ -203,7 +214,7 @@ class ProgressTracker:
         with self._lock:
             if url in self.download_items:
                 item = self.download_items[url]
-                item.status = "not_found"
+                item.status = DownloadStatus.NOT_FOUND
                 item.error_message = reason
                 item.end_time = datetime.now()
                 

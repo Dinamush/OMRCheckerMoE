@@ -1,8 +1,10 @@
 """
 Duplicate file detection: fuzzy filename matching plus size similarity.
 
-Scanning may target any directory the user specifies (see resolve_scan_directory).
-Deletes validate that paths resolve to existing regular files (resolve_deletable_file).
+Scanning targets any user-specified directory, except OS system directories which are
+blocked (see resolve_scan_directory).
+Deletes validate that paths resolve to existing regular files outside system directories
+(resolve_deletable_file).
 """
 
 from __future__ import annotations
@@ -11,7 +13,61 @@ import os
 import re
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, TypedDict
+
+# ---------------------------------------------------------------------------
+# Typed schemas for file records and API payload
+# ---------------------------------------------------------------------------
+
+class FileRecord(TypedDict):
+    """A single file entry produced by iter_files()."""
+    path: str
+    name: str
+    size: int
+
+
+class FileMatchRow(TypedDict):
+    """One file's row inside a DuplicateGroup payload."""
+    path: str
+    name: str
+    size: int
+    size_display: str
+    match_score: float
+
+
+class DuplicateGroup(TypedDict):
+    """A group of probable duplicate files as returned by build_groups_payload()."""
+    group_id: int
+    confidence: float
+    normalized_hint: str
+    files: List[FileMatchRow]
+
+# Prefixes of system directories that must never be scanned, previewed, or deleted from.
+_SYSTEM_PATH_PREFIXES: tuple[str, ...] = (
+    # Windows
+    os.environ.get("SystemRoot", r"C:\Windows").lower(),
+    r"c:\program files",
+    r"c:\program files (x86)",
+    r"c:\programdata",
+    # Unix / macOS
+    "/bin",
+    "/sbin",
+    "/usr/bin",
+    "/usr/sbin",
+    "/etc",
+    "/boot",
+    "/sys",
+    "/proc",
+    "/dev",
+    "/Library/System",
+    "/System/Library",
+)
+
+
+def _is_system_path(p: Path) -> bool:
+    """Return True if *p* starts with a known OS/system directory prefix."""
+    s = str(p).lower().replace("\\", "/")
+    return any(s.startswith(prefix.lower().replace("\\", "/")) for prefix in _SYSTEM_PATH_PREFIXES)
 
 
 def _strip_outer_quotes(s: str) -> str:
@@ -27,10 +83,11 @@ def resolve_scan_directory(
     download_dir_name: str = "downloads",
 ) -> Path:
     """
-    Resolve the folder to scan (any existing directory on the machine).
+    Resolve the folder to scan (any existing, non-system directory on the machine).
 
     - Empty input: project ``base_dir / download_dir_name`` (created if missing).
-    - Non-empty: ``expanduser``, strip outer quotes. Absolute paths may point anywhere.
+    - Non-empty: ``expanduser``, strip outer quotes. Absolute paths are accepted but
+      must not fall inside OS system directories (Windows, /bin, /etc, etc.).
       Relative paths: try ``cwd / path``, then ``base_dir / path`` so project-relative
       folders still work when the server was started from another working directory.
     """
@@ -59,11 +116,14 @@ def resolve_scan_directory(
     if not candidate.is_dir():
         raise ValueError("Path is not a directory or does not exist.")
 
+    if _is_system_path(candidate):
+        raise ValueError("Scanning system directories is not permitted.")
+
     return candidate
 
 
 def resolve_deletable_file(path_str: str) -> Path:
-    """Resolve a path that must exist and refer to a regular file."""
+    """Resolve a path that must exist, be a regular file, and not reside in a system directory."""
     p = Path(_strip_outer_quotes(path_str)).expanduser()
     if not p.is_absolute():
         p = (Path.cwd() / p).resolve()
@@ -73,6 +133,8 @@ def resolve_deletable_file(path_str: str) -> Path:
         raise ValueError("Path does not exist.")
     if not p.is_file():
         raise ValueError("Not a regular file.")
+    if _is_system_path(p):
+        raise ValueError("This path is in a protected system directory.")
     return p
 
 
@@ -85,9 +147,9 @@ def normalize_name(filename: str) -> str:
     return base
 
 
-def iter_files(root: Path, recursive: bool) -> List[Dict[str, Any]]:
+def iter_files(root: Path, recursive: bool) -> List[FileRecord]:
     """List regular files under root."""
-    out: List[Dict[str, Any]] = []
+    out: List[FileRecord] = []
     if recursive:
         for dirpath, _dirnames, filenames in os.walk(root):
             for fn in filenames:
@@ -340,29 +402,48 @@ def _same_series_different_installment(norm_a: str, norm_b: str) -> bool:
 
 class _UnionFind:
     def __init__(self, n: int) -> None:
-        self.parent = list(range(n))
+        self._n = n
+        self._parent = list(range(n))
 
     def find(self, x: int) -> int:
-        while self.parent[x] != x:
-            self.parent[x] = self.parent[self.parent[x]]
-            x = self.parent[x]
+        if not (0 <= x < self._n):
+            raise IndexError(f"Index {x} out of range [0, {self._n})")
+        while self._parent[x] != x:
+            self._parent[x] = self._parent[self._parent[x]]
+            x = self._parent[x]
         return x
 
     def union(self, a: int, b: int) -> None:
         ra, rb = self.find(a), self.find(b)
         if ra != rb:
-            self.parent[rb] = ra
+            self._parent[rb] = ra
 
 
 def cluster_duplicates(
-    files: List[Dict[str, Any]],
+    files: List[FileRecord],
     name_weight: float = 0.85,
     size_weight: float = 0.15,
     threshold: float = 0.72,
     max_size_ratio_diff: float = 0.28,
 ) -> List[List[int]]:
     """
-    Return lists of indices into files that form duplicate groups (size >= 2).
+    Return lists of file indices that form duplicate groups (group size >= 2).
+
+    Pairs are scored as: ``name_weight * name_similarity + size_weight * size_similarity``.
+    A pair is grouped when score >= ``threshold`` and the size ratio difference is within
+    ``max_size_ratio_diff``.  Series-episode and copy-number heuristics can fast-accept or
+    fast-reject pairs before the score is computed.
+
+    Args:
+        files: list of dicts with at least ``name`` (str) and ``size`` (int) keys.
+        name_weight: contribution of filename similarity (default 0.85).
+        size_weight: contribution of file-size similarity (default 0.15).
+        threshold: minimum combined score to treat a pair as duplicates (default 0.72).
+        max_size_ratio_diff: reject pairs whose size ratio differs by more than this
+            fraction (default 0.28, i.e. files must be within ~22% of each other in size).
+
+    Returns:
+        List of groups; each group is a list of indices into *files*.
     """
     n = len(files)
     if n < 2:
@@ -399,7 +480,7 @@ def cluster_duplicates(
 
 def _group_max_pairwise_score(
     indices: List[int],
-    files: List[Dict[str, Any]],
+    files: List[FileRecord],
     norms: List[str],
     sizes: List[int],
     name_weight: float,
@@ -419,7 +500,7 @@ def _group_max_pairwise_score(
 def _file_best_peer_score(
     idx: int,
     indices: List[int],
-    files: List[Dict[str, Any]],
+    files: List[FileRecord],
     norms: List[str],
     sizes: List[int],
     name_weight: float,
@@ -450,11 +531,11 @@ def human_size(n: int) -> str:
 
 
 def build_groups_payload(
-    files: List[Dict[str, Any]],
+    files: List[FileRecord],
     groups: List[List[int]],
     name_weight: float = 0.85,
     size_weight: float = 0.15,
-) -> List[Dict[str, Any]]:
+) -> List[DuplicateGroup]:
     """
     Build API/UI payload. Confidence per group is the maximum pairwise combined score
     within that group (documented in the UI).
@@ -462,7 +543,7 @@ def build_groups_payload(
     norms = [normalize_name(f["name"]) for f in files]
     sizes = [int(f["size"]) for f in files]
 
-    payload: List[Dict[str, Any]] = []
+    payload: List[DuplicateGroup] = []
     for gid, indices in enumerate(groups):
         conf = _group_max_pairwise_score(
             indices, files, norms, sizes, name_weight, size_weight

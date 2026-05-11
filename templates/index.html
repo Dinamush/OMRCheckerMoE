@@ -1,64 +1,95 @@
 {% extends "base.html" %}
 {% block title %}SHUCK3R · Downloader{% endblock %}
+{% block main_class %}layout-shell layout-shell-home{% endblock %}
 {% block content %}
-        <p class="page-eyebrow">SHUCK3R</p>
-        <h1>Downloader</h1>
-        <p class="subtitle">Download videos from PornHub and xHamster</p>
-
-        {% if form_error %}
-        <div class="form-error-banner" role="alert">
-            <p><strong>Could not start download.</strong> {{ form_error }}</p>
-        </div>
-        {% endif %}
-
-        <form action="/download" method="post" id="downloadForm">
-            <div class="form-group">
-                <label>Select Site:</label>
-                <div class="radio-group">
-                    <div class="radio-option">
-                        <input type="radio" id="pornhub" name="site" value="pornhub" required>
-                        <label for="pornhub">PornHub</label>
-                    </div>
-                    <div class="radio-option">
-                        <input type="radio" id="xhamster" name="site" value="xhamster" required>
-                        <label for="xhamster">xHamster</label>
-                    </div>
-                </div>
-            </div>
-
-            <div class="form-group checkbox-group">
-                <input type="checkbox" id="headless" name="headless">
-                <label for="headless">Run Headlessly (Browser won't be visible)</label>
-            </div>
-
-            <div class="form-group">
-                <label for="existing_library_dir">Only download what I don&apos;t have yet (optional)</label>
-                <input type="text" id="existing_library_dir" name="existing_library_dir" autocomplete="off" placeholder="Folder where your existing videos are stored">
-                <p class="help-text">Leave blank to download everything from favorites. If you set a folder, SHUCK3R compares each favorite&apos;s title to video filenames there (mp4, mkv, webm, …) and <strong>skips</strong> matches so only new ones download.</p>
-            </div>
-
-            <div class="form-group checkbox-group">
-                <input type="checkbox" id="library_recursive" name="library_recursive" value="true">
-                <label for="library_recursive">Include subfolders when scanning the library path above</label>
-            </div>
-
-            <div class="info-box">
-                <h3>Instructions:</h3>
-                <ul>
-                    <li><strong>PornHub:</strong> Downloads from your favorites playlist (requires login)</li>
-                    <li><strong>xHamster:</strong> Downloads from your favorites page (requires login)</li>
-                    <li>You'll need to log in manually in the browser window that opens</li>
-                    <li>Videos save under your user profile (Windows: <code>%LOCALAPPDATA%\HamsterScraper\downloads</code>; override with <code>HAMSTER_USER_DATA</code>)</li>
-                    <li><strong>Library skip:</strong> PornHub resolves each title via yt-dlp (slower but accurate). xHamster uses titles from the page. Matching is by normalized filename — very different names may still download.</li>
-                    <li>Make sure you're logged into the selected site before starting</li>
+        <section class="layout-hero layout-hero-home" aria-labelledby="downloader-title">
+            <div class="layout-hero-copy">
+                <p class="page-eyebrow page-eyebrow-left">SHUCK3R</p>
+                <h1 id="downloader-title" class="page-title-left">Downloader</h1>
+                <p class="subtitle subtitle-left">Queue favorites from PornHub or xHamster, keep authentication local to your machine, and skip titles already stored in your archive.</p>
+                <ul class="hero-signal-list" aria-label="Downloader highlights">
+                    <li><span class="hero-signal-label">Input</span><span class="hero-signal-value">Favorites-based collection</span></li>
+                    <li><span class="hero-signal-label">Runtime</span><span class="hero-signal-value">Manual site login, automated download flow</span></li>
+                    <li><span class="hero-signal-label">Storage</span><span class="hero-signal-value">Local downloads folder under your user profile</span></li>
                 </ul>
             </div>
 
-            <button type="submit">Start Download</button>
-        </form>
+            <section class="layout-panel control-panel" aria-labelledby="download-form-title">
+                <div class="panel-heading">
+                    <p class="panel-kicker">Start a run</p>
+                    <h2 id="download-form-title">Choose source and library rules</h2>
+                </div>
 
-        <p class="subtitle subtitle-push">
-            <a href="/duplicates" class="link-accent">Duplicate file checker</a>
-            — find similar filenames in any folder you choose and remove extras.
-        </p>
+                {% if form_error %}
+                <div class="form-error-banner" role="alert">
+                    <p><strong>Could not start download.</strong> {{ form_error }}</p>
+                </div>
+                {% endif %}
+
+                <form action="/download" method="post" id="downloadForm">
+                    <div class="form-group">
+                        <label>Select Site:</label>
+                        <div class="radio-group">
+                            <div class="radio-option">
+                                <input type="radio" id="pornhub" name="site" value="pornhub" required>
+                                <label for="pornhub">PornHub</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="xhamster" name="site" value="xhamster" required>
+                                <label for="xhamster">xHamster</label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="form-group checkbox-group">
+                        <input type="checkbox" id="headless" name="headless">
+                        <label for="headless">Run Headlessly (Browser won't be visible)</label>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="existing_library_dir">Only download what I don&apos;t have yet (optional)</label>
+                        <input type="text" id="existing_library_dir" name="existing_library_dir" autocomplete="off" placeholder="Folder where your existing videos are stored">
+                        <p class="help-text">Leave blank to download everything from favorites. If you set a folder, SHUCK3R compares each favorite&apos;s title to video filenames there (mp4, mkv, webm, …) and <strong>skips</strong> matches so only new ones download.</p>
+                    </div>
+
+                    <div class="form-group checkbox-group">
+                        <input type="checkbox" id="library_recursive" name="library_recursive" value="true">
+                        <label for="library_recursive">Include subfolders when scanning the library path above</label>
+                    </div>
+
+                    <button type="submit">Start Download</button>
+                </form>
+            </section>
+        </section>
+
+        <section class="layout-band layout-band-two-up" aria-label="Downloader details">
+            <div class="layout-panel detail-panel">
+                <div class="panel-heading">
+                    <p class="panel-kicker">Workflow</p>
+                    <h2>What happens after launch</h2>
+                </div>
+                <ol class="process-list">
+                    <li>SHUCK3R opens a browser window and waits for your site login.</li>
+                    <li>It walks your favorites pages and builds a queue before downloads start.</li>
+                    <li>yt-dlp saves files locally while the session page reports counts and recent log lines.</li>
+                </ol>
+            </div>
+
+            <div class="layout-panel detail-panel detail-panel-info">
+                <div class="panel-heading">
+                    <p class="panel-kicker">Constraints</p>
+                    <h2>Archive-aware and local-first</h2>
+                </div>
+                <div class="info-box info-box-compact">
+                    <h3>Operational notes</h3>
+                    <ul>
+                        <li><strong>PornHub:</strong> Downloads from your favorites playlist (requires login).</li>
+                        <li><strong>xHamster:</strong> Downloads from your favorites page (requires login).</li>
+                        <li>Videos save under your user profile (Windows: <code>%LOCALAPPDATA%\HamsterScraper\downloads</code>; override with <code>HAMSTER_USER_DATA</code>).</li>
+                        <li><strong>Library skip:</strong> PornHub resolves each title via yt-dlp. xHamster uses titles from the page. Very different filenames may still download.</li>
+                    </ul>
+                </div>
+                <p class="layout-cta-copy">Need cleanup before a new run? <a href="/duplicates" class="link-accent">Open the duplicate checker</a>.</p>
+            </div>
+        </section>
 {% endblock %}

@@ -1,43 +1,133 @@
 {% extends "base.html" %}
 {% block title %}Duplicate file checker · SHUCK3R{% endblock %}
-{% block main_class %}container container-wide{% endblock %}
+{% block main_class %}layout-shell layout-shell-utility{% endblock %}
+{% block extra_head %}
+<style>
+.delete-modal-overlay {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,.7);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 1000;
+}
+.delete-modal-overlay[hidden] { display: none; }
+.delete-modal-box {
+    background: var(--color-surface, #0b1420);
+    border: 1px solid var(--color-border, #182a3e);
+    border-top: 2px solid var(--color-danger, #ff3b52);
+    border-radius: var(--radius-lg, 4px);
+    padding: 1.5rem 2rem;
+    max-width: 480px; width: 90%;
+    box-shadow: 0 16px 48px rgba(0,0,0,.7), var(--glow-danger, 0 0 8px rgba(255,59,82,.2));
+}
+.delete-modal-box h3 {
+    margin: 0 0 .6rem;
+    font-family: var(--font-display, monospace);
+    font-size: .85rem;
+    font-weight: 700;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--color-danger, #ff3b52);
+}
+.delete-modal-file-list {
+    max-height: 180px; overflow-y: auto;
+    margin: .75rem 0;
+    padding: .5rem .75rem;
+    background: var(--color-background, #050a0f);
+    border-radius: var(--radius-sm, 2px);
+    border: 1px solid var(--color-border-strong, #1f3450);
+    font-size: .75rem;
+    font-family: var(--font-mono, monospace);
+    color: var(--color-foreground, #c4d4e4);
+    list-style: none;
+}
+.delete-modal-file-list li { padding: .15rem 0; word-break: break-all; }
+.delete-modal-actions { display: flex; gap: .75rem; justify-content: flex-end; margin-top: 1rem; }
+</style>
+{% endblock %}
 {% block content %}
-        <p class="page-eyebrow">SHUCK3R</p>
-        <h1>Duplicate file checker</h1>
-        <p class="subtitle">Scan any folder on this PC, review likely duplicates, then delete extras.</p>
+        <section class="layout-hero layout-hero-utility" aria-labelledby="duplicates-title">
+            <div class="layout-hero-copy">
+                <p class="page-eyebrow page-eyebrow-left">SHUCK3R</p>
+                <h1 id="duplicates-title" class="page-title-left">Duplicate file checker</h1>
+                <p class="subtitle subtitle-left">Scan any folder on this PC, review likely duplicates, then delete extras with one working surface instead of a long settings document.</p>
+            </div>
 
-        <div class="info-box">
-            <h3>Default folder</h3>
-            <p class="help-text no-margin">If you leave Directory empty, this folder is scanned:</p>
-            <p class="mono-path">{{ default_scan_directory or allowed_downloads_root }}</p>
-            <p class="help-text">You can enter any path: absolute (e.g. <code>D:\Videos\my-folder</code>) or relative — relative paths try your <strong>terminal&apos;s current directory</strong> first, then the SHUCK3R user-data folder (same area as the default above). Set <code>HAMSTER_USER_DATA</code> to override where that default lives. Files removed by &quot;Delete unselected duplicates&quot; must exist as normal files at the paths returned by the scan.</p>
-        </div>
+            <div class="layout-panel detail-panel detail-panel-info">
+                <div class="panel-heading">
+                    <p class="panel-kicker">Default root</p>
+                    <h2>Where scans begin when Directory is empty</h2>
+                </div>
+                <p class="mono-path">{{ default_scan_directory or allowed_downloads_root }}</p>
+                <p class="help-text">Absolute paths work. Relative paths try your <strong>terminal&apos;s current directory</strong> first, then the SHUCK3R user-data folder. Set <code>HAMSTER_USER_DATA</code> to override the default root.</p>
+            </div>
+        </section>
 
-        <div class="form-group">
-            <label for="scanDirectory">Directory (optional)</label>
-            <input type="text" id="scanDirectory" name="directory" placeholder="Empty = default above, or any folder path" autocomplete="off">
-        </div>
-        <div class="form-group checkbox-group">
-            <input type="checkbox" id="recursive">
-            <label for="recursive">Include subfolders (recursive scan)</label>
-        </div>
-        <div class="form-group">
-            <label for="threshold">Similarity threshold (name + size combined score)</label>
-            <input type="range" id="threshold" min="0.5" max="1" step="0.01" value="0.72">
-            <span id="thresholdLabel" class="help-text">0.72</span>
-            <span class="help-text">Higher = stricter (fewer matches). Max pairwise score per group is shown as &quot;Group confidence&quot;.</span>
-        </div>
-        <button type="button" class="btn-primary" id="btnScan">Scan for duplicates</button>
+        <section class="workspace-grid" aria-label="Duplicate scan workspace">
+            <div class="layout-panel workspace-main">
+                <div class="panel-heading">
+                    <p class="panel-kicker">Scan setup</p>
+                    <h2>Choose scope and similarity</h2>
+                </div>
 
-        <div id="scanMeta" class="scan-meta hidden" aria-live="polite"></div>
-        <div id="alertArea" class="alert-area" role="status"></div>
+                <div class="form-group">
+                    <label for="scanDirectory">Directory (optional)</label>
+                    <input type="text" id="scanDirectory" name="directory" placeholder="Empty = default above, or any folder path" autocomplete="off">
+                </div>
+                <div class="form-group checkbox-group">
+                    <input type="checkbox" id="recursive">
+                    <label for="recursive">Include subfolders (recursive scan)</label>
+                </div>
+                <div class="form-group">
+                    <label for="threshold">Similarity threshold (name + size combined score)</label>
+                    <input type="range" id="threshold" min="0.5" max="1" step="0.01" value="0.72" aria-valuetext="0.72">
+                    <span id="thresholdLabel" class="help-text" aria-live="polite" aria-atomic="true">0.72</span>
+                    <span class="help-text">Higher = stricter (fewer matches). Max pairwise score per group is shown as &quot;Group confidence&quot;.</span>
+                </div>
+                <button type="button" class="btn-primary" id="btnScan">Scan for duplicates</button>
 
-        <section id="resultsSection" class="hidden">
-            <h2 class="section-title">Results</h2>
-            <p class="help-text">Each row has a <strong>Keep</strong> box (checked = keep the file). By default one file per group stays checked; turn on more if they are not duplicates and you want to keep several. Unchecked rows are deleted when you confirm. Video previews load as you scroll (to avoid the browser stalling dozens of requests at once), seek to 12&nbsp;s when the file is long enough, then fall back to earlier times if decoding fails. Some codecs or files may still show &quot;No preview&quot;.</p>
+                <div id="scanMeta" class="scan-meta hidden" aria-live="polite"></div>
+                <div id="alertArea" class="alert-area" role="status"></div>
+            </div>
+
+            <aside class="layout-panel workspace-side" aria-label="How results behave">
+                <div class="panel-heading">
+                    <p class="panel-kicker">Review model</p>
+                    <h2>How to interpret matches</h2>
+                </div>
+                <ul class="process-list process-list-tight">
+                    <li>Each group keeps one file selected by default.</li>
+                    <li>Turn on more Keep boxes if similar names are still different videos.</li>
+                    <li>Unchecked files are removed permanently after confirmation.</li>
+                    <li>Preview thumbnails load lazily so the page stays responsive during large scans.</li>
+                </ul>
+            </aside>
+        </section>
+
+        <section id="resultsSection" class="hidden workspace-results">
+            <div class="results-header">
+                <div>
+                    <p class="panel-kicker">Output</p>
+                    <h2 class="section-title">Results</h2>
+                </div>
+                <p class="help-text results-help">Each row has a <strong>Keep</strong> box (checked = keep the file). By default one file per group stays checked; turn on more if they are not duplicates and you want to keep several. Unchecked rows are deleted when you confirm.</p>
+            </div>
             <div id="resultsTableWrap"></div>
             <button type="button" class="btn-danger" id="btnDelete">Delete unchecked files</button>
         </section>
+
+        <!-- Delete-confirmation modal -->
+        <div id="deleteConfirmModal" class="delete-modal-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="deleteModalTitle">
+            <div class="delete-modal-box">
+                <h3 id="deleteModalTitle">Confirm permanent delete</h3>
+                <p id="deleteModalDesc" class="help-text" style="margin:0"></p>
+                <ul id="deleteModalList" class="delete-modal-file-list"></ul>
+                <p class="help-text" style="margin:.25rem 0 0">This cannot be undone.</p>
+                <div class="delete-modal-actions">
+                    <button type="button" class="btn-secondary" id="deleteModalCancel">Cancel</button>
+                    <button type="button" class="btn-danger" id="deleteModalConfirm">Delete files</button>
+                </div>
+            </div>
+        </div>
 {% endblock %}
 
 {% block scripts %}
@@ -56,6 +146,7 @@
 
     thresholdInput.addEventListener('input', function () {
         thresholdLabel.textContent = thresholdInput.value;
+        thresholdInput.setAttribute('aria-valuetext', thresholdInput.value);
     });
 
     function showAlert(msg, kind) {
@@ -383,7 +474,7 @@
         }
     });
 
-    btnDelete.addEventListener('click', async function () {
+    btnDelete.addEventListener('click', function () {
         clearAlert();
         if (!lastGroups.length) return;
 
@@ -403,36 +494,63 @@
             return;
         }
 
-        if (!window.confirm('Permanently delete ' + toDelete.length + ' file(s)? This cannot be undone.')) {
-            return;
+        // Show custom modal instead of window.confirm
+        const modal = document.getElementById('deleteConfirmModal');
+        const modalDesc = document.getElementById('deleteModalDesc');
+        const modalList = document.getElementById('deleteModalList');
+        modalDesc.textContent = toDelete.length + ' file(s) will be permanently deleted:';
+        modalList.innerHTML = '';
+        toDelete.slice(0, 50).forEach(function (p) {
+            var li = document.createElement('li');
+            li.textContent = p;
+            modalList.appendChild(li);
+        });
+        if (toDelete.length > 50) {
+            var li = document.createElement('li');
+            li.textContent = '… and ' + (toDelete.length - 50) + ' more';
+            modalList.appendChild(li);
+        }
+        modal.hidden = false;
+        document.getElementById('deleteModalConfirm').focus();
+
+        function closeModal() {
+            modal.hidden = true;
+            document.getElementById('deleteModalConfirm').onclick = null;
+            document.getElementById('deleteModalCancel').onclick = null;
         }
 
-        btnDelete.disabled = true;
-        try {
-            const res = await fetch('/api/duplicates/delete', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ paths: toDelete })
-            });
-            const data = await res.json().catch(function () { return {}; });
-            if (!res.ok) {
-                showAlert(data.detail || 'Delete request failed', 'error');
-                return;
+        document.getElementById('deleteModalCancel').onclick = closeModal;
+
+        document.getElementById('deleteModalConfirm').onclick = async function () {
+            closeModal();
+            btnDelete.disabled = true;
+            try {
+                const res = await fetch('/api/duplicates/delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ paths: toDelete })
+                });
+                const data = await res.json().catch(function () { return {}; });
+                if (!res.ok) {
+                    showAlert(data.detail || 'Delete request failed', 'error');
+                    btnDelete.disabled = false;
+                    return;
+                }
+                const deleted = (data.deleted || []).length;
+                const errCount = (data.errors || []).length;
+                let msg = 'Deleted ' + deleted + ' file(s).';
+                if (errCount) {
+                    msg += ' ' + errCount + ' error(s).';
+                    console.warn(data.errors);
+                }
+                showAlert(msg, errCount ? 'warn' : 'success');
+                btnScan.click();
+            } catch (e) {
+                showAlert('Network error: ' + e.message, 'error');
+            } finally {
+                btnDelete.disabled = false;
             }
-            const deleted = (data.deleted || []).length;
-            const errCount = (data.errors || []).length;
-            let msg = 'Deleted ' + deleted + ' file(s).';
-            if (errCount) {
-                msg += ' ' + errCount + ' error(s).';
-                console.warn(data.errors);
-            }
-            showAlert(msg, errCount ? 'warn' : 'success');
-            btnScan.click();
-        } catch (e) {
-            showAlert('Network error: ' + e.message, 'error');
-        } finally {
-            btnDelete.disabled = false;
-        }
+        };
     });
 })();
     </script>
