@@ -1,15 +1,16 @@
 """
 Duplicate file detection: fuzzy filename matching plus size similarity.
 
-Scanning may target any directory the user specifies (see resolve_scan_directory).
-Deletes validate that paths resolve to existing regular files (resolve_deletable_file).
+Scanning targets any user-specified directory, except OS system directories which are
+blocked (see resolve_scan_directory).
+Deletes validate that paths resolve to existing regular files outside system directories
+(resolve_deletable_file).
 """
 
 from __future__ import annotations
 
 import os
 import re
-import sys
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -55,10 +56,11 @@ def resolve_scan_directory(
     download_dir_name: str = "downloads",
 ) -> Path:
     """
-    Resolve the folder to scan (any existing directory on the machine).
+    Resolve the folder to scan (any existing, non-system directory on the machine).
 
     - Empty input: project ``base_dir / download_dir_name`` (created if missing).
-    - Non-empty: ``expanduser``, strip outer quotes. Absolute paths may point anywhere.
+    - Non-empty: ``expanduser``, strip outer quotes. Absolute paths are accepted but
+      must not fall inside OS system directories (Windows, /bin, /etc, etc.).
       Relative paths: try ``cwd / path``, then ``base_dir / path`` so project-relative
       folders still work when the server was started from another working directory.
     """
@@ -94,7 +96,7 @@ def resolve_scan_directory(
 
 
 def resolve_deletable_file(path_str: str) -> Path:
-    """Resolve a path that must exist and refer to a regular file."""
+    """Resolve a path that must exist, be a regular file, and not reside in a system directory."""
     p = Path(_strip_outer_quotes(path_str)).expanduser()
     if not p.is_absolute():
         p = (Path.cwd() / p).resolve()
@@ -395,7 +397,23 @@ def cluster_duplicates(
     max_size_ratio_diff: float = 0.28,
 ) -> List[List[int]]:
     """
-    Return lists of indices into files that form duplicate groups (size >= 2).
+    Return lists of file indices that form duplicate groups (group size >= 2).
+
+    Pairs are scored as: ``name_weight * name_similarity + size_weight * size_similarity``.
+    A pair is grouped when score >= ``threshold`` and the size ratio difference is within
+    ``max_size_ratio_diff``.  Series-episode and copy-number heuristics can fast-accept or
+    fast-reject pairs before the score is computed.
+
+    Args:
+        files: list of dicts with at least ``name`` (str) and ``size`` (int) keys.
+        name_weight: contribution of filename similarity (default 0.85).
+        size_weight: contribution of file-size similarity (default 0.15).
+        threshold: minimum combined score to treat a pair as duplicates (default 0.72).
+        max_size_ratio_diff: reject pairs whose size ratio differs by more than this
+            fraction (default 0.28, i.e. files must be within ~22% of each other in size).
+
+    Returns:
+        List of groups; each group is a list of indices into *files*.
     """
     n = len(files)
     if n < 2:

@@ -74,7 +74,8 @@ def _desktop_session_progress_url(session_id: str, site: str) -> str:
     if host in ("0.0.0.0", "::", "[::]"):
         host = "127.0.0.1"
     port = int(os.environ.get("HAMSTER_PORT", "8001"))
-    return f"http://{host}:{port}/download/session/{session_id}?timestamp={session_id}&site={site}"
+    timestamp = int(time.time())
+    return f"http://{host}:{port}/download/session/{session_id}?timestamp={timestamp}&site={site}"
 
 templates = Jinja2Templates(directory=str(RESOURCE_ROOT / "templates"))
 app.mount("/static", StaticFiles(directory=str(RESOURCE_ROOT / "static")), name="static")
@@ -248,7 +249,10 @@ def load_netscape_cookies_into_driver(driver: webdriver.Chrome, cookie_file: str
     time.sleep(1.0)
 
 def extract_video_urls_ytdlp(cookie_file: str, playlist_url: str) -> List[str]:
-    """Extract video URLs using yt-dlp (for PornHub)."""
+    """Extract individual video URLs from a PornHub playlist/favourites page via yt-dlp.
+
+    Returns an empty list if yt-dlp exits with a non-zero status.
+    """
     command = [
         "python", "-m", "yt_dlp",
         "--cookies", cookie_file,
@@ -291,7 +295,11 @@ def fetch_video_title_ytdlp(url: str, cookie_file: Optional[str]) -> str:
 
 
 def fetch_html_selenium(driver, url: str) -> Optional[str]:
-    """Fetch HTML content using Selenium with scrolling."""
+    """Fetch HTML via Selenium with a full scroll to trigger lazy-loaded content.
+
+    Returns None when the resulting page looks like a 404, generic error page, or a
+    login redirect — callers should treat None as "no usable content at this URL".
+    """
     try:
         driver.get(url)
         logging.info(f"Navigated to {url}")
@@ -336,7 +344,11 @@ def scroll_to_bottom(driver, pause_time: float = 2.0) -> None:
         logging.error(f"Error during scrolling: {e}")
 
 def try_click_next_button(driver) -> bool:
-    """Try to click the next page button if it exists."""
+    """Click the next-page button if one is visible and enabled.
+
+    Tries a prioritised list of xHamster-specific and generic CSS selectors.
+    Returns True if a button was found and clicked, False if pagination is exhausted.
+    """
     try:
         # Look for xHamster-specific next page button selectors
         next_selectors = [
@@ -424,9 +436,9 @@ def extract_direct_video_url(driver, video_page_url: str) -> Tuple[Optional[str]
             elif page_title:
                 video_title = page_title.replace(" | xHamster", "").strip()
             
-            # Clean up the title for filename
-            video_title = re.sub(r'[<>:"/\\|?*]', '_', video_title)  # Replace invalid filename chars
-            video_title = re.sub(r'\s+', '_', video_title)  # Replace spaces with underscores
+            # Sanitise title for use as a filename
+            video_title = re.sub(r'[<>:"/\\|?*]', '_', video_title)
+            video_title = re.sub(r'\s+', '_', video_title)
             video_title = video_title[:100]  # Limit length
             
             logging.info(f"Extracted video title: {video_title}")
@@ -536,14 +548,14 @@ def download_video_ytdlp(video_url: str, title: str, cookie_file: str, download_
         'merge_output_format': 'mp4',   # Convert to MP4
         'hls_prefer_native': True,      # Use native HLS support for better compatibility
         'quiet': False,
-        'no_warnings': False,           # Show warnings for debugging
+        'no_warnings': False,
         'retries': 3,
-        'ignoreerrors': False,          # Don't ignore errors for debugging
+        'ignoreerrors': False,
         'extractor_retries': 3,
         'fragment_retries': 3,
-        'writeinfojson': False,         # Don't write info JSON files
-        'writesubtitles': False,        # Don't download subtitles
-        'writeautomaticsub': False,     # Don't download auto-generated subtitles
+        'writeinfojson': False,
+        'writesubtitles': False,
+        'writeautomaticsub': False,
     }
     
     def progress_hook(d):
@@ -593,14 +605,14 @@ def download_video_direct(video_url: str, title: str, download_dir: str, session
         'merge_output_format': 'mp4',   # Convert to MP4
         'hls_prefer_native': True,      # Use native HLS support for better compatibility
         'quiet': False,
-        'no_warnings': False,           # Show warnings for debugging
+        'no_warnings': False,
         'retries': 3,
-        'ignoreerrors': False,          # Don't ignore errors for debugging
+        'ignoreerrors': False,
         'extractor_retries': 3,
         'fragment_retries': 3,
-        'writeinfojson': False,         # Don't write info JSON files
-        'writesubtitles': False,        # Don't download subtitles
-        'writeautomaticsub': False,     # Don't download auto-generated subtitles
+        'writeinfojson': False,
+        'writesubtitles': False,
+        'writeautomaticsub': False,
     }
     
     def progress_hook(d):
@@ -638,9 +650,21 @@ def download_video_direct(video_url: str, title: str, download_dir: str, session
         tracker.fail_download(video_url, str(e))
         logging.error(f"Exception downloading {video_url}: {e}")
 
-def download_videos_parallel(video_info_list: List[Tuple[str, str]], download_dir: str, 
+def download_videos_parallel(video_info_list: List[Tuple[str, str]], download_dir: str,
                            max_workers: int = 4, cookie_file: str = None, session_id: str = None) -> None:
-    """Download videos in parallel with progress tracking."""
+    """Download a batch of videos in parallel and track progress.
+
+    Args:
+        video_info_list: list of (url, title) pairs to download.
+        download_dir: destination directory for downloaded files.
+        max_workers: thread-pool size (default 4).
+        cookie_file: path to a Netscape cookie file; if provided each worker calls
+            download_video_ytdlp, otherwise download_video_direct.
+        session_id: progress-tracker session key; a timestamp-based fallback is used
+            when None.
+
+    Each worker is given a 1-hour timeout; stragglers are cancelled on exit.
+    """
     if not session_id:
         session_id = str(int(time.time()))
         

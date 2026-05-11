@@ -60,8 +60,12 @@ def _spec_satisfied(installed: str, spec: str) -> bool:
     if spec.startswith("~="):
         req_str = spec[2:].strip()
         req = _parse_version(req_str)
-        # Compatible release: >= req AND < (major+1,)
-        upper = (req[0] + 1,) if req else (1,)
+        # PEP 440 compatible release: ~= X.Y  → >= X.Y AND < X+1
+        #                             ~= X.Y.Z → >= X.Y.Z AND < X.Y+1
+        if len(req) >= 2:
+            upper = req[:-1] + (req[-2] + 1,)
+        else:
+            upper = (req[0] + 1,) if req else (1,)
         return inst >= req and inst < upper
     return True
 
