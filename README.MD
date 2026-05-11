@@ -1,210 +1,285 @@
-# SHUCK3R
+<div align="center">
 
-Download videos from your **PornHub** and **xHamster** favorites. You log in once in a browser window; the app collects video URLs and downloads them with progress tracking. Optionally point at a folder of videos you already have: SHUCK3R **skips** favorites whose titles match those filenames and only downloads what’s missing.
+```
+███████╗██╗  ██╗██╗   ██╗ ██████╗██╗  ██╗███████╗██████╗
+██╔════╝██║  ██║██║   ██║██╔════╝██║ ██╔╝╚════██║██╔══██╗
+███████╗███████║██║   ██║██║     █████╔╝     ██╔╝██████╔╝
+╚════██║██╔══██║██║   ██║██║     ██╔═██╗    ██╔╝ ██╔══██╗
+███████║██║  ██║╚██████╔╝╚██████╗██║  ██╗   ██║  ██║  ██║
+╚══════╝╚═╝  ╚═╝ ╚═════╝  ╚═════╝╚═╝  ╚═╝   ╚═╝  ╚═╝  ╚═╝
+```
+
+**Download your favorites. Skip what you have. Delete the rest.**
+
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776ab?style=flat-square&logo=python&logoColor=white)](https://python.org)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.100%2B-009688?style=flat-square&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
+[![License](https://img.shields.io/badge/License-MIT-00ff88?style=flat-square)](#)
+[![Tests](https://img.shields.io/badge/Tests-passing-00ff88?style=flat-square)](#testing)
+
+</div>
+
+---
+
+SHUCK3R is a **local web application** that downloads your saved favorites from PornHub and xHamster. Log in once in the browser the app opens; SHUCK3R scrapes every URL from your favorites list, downloads each video, and tracks progress in real time. Point it at a folder of videos you already own — it skips anything whose title matches a file you already have, so you never re-download.
+
+A built-in **duplicate file checker** lets you scan any directory, review fuzzy-matched duplicate groups side-by-side, keep one copy per group, and permanently delete the rest — all from the same UI.
+
+---
+
+## Table of contents
+
+- [Features](#features)
+- [Requirements](#requirements)
+- [Install](#install)
+- [Running the app](#running-the-app)
+  - [Browser mode](#browser-mode-python-mainpy)
+  - [Desktop window mode](#desktop-window-mode-python-launcherpy)
+  - [Environment variables](#environment-variables)
+  - [Where files are saved](#where-files-are-saved)
+- [How to use](#how-to-use)
+  - [Downloading favorites](#downloading-favorites)
+  - [Duplicate file checker](#duplicate-file-checker)
+- [Building a Windows executable](#building-a-windows-executable)
+- [Project structure](#project-structure)
+- [Testing](#testing)
+- [Troubleshooting](#troubleshooting)
+
+---
+
+## Features
+
+| Capability | Detail |
+|---|---|
+| **Favorites scraper** | Paginates through your full PornHub or xHamster favorites list |
+| **Smart skip** | Point at an existing folder — files whose titles match are skipped |
+| **Progress dashboard** | Live session view: workflow timeline, metrics, and recent log lines |
+| **Headless mode** | Login and scraping run without a visible browser window |
+| **Duplicate checker** | Fuzzy-match by name + size across any directory; keep one, delete the rest |
+| **Desktop launcher** | Embedded pywebview window — no separate browser tab needed |
+| **Portable exe** | Single-file `SHUCK3R.exe` via PyInstaller; data stays in your user profile |
 
 ---
 
 ## Requirements
 
-- **Python 3.8+**
-- **Chrome** (installed for Selenium/automation)
-- **ChromeDriver** is installed automatically via `webdriver-manager` when you run the app
-- **WebView2** (for the desktop app window on Windows — usually already installed on Windows 11)
+| Dependency | Notes |
+|---|---|
+| **Python 3.10+** | 3.13 recommended |
+| **Google Chrome** | Must be installed — used by Selenium for login and scraping |
+| **ChromeDriver** | Auto-downloaded on first run via `webdriver-manager` |
+| **WebView2** | Desktop window only (Windows) — pre-installed on Windows 11 |
 
 ---
 
 ## Install
 
-1. Clone or download this repo and open a terminal in the project folder.
+```bash
+# 1. Clone the repo
+git clone <repo-url>
+cd SHuck3r
 
-2. Create a virtual environment (recommended):
+# 2. Create and activate a virtual environment
+python -m venv .venv
 
-   ```bash
-   python -m venv venv
-   venv\Scripts\activate
-   ```
+# Windows
+.venv\Scripts\activate
 
-3. Install dependencies:
+# macOS / Linux
+source .venv/bin/activate
 
-   ```bash
-   pip install -r requirements.txt
-   ```
+# 3. Install dependencies
+pip install -r requirements.txt
+```
 
 ---
 
-## Run the system
+## Running the app
 
-From the project root:
+### Browser mode (`python main.py`)
+
+Starts the API server and serves the UI at **http://localhost:8001**. Keep the terminal open while you use the app.
 
 ```bash
 python main.py
 ```
 
-The server starts at **http://0.0.0.0:8001** (all interfaces). Open in your browser:
-
-**http://localhost:8001**
-
-Leave the terminal open while you use the app.
-
-### Bind address and port (`python main.py`)
-
-- **`HAMSTER_HOST`** — default `0.0.0.0` (all interfaces). Use `127.0.0.1` if you only want local access.
-- **`HAMSTER_PORT`** — default `8001`.
-
-Example (local only): `set HAMSTER_HOST=127.0.0.1` then `python main.py`.
-
-Logs and downloads use a **per-user data folder** (same for source and the `.exe`): Windows **`%LOCALAPPDATA%\HamsterScraper`** (`downloads\`, `logs\`), macOS **`~/Library/Application Support/HamsterScraper`**, Linux **`~/.local/share/hamster_scraper`**. Set **`HAMSTER_USER_DATA`** to force a different root. (Those folder names are legacy; the app is **SHUCK3R**.)
-
-### Desktop launcher (`python launcher.py`)
-
-Starts the API on **loopback** and opens the UI in an **embedded window** (pywebview / Edge WebView2), not a separate browser tab.
-
-When you start a download, a **popup WebView window** opens for the site login while the **main window stays on SHUCK3R**. Use the menu to switch (**SHUCK3R → Show main window** / **Show site login window**), then **SHUCK3R → Done logging in — continue download** when finished (cookies are saved for yt-dlp / Selenium). If the popup cannot be created, login falls back to the main window. Set **`HAMSTER_EMBEDDED_LOGIN=0`** to use the old separate Chrome login instead.
-
-For **xHamster**, after that in-app login step, Selenium Chrome runs **headless** by default so a full Chrome window does not cover the SHUCK3R window. Set **`HAMSTER_SHOW_SELENIUM=1`** if you want a visible Chrome window while it scrapes.
-
-The packaged app asks for **Yes/No confirmation** after **Done logging in** so you can verify you finished signing in before cookies are saved.
-
-Submitting the form **redirects** to a stable **`GET /download/session/{id}`** progress URL so the embedded browser reliably keeps the progress UI (then returns there again after login). That page is the **live session dashboard**: an ordered **workflow timeline** (linked steps with plain-language copy), live metrics, and recent log lines. **`/progress/{id}`** is JSON for tools only — use **Open full log** or **Load progress JSON** on the dashboard instead of opening `/progress/...` in a browser (you would only see raw JSON).
-
-After signing in on the site popup, use the **Continue download — I'm logged in** button on that page (not only the SHUCK3R menu), especially if the menu bar is hidden. The **site login window closes** after cookies are saved; the main window stays on the dashboard.
-
-- **`HAMSTER_EXTERNAL_BROWSER=1`** — use your **default browser** instead and keep a terminal open (useful for debugging).
-- **`HAMSTER_HOST`** / **`HAMSTER_PORT`** — same as above.
-
-The packaged **`SHUCK3R.exe`** uses this launcher with **no console window**. If startup fails, check **`hamster_scraper_error.log`** inside your **`HAMSTER_USER_DATA`** folder (default: `%LOCALAPPDATA%\HamsterScraper` on Windows); a message box may also appear.
+Open **http://localhost:8001** in any browser. Press **Ctrl+C** in the terminal to stop.
 
 ---
 
-## Building a Windows executable
+### Desktop window mode (`python launcher.py`)
 
-The default build is a **single portable `release/SHUCK3R.exe`** (one-file PyInstaller), so the repo root stays source-only.
+Starts the API on loopback and opens the UI in an **embedded window** (pywebview / Edge WebView2) — no separate browser tab.
 
-1. Install runtime and build deps:
+```bash
+python launcher.py
+```
 
-   ```powershell
-   pip install -r requirements.txt
-   pip install -r requirements-build.txt
-   ```
+**Login flow in the desktop window:**
 
-2. From the **project root**:
+1. Submit the download form — a **site login popup** opens.
+2. Log in on the site. Use the menu bar (**SHUCK3R → Show main window / Show site login window**) to switch between windows if needed.
+3. Click **Continue download — I'm logged in** (or use **SHUCK3R → Done logging in**) when finished. Cookies are saved and the download begins.
+4. The login window closes; the main window returns to the session dashboard.
 
-   ```powershell
-   .\build_windows.ps1
-   ```
+> **xHamster note:** Selenium runs headless by default after login. Set `HAMSTER_SHOW_SELENIUM=1` to see the Chrome window.
 
-   When it finishes, run **`.\release\SHUCK3R.exe`**. The app opens in **its own window**. Videos and logs go under **your user profile** (see above), not next to the exe. Startup errors are written to **`hamster_scraper_error.log`** in that same user-data folder.
+---
 
-   Equivalent manual command:
+### Environment variables
 
-   ```powershell
-   pyinstaller hamster_scraper.spec --distpath ./release --workpath build/pyinstaller --noconfirm
-   ```
+| Variable | Default | Description |
+|---|---|---|
+| `HAMSTER_HOST` | `0.0.0.0` | Bind address. Use `127.0.0.1` for local-only access. |
+| `HAMSTER_PORT` | `8001` | Port the server listens on. |
+| `HAMSTER_USER_DATA` | *(platform default)* | Override the root folder for downloads and logs. |
+| `HAMSTER_EMBEDDED_LOGIN` | `1` | Set to `0` to use a separate Chrome window for login instead of the popup WebView. |
+| `HAMSTER_SHOW_SELENIUM` | `0` | Set to `1` to show the Chrome window during xHamster scraping. |
+| `HAMSTER_EXTERNAL_BROWSER` | `0` | Set to `1` to open the UI in your default browser instead of the embedded window. |
 
-3. Optional second exe (**`SHUCK3RWebView.exe`**) — same embedded UI as the main build; only use **`hamster_scraper_webview.spec`** if you want a separate artifact name.
+**Examples (Windows PowerShell):**
 
-   ```powershell
-   Remove-Item -Force ./release/SHUCK3RWebView.exe -ErrorAction SilentlyContinue
-   pyinstaller hamster_scraper_webview.spec --distpath ./release --workpath build/pyinstaller_webview --noconfirm
-   ```
+```powershell
+# Local-only access on a custom port
+$env:HAMSTER_HOST = "127.0.0.1"; $env:HAMSTER_PORT = "8002"; python main.py
 
-**Notes:**
+# Custom data directory
+$env:HAMSTER_USER_DATA = "D:\MyVideos"; python main.py
+```
 
-- When frozen, the launcher switches the working directory to your **user-data** folder so paths behave consistently.
-- The exe itself can live anywhere (Desktop, `release\`, etc.); data still goes under the **per-user** paths above.
-- **Chrome** must still be installed for downloads; PyInstaller does not bundle it.
-- First builds may hit missing modules; add names to `hiddenimports` in the `.spec` file and rebuild.
-- The bundled app skips `pip` dependency checks at startup.
-- **`build/`** is gitignored; **`release/*.exe`** is gitignored. The **`release/`** folder is kept with **`.gitkeep`** so the path exists in fresh clones.
+---
+
+### Where files are saved
+
+Downloads and logs are stored in a **per-user folder**, not inside the repo:
+
+| Platform | Path |
+|---|---|
+| Windows | `%LOCALAPPDATA%\HamsterScraper\downloads\` and `...\logs\` |
+| macOS | `~/Library/Application Support/HamsterScraper/` |
+| Linux | `~/.local/share/hamster_scraper/` |
+
+Override the root with the `HAMSTER_USER_DATA` environment variable (absolute path).
 
 ---
 
 ## How to use
 
-1. **Open the app**  
-   Go to http://localhost:8001 in your browser.
+### Downloading favorites
 
-2. **Choose site**  
-   Select **PornHub** or **xHamster** (your favorites from that site will be used).
-
-3. **Optional: Run headlessly**  
-   Check “Run Headlessly” if you don’t want to see the browser window (login and scraping happen in the background).
-
-4. **Start download**  
-   Click **Start Download**.
-
-5. **Log in when the browser opens**  
-   A Chrome window will open. Log in to the selected site if you aren’t already. The app will then:
-   - Collect all video URLs from your favorites (and follow “Next” for multiple pages).
-   - Download videos into the `downloads` folder with progress tracking.
-
-6. **After submission**  
-   You’re taken to a “Download Started” page where you can:
-   - **View Logs** – open the session log file
-   - **View Progress** – see live progress in the browser
-   - **Download Progress JSON** – export progress as JSON
-   - **Start New Download** – return to the form
-
-7. **Where files go**  
-   Default **`downloads`** and **`logs`** are under your **user profile**, not the repo:
-
-   - **Windows:** `%LOCALAPPDATA%\HamsterScraper\downloads` and `...\logs`
-   - **macOS:** `~/Library/Application Support/HamsterScraper/`
-   - **Linux:** `~/.local/share/hamster_scraper/`  
-
-   Override the root with **`HAMSTER_USER_DATA`** (absolute path).
+1. **Open the app** — go to `http://localhost:8001`.
+2. **Choose a site** — select **PornHub** or **xHamster**.
+3. **Optional: set an existing library folder** — paste the path to videos you already have. SHUCK3R skips favorites whose titles match files in that folder.
+4. **Optional: enable headless mode** — runs login and scraping without a visible browser window.
+5. **Click Start Download.**
+6. **Log in** in the browser (or popup) window that opens. SHUCK3R then:
+   - Paginates through all your favorites to collect every video URL.
+   - Downloads each video with progress tracking.
+7. **Monitor progress** on the live session dashboard — workflow timeline, counts, and recent log lines.
+8. From the dashboard you can **open the full log**, **export progress as JSON**, or **start a new download**.
 
 ---
 
-## Project layout (what the app uses)
+### Duplicate file checker
 
-```
-hamster_scraper/
-├── main.py              # Entry point: `python main.py` starts the server
-├── launcher.py          # Desktop: loopback + default browser
-├── launcher_webview.py  # Thin wrapper around launcher (embedded window)
-├── webview_login_bridge.py  # Embedded WebView site login + cookie export (exe / launcher.py)
-├── paths.py             # RESOURCE_ROOT + per-user data dir (LOCALAPPDATA etc.)
-├── progress_tracker.py  # Used by main.py for download progress
-├── duplicate_finder.py  # Duplicate grouping logic (duplicate checker UI)
-├── requirements.txt     # Python dependencies
-├── requirements-build.txt  # pyinstaller, pywebview (optional builds)
-├── release/             # Build output: SHUCK3R.exe (gitignored); .gitkeep tracked
-├── build_windows.ps1    # Builds release/SHUCK3R.exe
-├── hamster_scraper.spec    # PyInstaller one-file spec (browser launcher)
-├── hamster_scraper_webview.spec  # PyInstaller one-file spec (webview)
-├── templates/           # HTML (Jinja); extends base.html where noted
-│   ├── base.html
-│   ├── index.html
-│   ├── submitted.html
-│   └── duplicates.html
-├── static/              # CSS (style.css), assets
-├── tests/               # e.g. test_duplicate_finder.py
-├── .shared/             # Optional local tools only (see .shared/README.md)
-├── logs/                # Gitignored; often unused — defaults go to user profile (see below)
-├── downloads/           # Gitignored; same — app uses %LOCALAPPDATA%\HamsterScraper\downloads by default
-└── archive/             # Old/standalone scripts – not used by main.py
+1. Navigate to **`http://localhost:8001/duplicates`** (or use the nav).
+2. **Enter a directory path** to scan (leave empty to use the default downloads folder).
+3. **Adjust the similarity threshold** — higher = stricter (fewer results).
+4. **Click Scan for Duplicates.**
+5. For each group, check the file you want to **keep** (one per group is pre-selected).
+6. Click **Delete unchecked files** — a confirmation modal lists every file before deletion. This action cannot be undone.
+
+---
+
+## Building a Windows executable
+
+Produces a single portable **`release\SHUCK3R.exe`**. Chrome must still be installed on the target machine.
+
+```powershell
+# Install runtime + build dependencies
+pip install -r requirements.txt
+pip install -r requirements-build.txt
+
+# Build
+.\build_windows.ps1
 ```
 
-Only `main.py`, `paths.py`, `progress_tracker.py`, `duplicate_finder.py`, `templates/`, and `static/` are required for the web app. The `archive/` folder contains legacy scripts and is not used by the running system.
+The exe is written to `release\SHUCK3R.exe`. Run it directly — data goes to `%LOCALAPPDATA%\HamsterScraper\`, not next to the exe. Startup errors are written to `hamster_scraper_error.log` in that folder.
+
+**Manual build command:**
+
+```powershell
+pyinstaller hamster_scraper.spec --distpath ./release --workpath build/pyinstaller --noconfirm
+```
+
+**Optional second exe** (`SHUCK3RWebView.exe`):
+
+```powershell
+pyinstaller hamster_scraper_webview.spec --distpath ./release --workpath build/pyinstaller_webview --noconfirm
+```
+
+> `build/` and `release/*.exe` are gitignored. The `release/` directory is tracked with `.gitkeep` so the path exists in fresh clones. First builds may hit missing modules — add names to `hiddenimports` in the `.spec` file and rebuild.
 
 ---
 
-## UI design tooling (optional)
+## Project structure
 
-This repo can use the Cursor **ui-ux-pro-max** workflow (design-system search scripts). The bundle is **not** committed: clone it into `.shared/ui-ux-pro-max/` when you want it. See **[`.shared/README.md`](.shared/README.md)** for install steps and **[upstream ui-ux-pro-max-skill](https://github.com/nextlevelbuilder/ui-ux-pro-max-skill)** for the source.
+```
+SHuck3r/
+├── main.py                      # FastAPI app — `python main.py` starts the server
+├── launcher.py                  # Desktop launcher: loopback API + embedded window
+├── launcher_webview.py          # Thin wrapper for the webview build
+├── webview_login_bridge.py      # Popup WebView site login + cookie export
+├── workflow_heuristics.py       # Download workflow state machine
+├── existing_library.py          # Fuzzy skip-list against an existing video folder
+├── paths.py                     # RESOURCE_ROOT + per-user data dir resolution
+├── progress_tracker.py          # Per-session download progress state
+├── duplicate_finder.py          # Fuzzy duplicate grouping and cluster logic
+├── check_requirements.py        # Runtime package version validation
+│
+├── templates/                   # Jinja2 HTML templates
+│   ├── base.html                # Shared layout shell (Ghost Protocol dark theme)
+│   ├── index.html               # Download form
+│   ├── submitted.html           # Live session dashboard
+│   └── duplicates.html          # Duplicate checker UI
+│
+├── static/
+│   ├── style.css                # Design tokens + Ghost Protocol dark theme
+│   └── script.js                # Shared client-side logic
+│
+├── tests/
+│   └── test_duplicate_finder.py # pytest suite
+│
+├── requirements.txt             # Runtime dependencies
+├── requirements-build.txt       # Build-only dependencies (PyInstaller, pywebview)
+├── build_windows.ps1            # One-command Windows exe build
+├── hamster_scraper.spec         # PyInstaller spec — browser launcher
+├── hamster_scraper_webview.spec # PyInstaller spec — webview launcher
+│
+├── docs/                        # Implementation notes and site structure docs
+├── archive/                     # Legacy standalone scripts (not used by main.py)
+└── website-code/                # Reference HTML snapshots of scraped pages
+```
 
 ---
 
-## Stopping the server
+## Testing
 
-In the terminal where you ran `python main.py`, press **Ctrl+C**.
+```bash
+python -m pytest tests/ -v
+```
+
+Tests cover the duplicate-finder logic. No network or browser access required.
 
 ---
 
-## If something goes wrong
+## Troubleshooting
 
-- **“Press Enter to exit”** – the app prints the error and waits; read the traceback in the terminal.
-- **Port 8001 in use** – close the other app using that port or set **`HAMSTER_PORT`** (e.g. `set HAMSTER_PORT=8002` before `python main.py` or `python launcher.py`).
-- **Chrome/ChromeDriver issues** – ensure Chrome is installed and that no other automation is blocking it. ChromeDriver is auto-downloaded on first run.
-- **Login required** – both sites need you to be logged in (in the window the app opens) so it can see your favorites.
+| Symptom | Fix |
+|---|---|
+| **Port 8001 already in use** | Set `HAMSTER_PORT` to a free port: `$env:HAMSTER_PORT=8002; python main.py` |
+| **Chrome / ChromeDriver error** | Ensure Chrome is installed. ChromeDriver is auto-downloaded — check for version mismatches if Chrome was recently updated. |
+| **Login required error** | You must be signed in to the site in the window SHUCK3R opens. The favorites list requires authentication. |
+| **"Press Enter to exit"** | A startup error occurred. Read the traceback printed above that line. |
+| **exe startup failure (no console)** | Check `hamster_scraper_error.log` inside `%LOCALAPPDATA%\HamsterScraper\` (Windows). |
+| **Embedded window is blank** | WebView2 may be missing or outdated. Install the [WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) or use `python main.py` and open a browser instead. |
