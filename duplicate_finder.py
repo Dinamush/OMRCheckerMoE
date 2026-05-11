@@ -9,9 +9,37 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+# Prefixes of system directories that must never be scanned, previewed, or deleted from.
+_SYSTEM_PATH_PREFIXES: tuple[str, ...] = (
+    # Windows
+    os.environ.get("SystemRoot", r"C:\Windows").lower(),
+    r"c:\program files",
+    r"c:\program files (x86)",
+    r"c:\programdata",
+    # Unix / macOS
+    "/bin",
+    "/sbin",
+    "/usr/bin",
+    "/usr/sbin",
+    "/etc",
+    "/boot",
+    "/sys",
+    "/proc",
+    "/dev",
+    "/Library/System",
+    "/System/Library",
+)
+
+
+def _is_system_path(p: Path) -> bool:
+    """Return True if *p* starts with a known OS/system directory prefix."""
+    s = str(p).lower().replace("\\", "/")
+    return any(s.startswith(prefix.lower().replace("\\", "/")) for prefix in _SYSTEM_PATH_PREFIXES)
 
 
 def _strip_outer_quotes(s: str) -> str:
@@ -59,6 +87,9 @@ def resolve_scan_directory(
     if not candidate.is_dir():
         raise ValueError("Path is not a directory or does not exist.")
 
+    if _is_system_path(candidate):
+        raise ValueError("Scanning system directories is not permitted.")
+
     return candidate
 
 
@@ -73,6 +104,8 @@ def resolve_deletable_file(path_str: str) -> Path:
         raise ValueError("Path does not exist.")
     if not p.is_file():
         raise ValueError("Not a regular file.")
+    if _is_system_path(p):
+        raise ValueError("This path is in a protected system directory.")
     return p
 
 

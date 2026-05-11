@@ -29,7 +29,7 @@ def _parse_requirements_line(line: str) -> tuple[str, str | None] | None:
 def _parse_version(v: str) -> tuple[int, ...]:
     """Turn '2025.1.1' or '1.2' into comparable tuple. Non-numeric tails ignored."""
     parts = []
-    for part in re.split(r"[\\.]", v):
+    for part in re.split(r"\.", v):
         part = re.sub(r"[^0-9].*", "", part)
         parts.append(int(part) if part.isdigit() else 0)
     return tuple(parts) if parts else (0,)
@@ -57,6 +57,12 @@ def _spec_satisfied(installed: str, spec: str) -> bool:
     if spec.startswith("<"):
         req = _parse_version(spec[1:].strip())
         return inst < req
+    if spec.startswith("~="):
+        req_str = spec[2:].strip()
+        req = _parse_version(req_str)
+        # Compatible release: >= req AND < (major+1,)
+        upper = (req[0] + 1,) if req else (1,)
+        return inst >= req and inst < upper
     return True
 
 

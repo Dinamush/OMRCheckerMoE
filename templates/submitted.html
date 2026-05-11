@@ -127,7 +127,7 @@
         </section>
 
         <div class="session-actions-footer">
-            <a href="/download/log/{{ timestamp }}" class="btn btn-primary" target="_blank" rel="noopener noreferrer">Open full log</a>
+            <a href="/download/log/{{ session_id }}" class="btn btn-primary" target="_blank" rel="noopener noreferrer">Open full log</a>
             <a href="/progress/{{ session_id }}/json" class="btn btn-secondary" download>Download progress JSON file</a>
             <a href="/" class="btn btn-secondary">Start new download</a>
         </div>
@@ -136,7 +136,7 @@
 {% block scripts %}
     <script>
         const sessionId = '{{ session_id }}';
-        const logTimestamp = '{{ timestamp }}';
+        const logTimestamp = '{{ session_id }}';
         let progressInterval;
         let logInterval;
         let lastWorkflowActiveId = null;
@@ -377,6 +377,7 @@
                     }
                 })
                 .catch(function () {
+                    clearInterval(progressInterval);
                     setPhaseUI({
                         code: 'error',
                         badge: 'Network',

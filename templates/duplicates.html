@@ -1,6 +1,37 @@
 {% extends "base.html" %}
 {% block title %}Duplicate file checker · SHUCK3R{% endblock %}
 {% block main_class %}container container-wide{% endblock %}
+{% block extra_head %}
+<style>
+.delete-modal-overlay {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,.55);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 1000;
+}
+.delete-modal-box {
+    background: var(--surface, #1e1e2e);
+    border: 1px solid var(--border, #313244);
+    border-radius: 10px;
+    padding: 1.5rem 2rem;
+    max-width: 480px; width: 90%;
+    box-shadow: 0 8px 32px rgba(0,0,0,.4);
+}
+.delete-modal-box h3 { margin: 0 0 .6rem; font-size: 1.1rem; }
+.delete-modal-file-list {
+    max-height: 180px; overflow-y: auto;
+    margin: .75rem 0;
+    padding: .5rem .75rem;
+    background: var(--surface-raised, #181825);
+    border-radius: 6px;
+    font-size: .8rem;
+    font-family: var(--mono, monospace);
+    list-style: none;
+}
+.delete-modal-file-list li { padding: .15rem 0; word-break: break-all; }
+.delete-modal-actions { display: flex; gap: .75rem; justify-content: flex-end; margin-top: 1rem; }
+</style>
+{% endblock %}
 {% block content %}
         <p class="page-eyebrow">SHUCK3R</p>
         <h1>Duplicate file checker</h1>
@@ -23,8 +54,8 @@
         </div>
         <div class="form-group">
             <label for="threshold">Similarity threshold (name + size combined score)</label>
-            <input type="range" id="threshold" min="0.5" max="1" step="0.01" value="0.72">
-            <span id="thresholdLabel" class="help-text">0.72</span>
+            <input type="range" id="threshold" min="0.5" max="1" step="0.01" value="0.72" aria-valuetext="0.72">
+            <span id="thresholdLabel" class="help-text" aria-live="polite" aria-atomic="true">0.72</span>
             <span class="help-text">Higher = stricter (fewer matches). Max pairwise score per group is shown as &quot;Group confidence&quot;.</span>
         </div>
         <button type="button" class="btn-primary" id="btnScan">Scan for duplicates</button>
@@ -38,6 +69,20 @@
             <div id="resultsTableWrap"></div>
             <button type="button" class="btn-danger" id="btnDelete">Delete unchecked files</button>
         </section>
+
+        <!-- Delete-confirmation modal -->
+        <div id="deleteConfirmModal" class="delete-modal-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="deleteModalTitle">
+            <div class="delete-modal-box">
+                <h3 id="deleteModalTitle">Confirm permanent delete</h3>
+                <p id="deleteModalDesc" class="help-text" style="margin:0"></p>
+                <ul id="deleteModalList" class="delete-modal-file-list"></ul>
+                <p class="help-text" style="margin:.25rem 0 0">This cannot be undone.</p>
+                <div class="delete-modal-actions">
+                    <button type="button" class="btn-secondary" id="deleteModalCancel">Cancel</button>
+                    <button type="button" class="btn-danger" id="deleteModalConfirm">Delete files</button>
+                </div>
+            </div>
+        </div>
 {% endblock %}
 
 {% block scripts %}
@@ -56,6 +101,7 @@
 
     thresholdInput.addEventListener('input', function () {
         thresholdLabel.textContent = thresholdInput.value;
+        thresholdInput.setAttribute('aria-valuetext', thresholdInput.value);
     });
 
     function showAlert(msg, kind) {
@@ -383,7 +429,7 @@
         }
     });
 
-    btnDelete.addEventListener('click', async function () {
+    btnDelete.addEventListener('click', function () {
         clearAlert();
         if (!lastGroups.length) return;
 
@@ -403,36 +449,63 @@
             return;
         }
 
-        if (!window.confirm('Permanently delete ' + toDelete.length + ' file(s)? This cannot be undone.')) {
-            return;
+        // Show custom modal instead of window.confirm
+        const modal = document.getElementById('deleteConfirmModal');
+        const modalDesc = document.getElementById('deleteModalDesc');
+        const modalList = document.getElementById('deleteModalList');
+        modalDesc.textContent = toDelete.length + ' file(s) will be permanently deleted:';
+        modalList.innerHTML = '';
+        toDelete.slice(0, 50).forEach(function (p) {
+            var li = document.createElement('li');
+            li.textContent = p;
+            modalList.appendChild(li);
+        });
+        if (toDelete.length > 50) {
+            var li = document.createElement('li');
+            li.textContent = '… and ' + (toDelete.length - 50) + ' more';
+            modalList.appendChild(li);
+        }
+        modal.hidden = false;
+        document.getElementById('deleteModalConfirm').focus();
+
+        function closeModal() {
+            modal.hidden = true;
+            document.getElementById('deleteModalConfirm').onclick = null;
+            document.getElementById('deleteModalCancel').onclick = null;
         }
 
-        btnDelete.disabled = true;
-        try {
-            const res = await fetch('/api/duplicates/delete', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ paths: toDelete })
-            });
-            const data = await res.json().catch(function () { return {}; });
-            if (!res.ok) {
-                showAlert(data.detail || 'Delete request failed', 'error');
-                return;
+        document.getElementById('deleteModalCancel').onclick = closeModal;
+
+        document.getElementById('deleteModalConfirm').onclick = async function () {
+            closeModal();
+            btnDelete.disabled = true;
+            try {
+                const res = await fetch('/api/duplicates/delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ paths: toDelete })
+                });
+                const data = await res.json().catch(function () { return {}; });
+                if (!res.ok) {
+                    showAlert(data.detail || 'Delete request failed', 'error');
+                    btnDelete.disabled = false;
+                    return;
+                }
+                const deleted = (data.deleted || []).length;
+                const errCount = (data.errors || []).length;
+                let msg = 'Deleted ' + deleted + ' file(s).';
+                if (errCount) {
+                    msg += ' ' + errCount + ' error(s).';
+                    console.warn(data.errors);
+                }
+                showAlert(msg, errCount ? 'warn' : 'success');
+                btnScan.click();
+            } catch (e) {
+                showAlert('Network error: ' + e.message, 'error');
+            } finally {
+                btnDelete.disabled = false;
             }
-            const deleted = (data.deleted || []).length;
-            const errCount = (data.errors || []).length;
-            let msg = 'Deleted ' + deleted + ' file(s).';
-            if (errCount) {
-                msg += ' ' + errCount + ' error(s).';
-                console.warn(data.errors);
-            }
-            showAlert(msg, errCount ? 'warn' : 'success');
-            btnScan.click();
-        } catch (e) {
-            showAlert('Network error: ' + e.message, 'error');
-        } finally {
-            btnDelete.disabled = false;
-        }
+        };
     });
 })();
     </script>

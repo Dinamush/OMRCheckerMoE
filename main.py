@@ -13,6 +13,7 @@ import time
 import subprocess
 import concurrent.futures
 import re
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Set
 from fastapi import FastAPI, Request, BackgroundTasks, Form, HTTPException, Query
@@ -655,20 +656,25 @@ def download_videos_parallel(video_info_list: List[Tuple[str, str]], download_di
             tracker.add_urls(urls, titles)
         
         logging.info(f"Starting download of {len(video_info_list)} videos with {max_workers} workers")
-        
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+        try:
             futures = []
             for video_url, title in video_info_list:
                 if cookie_file:
                     futures.append(executor.submit(download_video_ytdlp, video_url, title, cookie_file, download_dir, session_id))
                 else:
                     futures.append(executor.submit(download_video_direct, video_url, title, download_dir, session_id))
-            
+
             for future in concurrent.futures.as_completed(futures):
                 try:
-                    future.result()
+                    future.result(timeout=3600)
+                except concurrent.futures.TimeoutError:
+                    logging.error("A download worker timed out after 1 hour; skipping.")
                 except Exception as e:
                     logging.error(f"Error in video download: {e}")
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
         logging.info("Parallel download workers finished for this batch.")
 
@@ -797,6 +803,11 @@ def pornhub_workflow(
                 logging.info("Chrome WebDriver closed successfully.")
             except Exception as e:
                 logging.error(f"Error closing Chrome WebDriver: {e}")
+        try:
+            if os.path.exists(cookie_file):
+                os.unlink(cookie_file)
+        except Exception as e:
+            logging.warning(f"Could not delete cookie file {cookie_file}: {e}")
         if ok:
             try:
                 cleanup_tracker(session_id)
@@ -873,7 +884,6 @@ def xhamster_workflow(
             workflow_heuristics.advance(session_id, "browser_start")
 
         tracker = get_tracker(session_id)
-        tracker.start_session(0)
         workflow_heuristics.advance(session_id, "collect_urls")
         workflow_heuristics.set_detail(session_id, "Loading your favorites pages…")
 
@@ -1070,6 +1080,11 @@ def xhamster_workflow(
                 logging.info("Chrome WebDriver closed successfully.")
             except Exception as e:
                 logging.error(f"Error closing Chrome WebDriver: {e}")
+        try:
+            if os.path.exists(cookie_file):
+                os.unlink(cookie_file)
+        except Exception as e:
+            logging.warning(f"Could not delete cookie file {cookie_file}: {e}")
         if ok:
             try:
                 cleanup_tracker(session_id)
@@ -1105,8 +1120,8 @@ def handle_form(
 ):
     """Handle form submission and start the appropriate workflow."""
     timestamp = int(time.time())
-    session_id = str(timestamp)
-    log_file = os.path.join(LOG_DIR, f"video_downloader_{timestamp}.log")
+    session_id = str(uuid.uuid4())
+    log_file = os.path.join(LOG_DIR, f"video_downloader_{session_id}.log")
 
     headless_bool = headless.lower() == "true"
     library_recursive_bool = library_recursive.lower() == "true"
@@ -1168,8 +1183,7 @@ def download_session_progress(
     """Bookmarkable progress page (GET) so the desktop WebView keeps the download UI after login."""
     if site not in ("pornhub", "xhamster"):
         raise HTTPException(status_code=400, detail="Invalid site")
-    if str(timestamp) != session_id:
-        raise HTTPException(status_code=400, detail="Session mismatch")
+
     embedded_login = webview_login_bridge.is_active() and webview_login_bridge.embedded_login_env_enabled()
     return templates.TemplateResponse(
         request,
@@ -1200,10 +1214,10 @@ def api_embedded_login_confirm():
     return {"ok": True}
 
 
-@app.get("/download/log/{timestamp}")
-def get_log(timestamp: int):
+@app.get("/download/log/{session_id}")
+def get_log(session_id: str):
     """Download log file."""
-    log_file = os.path.join(LOG_DIR, f"video_downloader_{timestamp}.log")
+    log_file = os.path.join(LOG_DIR, f"video_downloader_{session_id}.log")
     if os.path.exists(log_file):
         return FileResponse(path=log_file, filename=os.path.basename(log_file), media_type='text/plain')
     else:
@@ -1230,10 +1244,10 @@ def _read_log_tail_text(log_path: Path, *, lines: int, max_bytes: int = 56_000) 
     return "\n".join(all_lines[-lines:])
 
 
-@app.get("/download/log/{timestamp}/tail", response_class=PlainTextResponse)
-def get_log_tail(timestamp: int, lines: int = Query(48, ge=8, le=200)):
+@app.get("/download/log/{session_id}/tail", response_class=PlainTextResponse)
+def get_log_tail(session_id: str, lines: int = Query(48, ge=8, le=200)):
     """Last lines of the session log for the live dashboard (plain text)."""
-    log_file = Path(LOG_DIR) / f"video_downloader_{timestamp}.log"
+    log_file = Path(LOG_DIR) / f"video_downloader_{session_id}.log"
     if not log_file.is_file():
         raise HTTPException(status_code=404, detail="Log file not found.")
     body = _read_log_tail_text(log_file, lines=lines)
@@ -1243,8 +1257,11 @@ def get_log_tail(timestamp: int, lines: int = Query(48, ge=8, le=200)):
 def get_downloaded_file(filename: str):
     """Serve downloaded video files."""
     file_path = os.path.join(DOWNLOAD_DIR, filename)
-    if os.path.exists(file_path):
-        return FileResponse(path=file_path, filename=filename, media_type='video/mp4')
+    resolved = Path(file_path).resolve()
+    if not str(resolved).startswith(str(Path(DOWNLOAD_DIR).resolve()) + os.sep):
+        raise HTTPException(status_code=400, detail="Invalid path.")
+    if resolved.exists():
+        return FileResponse(path=str(resolved), filename=resolved.name, media_type='video/mp4')
     else:
         return {"error": "File not found."}
 
