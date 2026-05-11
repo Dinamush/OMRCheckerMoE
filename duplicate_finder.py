@@ -13,7 +13,34 @@ import os
 import re
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, TypedDict
+
+# ---------------------------------------------------------------------------
+# Typed schemas for file records and API payload
+# ---------------------------------------------------------------------------
+
+class FileRecord(TypedDict):
+    """A single file entry produced by iter_files()."""
+    path: str
+    name: str
+    size: int
+
+
+class FileMatchRow(TypedDict):
+    """One file's row inside a DuplicateGroup payload."""
+    path: str
+    name: str
+    size: int
+    size_display: str
+    match_score: float
+
+
+class DuplicateGroup(TypedDict):
+    """A group of probable duplicate files as returned by build_groups_payload()."""
+    group_id: int
+    confidence: float
+    normalized_hint: str
+    files: List[FileMatchRow]
 
 # Prefixes of system directories that must never be scanned, previewed, or deleted from.
 _SYSTEM_PATH_PREFIXES: tuple[str, ...] = (
@@ -120,9 +147,9 @@ def normalize_name(filename: str) -> str:
     return base
 
 
-def iter_files(root: Path, recursive: bool) -> List[Dict[str, Any]]:
+def iter_files(root: Path, recursive: bool) -> List[FileRecord]:
     """List regular files under root."""
-    out: List[Dict[str, Any]] = []
+    out: List[FileRecord] = []
     if recursive:
         for dirpath, _dirnames, filenames in os.walk(root):
             for fn in filenames:
@@ -375,22 +402,25 @@ def _same_series_different_installment(norm_a: str, norm_b: str) -> bool:
 
 class _UnionFind:
     def __init__(self, n: int) -> None:
-        self.parent = list(range(n))
+        self._n = n
+        self._parent = list(range(n))
 
     def find(self, x: int) -> int:
-        while self.parent[x] != x:
-            self.parent[x] = self.parent[self.parent[x]]
-            x = self.parent[x]
+        if not (0 <= x < self._n):
+            raise IndexError(f"Index {x} out of range [0, {self._n})")
+        while self._parent[x] != x:
+            self._parent[x] = self._parent[self._parent[x]]
+            x = self._parent[x]
         return x
 
     def union(self, a: int, b: int) -> None:
         ra, rb = self.find(a), self.find(b)
         if ra != rb:
-            self.parent[rb] = ra
+            self._parent[rb] = ra
 
 
 def cluster_duplicates(
-    files: List[Dict[str, Any]],
+    files: List[FileRecord],
     name_weight: float = 0.85,
     size_weight: float = 0.15,
     threshold: float = 0.72,
@@ -450,7 +480,7 @@ def cluster_duplicates(
 
 def _group_max_pairwise_score(
     indices: List[int],
-    files: List[Dict[str, Any]],
+    files: List[FileRecord],
     norms: List[str],
     sizes: List[int],
     name_weight: float,
@@ -470,7 +500,7 @@ def _group_max_pairwise_score(
 def _file_best_peer_score(
     idx: int,
     indices: List[int],
-    files: List[Dict[str, Any]],
+    files: List[FileRecord],
     norms: List[str],
     sizes: List[int],
     name_weight: float,
@@ -501,11 +531,11 @@ def human_size(n: int) -> str:
 
 
 def build_groups_payload(
-    files: List[Dict[str, Any]],
+    files: List[FileRecord],
     groups: List[List[int]],
     name_weight: float = 0.85,
     size_weight: float = 0.15,
-) -> List[Dict[str, Any]]:
+) -> List[DuplicateGroup]:
     """
     Build API/UI payload. Confidence per group is the maximum pairwise combined score
     within that group (documented in the UI).
@@ -513,7 +543,7 @@ def build_groups_payload(
     norms = [normalize_name(f["name"]) for f in files]
     sizes = [int(f["size"]) for f in files]
 
-    payload: List[Dict[str, Any]] = []
+    payload: List[DuplicateGroup] = []
     for gid, indices in enumerate(groups):
         conf = _group_max_pairwise_score(
             indices, files, norms, sizes, name_weight, size_weight

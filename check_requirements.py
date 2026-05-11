@@ -9,10 +9,17 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
+from typing import NamedTuple
 
 
-def _parse_requirements_line(line: str) -> tuple[str, str | None] | None:
-    """Parse a line like 'yt-dlp>=2025.1.1' or 'fastapi' -> (package_name, spec_or_none)."""
+class ParsedRequirement(NamedTuple):
+    """A parsed requirements.txt line: package name plus optional version specifier."""
+    name: str
+    spec: str | None = None
+
+
+def _parse_requirements_line(line: str) -> ParsedRequirement | None:
+    """Parse a line like 'yt-dlp>=2025.1.1' or 'fastapi' -> ParsedRequirement, or None for blank/comment lines."""
     line = line.strip()
     if not line or line.startswith("#"):
         return None
@@ -22,8 +29,8 @@ def _parse_requirements_line(line: str) -> tuple[str, str | None] | None:
         return None
     name, spec = m.group(1), m.group(2)
     if spec and spec.strip():
-        return (name, spec.strip())
-    return (name, None)
+        return ParsedRequirement(name, spec.strip())
+    return ParsedRequirement(name)
 
 
 def _parse_version(v: str) -> tuple[int, ...]:
@@ -60,10 +67,11 @@ def _spec_satisfied(installed: str, spec: str) -> bool:
     if spec.startswith("~="):
         req_str = spec[2:].strip()
         req = _parse_version(req_str)
-        # PEP 440 compatible release: ~= X.Y  → >= X.Y AND < X+1
+        # PEP 440 compatible release: ~= X.Y   → >= X.Y   AND < X+1
         #                             ~= X.Y.Z → >= X.Y.Z AND < X.Y+1
+        # Drop the last component, then increment the new last component.
         if len(req) >= 2:
-            upper = req[:-1] + (req[-2] + 1,)
+            upper = req[:-2] + (req[-2] + 1,)
         else:
             upper = (req[0] + 1,) if req else (1,)
         return inst >= req and inst < upper
