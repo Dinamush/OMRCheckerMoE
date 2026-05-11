@@ -5,27 +5,38 @@
 <style>
 .delete-modal-overlay {
     position: fixed; inset: 0;
-    background: rgba(0,0,0,.55);
+    background: rgba(0,0,0,.7);
     display: flex; align-items: center; justify-content: center;
     z-index: 1000;
 }
 .delete-modal-box {
-    background: var(--surface, #1e1e2e);
-    border: 1px solid var(--border, #313244);
-    border-radius: 10px;
+    background: var(--color-surface, #0b1420);
+    border: 1px solid var(--color-border, #182a3e);
+    border-top: 2px solid var(--color-danger, #ff3b52);
+    border-radius: var(--radius-lg, 4px);
     padding: 1.5rem 2rem;
     max-width: 480px; width: 90%;
-    box-shadow: 0 8px 32px rgba(0,0,0,.4);
+    box-shadow: 0 16px 48px rgba(0,0,0,.7), var(--glow-danger, 0 0 8px rgba(255,59,82,.2));
 }
-.delete-modal-box h3 { margin: 0 0 .6rem; font-size: 1.1rem; }
+.delete-modal-box h3 {
+    margin: 0 0 .6rem;
+    font-family: var(--font-display, monospace);
+    font-size: .85rem;
+    font-weight: 700;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--color-danger, #ff3b52);
+}
 .delete-modal-file-list {
     max-height: 180px; overflow-y: auto;
     margin: .75rem 0;
     padding: .5rem .75rem;
-    background: var(--surface-raised, #181825);
-    border-radius: 6px;
-    font-size: .8rem;
-    font-family: var(--mono, monospace);
+    background: var(--color-background, #050a0f);
+    border-radius: var(--radius-sm, 2px);
+    border: 1px solid var(--color-border-strong, #1f3450);
+    font-size: .75rem;
+    font-family: var(--font-mono, monospace);
+    color: var(--color-foreground, #c4d4e4);
     list-style: none;
 }
 .delete-modal-file-list li { padding: .15rem 0; word-break: break-all; }
