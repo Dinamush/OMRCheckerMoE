@@ -62,6 +62,14 @@
     --glow-primary-sm: 0 0 5px rgba(0, 255, 136, 0.35);
     --glow-cyan:       0 0 10px rgba(0, 200, 255, 0.35), 0 0 28px rgba(0, 200, 255, 0.10);
     --glow-danger:     0 0 8px rgba(255, 59, 82, 0.38);
+    --glow-corn:       0 0 12px rgba(255, 217, 74, 0.45), 0 0 30px rgba(255, 217, 74, 0.13);
+    --glow-corn-sm:    0 0 6px rgba(255, 217, 74, 0.36);
+
+    /* Corn Protocol — harvest accent */
+    --color-corn:        #ffd94a;
+    --color-corn-dim:    #c9900a;
+    --color-corn-muted:  rgba(255, 217, 74, 0.07);
+    --color-corn-border: rgba(255, 217, 74, 0.22);
 
     --transition: color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease,
                   box-shadow 0.15s ease, transform 0.15s ease;
@@ -76,8 +84,15 @@ body {
     background-color: var(--color-background);
     background-image:
         linear-gradient(rgba(0, 255, 136, 0.020) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(0, 255, 136, 0.020) 1px, transparent 1px);
-    background-size: 48px 48px;
+        linear-gradient(90deg, rgba(0, 255, 136, 0.020) 1px, transparent 1px),
+        repeating-linear-gradient(
+            63deg,
+            transparent 0,
+            transparent 22px,
+            rgba(255, 179, 0, 0.011) 22px,
+            rgba(255, 179, 0, 0.011) 23px
+        );
+    background-size: 48px 48px, 48px 48px, 100% 100%;
     margin: 0;
     min-height: 100vh;
     display: flex;
@@ -1505,4 +1520,117 @@ video.dup-thumb {
     .progress-bar-indeterminate .progress-fill { animation: none; width: 35% !important; }
     .workflow-step-pulse { animation: none !important; opacity: 1; }
     .site-brand:hover { animation: none; }
+    .hero-corn-art { transition: none; }
+    .layout-shell-home button[type="submit"]:active { animation: none; }
+}
+
+/* ─── Corn Protocol — harvest accent layer ──────────────────────────────────── */
+
+.layout-hero-copy { position: relative; }
+
+.hero-corn-art {
+    position: absolute;
+    right: clamp(-8px, 2vw, 4px);
+    top: clamp(28px, 7vw, 56px);
+    width: clamp(52px, 6.5vw, 80px);
+    opacity: 0.20;
+    pointer-events: none;
+    filter: drop-shadow(0 0 10px rgba(255, 179, 0, 0.32));
+    transform: rotate(-8deg);
+    transition: opacity 0.5s ease;
+}
+.layout-hero-copy:hover .hero-corn-art {
+    opacity: 0.38;
+}
+@media (max-width: 980px) {
+    .hero-corn-art { display: none; }
+}
+
+.corn-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 1px 8px 2px;
+    border-radius: 999px;
+    font-size: 9px;
+    font-family: var(--font-display);
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    background: var(--color-corn-muted);
+    border: 1px solid var(--color-corn-border);
+    color: var(--color-corn);
+    text-shadow: var(--glow-corn-sm);
+    vertical-align: middle;
+}
+
+.panel-kicker-corn {
+    color: var(--color-corn) !important;
+    text-shadow: var(--glow-corn-sm) !important;
+}
+
+.site-header-corn {
+    display: flex;
+    align-items: center;
+    opacity: 0.55;
+    filter: drop-shadow(0 0 4px rgba(255, 179, 0, 0.35));
+    transition: opacity 0.2s ease, filter 0.2s ease;
+    margin-left: 6px;
+    flex-shrink: 0;
+}
+.site-header-corn:hover {
+    opacity: 0.90;
+    filter: drop-shadow(0 0 8px rgba(255, 179, 0, 0.58));
+}
+
+/* Progress bar — kernel groove texture */
+.progress-fill {
+    position: relative;
+    overflow: hidden;
+}
+.progress-fill::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: repeating-linear-gradient(
+        90deg,
+        transparent 0px,
+        transparent 7px,
+        rgba(0, 0, 0, 0.16) 7px,
+        rgba(0, 0, 0, 0.16) 8px
+    );
+    pointer-events: none;
+    border-radius: inherit;
+}
+
+/* Harvest CTA — corn-yellow submit button on home page */
+.layout-shell-home button[type="submit"] {
+    border-color: var(--color-corn);
+    color: var(--color-corn);
+    box-shadow: var(--glow-corn-sm);
+}
+.layout-shell-home button[type="submit"]:hover:not(:disabled) {
+    background-color: var(--color-corn);
+    color: #1a0800;
+    box-shadow: var(--glow-corn);
+}
+.layout-shell-home button[type="submit"]:focus-visible {
+    box-shadow: 0 0 0 3px rgba(255, 217, 74, 0.28), var(--glow-corn-sm);
+}
+
+.site-footer-corn-stamp {
+    display: inline-block;
+    opacity: 0.72;
+    vertical-align: middle;
+    margin: 0 2px;
+    font-style: normal;
+}
+
+@keyframes kernel-pop {
+    0%   { transform: scale(1); }
+    40%  { transform: scale(1.04); }
+    100% { transform: scale(1); }
+}
+.layout-shell-home button[type="submit"]:active:not(:disabled) {
+    animation: kernel-pop 0.20s ease;
 }
