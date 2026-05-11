@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Duplicate file checker · SHUCK3R{% endblock %}
-{% block main_class %}container container-wide{% endblock %}
+{% block main_class %}layout-shell layout-shell-utility{% endblock %}
 {% block extra_head %}
 <style>
 .delete-modal-overlay {
@@ -9,6 +9,7 @@
     display: flex; align-items: center; justify-content: center;
     z-index: 1000;
 }
+.delete-modal-overlay[hidden] { display: none; }
 .delete-modal-box {
     background: var(--color-surface, #0b1420);
     border: 1px solid var(--color-border, #182a3e);
@@ -44,39 +45,72 @@
 </style>
 {% endblock %}
 {% block content %}
-        <p class="page-eyebrow">SHUCK3R</p>
-        <h1>Duplicate file checker</h1>
-        <p class="subtitle">Scan any folder on this PC, review likely duplicates, then delete extras.</p>
+        <section class="layout-hero layout-hero-utility" aria-labelledby="duplicates-title">
+            <div class="layout-hero-copy">
+                <p class="page-eyebrow page-eyebrow-left">SHUCK3R</p>
+                <h1 id="duplicates-title" class="page-title-left">Duplicate file checker</h1>
+                <p class="subtitle subtitle-left">Scan any folder on this PC, review likely duplicates, then delete extras with one working surface instead of a long settings document.</p>
+            </div>
 
-        <div class="info-box">
-            <h3>Default folder</h3>
-            <p class="help-text no-margin">If you leave Directory empty, this folder is scanned:</p>
-            <p class="mono-path">{{ default_scan_directory or allowed_downloads_root }}</p>
-            <p class="help-text">You can enter any path: absolute (e.g. <code>D:\Videos\my-folder</code>) or relative — relative paths try your <strong>terminal&apos;s current directory</strong> first, then the SHUCK3R user-data folder (same area as the default above). Set <code>HAMSTER_USER_DATA</code> to override where that default lives. Files removed by &quot;Delete unselected duplicates&quot; must exist as normal files at the paths returned by the scan.</p>
-        </div>
+            <div class="layout-panel detail-panel detail-panel-info">
+                <div class="panel-heading">
+                    <p class="panel-kicker">Default root</p>
+                    <h2>Where scans begin when Directory is empty</h2>
+                </div>
+                <p class="mono-path">{{ default_scan_directory or allowed_downloads_root }}</p>
+                <p class="help-text">Absolute paths work. Relative paths try your <strong>terminal&apos;s current directory</strong> first, then the SHUCK3R user-data folder. Set <code>HAMSTER_USER_DATA</code> to override the default root.</p>
+            </div>
+        </section>
 
-        <div class="form-group">
-            <label for="scanDirectory">Directory (optional)</label>
-            <input type="text" id="scanDirectory" name="directory" placeholder="Empty = default above, or any folder path" autocomplete="off">
-        </div>
-        <div class="form-group checkbox-group">
-            <input type="checkbox" id="recursive">
-            <label for="recursive">Include subfolders (recursive scan)</label>
-        </div>
-        <div class="form-group">
-            <label for="threshold">Similarity threshold (name + size combined score)</label>
-            <input type="range" id="threshold" min="0.5" max="1" step="0.01" value="0.72" aria-valuetext="0.72">
-            <span id="thresholdLabel" class="help-text" aria-live="polite" aria-atomic="true">0.72</span>
-            <span class="help-text">Higher = stricter (fewer matches). Max pairwise score per group is shown as &quot;Group confidence&quot;.</span>
-        </div>
-        <button type="button" class="btn-primary" id="btnScan">Scan for duplicates</button>
+        <section class="workspace-grid" aria-label="Duplicate scan workspace">
+            <div class="layout-panel workspace-main">
+                <div class="panel-heading">
+                    <p class="panel-kicker">Scan setup</p>
+                    <h2>Choose scope and similarity</h2>
+                </div>
 
-        <div id="scanMeta" class="scan-meta hidden" aria-live="polite"></div>
-        <div id="alertArea" class="alert-area" role="status"></div>
+                <div class="form-group">
+                    <label for="scanDirectory">Directory (optional)</label>
+                    <input type="text" id="scanDirectory" name="directory" placeholder="Empty = default above, or any folder path" autocomplete="off">
+                </div>
+                <div class="form-group checkbox-group">
+                    <input type="checkbox" id="recursive">
+                    <label for="recursive">Include subfolders (recursive scan)</label>
+                </div>
+                <div class="form-group">
+                    <label for="threshold">Similarity threshold (name + size combined score)</label>
+                    <input type="range" id="threshold" min="0.5" max="1" step="0.01" value="0.72" aria-valuetext="0.72">
+                    <span id="thresholdLabel" class="help-text" aria-live="polite" aria-atomic="true">0.72</span>
+                    <span class="help-text">Higher = stricter (fewer matches). Max pairwise score per group is shown as &quot;Group confidence&quot;.</span>
+                </div>
+                <button type="button" class="btn-primary" id="btnScan">Scan for duplicates</button>
 
-        <section id="resultsSection" class="hidden">
-            <h2 class="section-title">Results</h2>
-            <p class="help-text">Each row has a <strong>Keep</strong> box (checked = keep the file). By default one file per group stays checked; turn on more if they are not duplicates and you want to keep several. Unchecked rows are deleted when you confirm. Video previews load as you scroll (to avoid the browser stalling dozens of requests at once), seek to 12&nbsp;s when the file is long enough, then fall back to earlier times if decoding fails. Some codecs or files may still show &quot;No preview&quot;.</p>
+                <div id="scanMeta" class="scan-meta hidden" aria-live="polite"></div>
+                <div id="alertArea" class="alert-area" role="status"></div>
+            </div>
+
+            <aside class="layout-panel workspace-side" aria-label="How results behave">
+                <div class="panel-heading">
+                    <p class="panel-kicker">Review model</p>
+                    <h2>How to interpret matches</h2>
+                </div>
+                <ul class="process-list process-list-tight">
+                    <li>Each group keeps one file selected by default.</li>
+                    <li>Turn on more Keep boxes if similar names are still different videos.</li>
+                    <li>Unchecked files are removed permanently after confirmation.</li>
+                    <li>Preview thumbnails load lazily so the page stays responsive during large scans.</li>
+                </ul>
+            </aside>
+        </section>
+
+        <section id="resultsSection" class="hidden workspace-results">
+            <div class="results-header">
+                <div>
+                    <p class="panel-kicker">Output</p>
+                    <h2 class="section-title">Results</h2>
+                </div>
+                <p class="help-text results-help">Each row has a <strong>Keep</strong> box (checked = keep the file). By default one file per group stays checked; turn on more if they are not duplicates and you want to keep several. Unchecked rows are deleted when you confirm.</p>
+            </div>
             <div id="resultsTableWrap"></div>
             <button type="button" class="btn-danger" id="btnDelete">Delete unchecked files</button>
         </section>
