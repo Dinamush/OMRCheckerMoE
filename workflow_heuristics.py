@@ -93,7 +93,8 @@ _XH_LEGACY = _chain(
     (
         "chrome_login",
         "Log in in Chrome",
-        "A Chrome window should open — log in to xHamster there. When finished, return to the terminal or prompt as instructed.",
+        "A Chrome window should open — log in to xHamster there. When finished, press Enter in the terminal "
+        "or use **Continue after Chrome login** on the download progress page (web mode has no terminal).",
     ),
     (
         "save_cookies",
@@ -142,7 +143,7 @@ _PH_EMB = _chain(
     (
         "extract_list",
         "Reading your favorites list",
-        "yt-dlp is pulling video URLs from your favorites playlist.",
+        "Collecting video page links from your favourites (HTTP or browser, same strategy as ph.py).",
     ),
     (
         "download",
@@ -171,7 +172,8 @@ _PH_LEGACY = _chain(
     (
         "chrome_login",
         "Log in in Chrome",
-        "Log in to Pornhub in the opened browser, then press Enter in the terminal when prompted.",
+        "Log in to Pornhub in the opened browser, then press Enter in the terminal **or** click "
+        "**Continue after Chrome login** on this progress page (required when the app runs without a terminal).",
     ),
     (
         "extract_list",
