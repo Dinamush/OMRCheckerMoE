@@ -11,8 +11,12 @@ import logging
 import mimetypes
 import time
 import concurrent.futures
+import json
 import re
+import shutil
+import subprocess
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Set
 from fastapi import FastAPI, Request, BackgroundTasks, Form, HTTPException, Query
@@ -61,6 +65,9 @@ LOG_DIR = str((USER_DATA_DIR / "logs").resolve())
 DOWNLOAD_DIR = str((USER_DATA_DIR / "downloads").resolve())
 Path(LOG_DIR).mkdir(parents=True, exist_ok=True)
 Path(DOWNLOAD_DIR).mkdir(parents=True, exist_ok=True)
+THUMBS_DIR = USER_DATA_DIR / "thumbs"
+THUMBS_DIR.mkdir(parents=True, exist_ok=True)
+SESSION_HISTORY_FILE = USER_DATA_DIR / "session_history.jsonl"
 
 from progress_tracker import get_tracker, cleanup_tracker, set_default_log_dir
 
@@ -686,6 +693,88 @@ def download_videos_parallel(video_info_list: List[Tuple[str, str]], download_di
 
 # ----------------------------- Site-Specific Workflows ----------------------------- #
 
+def _append_session_history(session_id: str, site: str, tracker) -> None:
+    """Append one JSONL record to SESSION_HISTORY_FILE at the end of a completed session."""
+    try:
+        stats = tracker.stats
+        duration_s = 0
+        if stats.start_time:
+            end = stats.end_time or datetime.now()
+            duration_s = int((end - stats.start_time).total_seconds())
+        record = {
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            "site": site,
+            "session_id": session_id,
+            "total": stats.total_urls,
+            "downloaded": stats.downloads_completed,
+            "skipped": stats.files_skipped,
+            "failed": stats.downloads_failed,
+            "duration_s": duration_s,
+        }
+        with open(SESSION_HISTORY_FILE, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record) + "\n")
+    except Exception as e:
+        logging.warning("Could not write session history: %s", e)
+
+
+def _read_progress_json(session_id: str) -> Optional[dict]:
+    """Read the persisted progress JSON for a session (survives cleanup_tracker)."""
+    p = Path(LOG_DIR) / f"progress_{session_id}.json"
+    if not p.is_file():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _run_ffprobe(path: str) -> Tuple[bool, str]:
+    """Use ffprobe to verify a video file's integrity.
+
+    Returns ``(True, '')`` when OK, ``(False, reason)`` when corrupt or unreadable,
+    and ``(True, 'skipped')`` when ffprobe is not on PATH.
+    """
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return True, "skipped — ffprobe not found"
+    try:
+        result = subprocess.run(
+            [
+                ffprobe, "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=codec_type",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                path,
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0 or result.stderr.strip():
+            return False, (result.stderr.strip()[:300] or "ffprobe reported an error")
+        return True, ""
+    except subprocess.TimeoutExpired:
+        return False, "ffprobe timed out"
+    except Exception as e:
+        return False, str(e)
+
+
+def _generate_thumbnail(video_path: str, thumb_path: str) -> bool:
+    """Extract a single frame at t=5 s from *video_path* and save as JPEG to *thumb_path*.
+
+    Returns ``True`` on success, ``False`` when ffmpeg is unavailable or fails.
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return False
+    try:
+        result = subprocess.run(
+            [ffmpeg, "-ss", "5", "-i", video_path, "-frames:v", "1", "-q:v", "4", "-y", thumb_path],
+            capture_output=True, text=True, timeout=60,
+        )
+        return result.returncode == 0 and os.path.isfile(thumb_path)
+    except Exception:
+        return False
+
+
 def pornhub_workflow(
     playlist_url: str,
     download_dir: str,
@@ -695,6 +784,7 @@ def pornhub_workflow(
     *,
     library_dir: Optional[str] = None,
     library_recursive: bool = False,
+    url_override: Optional[List[str]] = None,
 ) -> None:
     """PornHub workflow: ph.py-style favourites collection + mediaDefinitions downloads."""
     if not session_id:
@@ -733,9 +823,18 @@ def pornhub_workflow(
             )
             time.sleep(5)
             save_cookies_netscape(driver, cookie_file)
+            healthy, health_msg = pornhub_ph.check_cookie_health(cookie_file)
+            if not healthy:
+                logging.warning("PornHub cookie health check failed: %s", health_msg)
+                workflow_heuristics.mark_error(session_id, f"Login check failed — {health_msg}")
+                return
+            logging.info("PornHub cookie health check passed: %s", health_msg)
 
         workflow_heuristics.advance(session_id, "extract_list")
-        if use_embedded:
+        if url_override is not None:
+            video_urls = url_override
+            workflow_heuristics.set_detail(session_id, f"Retrying {len(url_override)} failed URLs…")
+        elif use_embedded:
             workflow_heuristics.set_detail(
                 session_id,
                 "Collecting favourites (HTTP, paginated) — same approach as ph.py…",
@@ -844,6 +943,7 @@ def pornhub_workflow(
             logging.warning(f"Could not delete cookie file {cookie_file}: {e}")
         if ok:
             try:
+                _append_session_history(session_id, "pornhub", get_tracker(session_id))
                 cleanup_tracker(session_id)
             except Exception as e:
                 logging.error(f"Error cleaning up tracker: {e}")
@@ -1121,6 +1221,7 @@ def xhamster_workflow(
             logging.warning(f"Could not delete cookie file {cookie_file}: {e}")
         if ok:
             try:
+                _append_session_history(session_id, "xhamster", get_tracker(session_id))
                 cleanup_tracker(session_id)
             except Exception as e:
                 logging.error(f"Error cleaning up tracker: {e}")
@@ -1419,6 +1520,185 @@ def api_duplicates_delete(body: DuplicateDeleteBody):
         except OSError as e:
             errors.append({"path": path_str, "error": str(e)})
     return {"deleted": deleted, "errors": errors}
+
+
+# ─────────────────── Feature 2: Session URL export & retry ───────────────────
+
+@app.get("/api/session/{session_id}/failed")
+def api_session_failed(session_id: str):
+    """Return all failed download items for a session (reads the persisted progress JSON)."""
+    data = _read_progress_json(session_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    failed = [
+        {"url": url, "title": item.get("title", ""), "error": item.get("error_message", "")}
+        for url, item in data.get("download_items", {}).items()
+        if item.get("status") == "failed"
+    ]
+    return {"session_id": session_id, "failed": failed, "count": len(failed)}
+
+
+@app.post("/api/session/{session_id}/retry-failed")
+def api_session_retry_failed(
+    session_id: str,
+    background_tasks: BackgroundTasks,
+    site: str = Query("pornhub"),
+    headless: bool = Query(False),
+):
+    """Start a new download session that retries only the failed URLs from a previous session."""
+    data = _read_progress_json(session_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Source session not found.")
+    failed_urls = [
+        url for url, item in data.get("download_items", {}).items()
+        if item.get("status") == "failed"
+    ]
+    if not failed_urls:
+        return {"ok": True, "message": "No failed downloads to retry.", "retry_session_id": None}
+    if site != "pornhub":
+        raise HTTPException(status_code=400, detail="Retry is currently supported for PornHub only.")
+    new_session_id = str(uuid.uuid4())
+    log_file = os.path.join(LOG_DIR, f"video_downloader_{new_session_id}.log")
+    timestamp = int(time.time())
+    background_tasks.add_task(
+        pornhub_workflow,
+        "https://www.pornhub.com/my/favorites/videos",
+        DOWNLOAD_DIR,
+        headless,
+        log_file,
+        new_session_id,
+        url_override=failed_urls,
+    )
+    workflow_heuristics.register_session(new_session_id, site, embedded=False)
+    return {
+        "ok": True,
+        "retry_session_id": new_session_id,
+        "url_count": len(failed_urls),
+        "progress_url": f"/download/session/{new_session_id}?timestamp={timestamp}&site={site}",
+    }
+
+
+# ─────────────────── Feature 3: URL export ───────────────────
+
+@app.get("/api/session/{session_id}/urls.txt", response_class=PlainTextResponse)
+def api_session_urls_txt(session_id: str):
+    """All tracked URLs for a session, one per line."""
+    data = _read_progress_json(session_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    return "\n".join(data.get("download_items", {}).keys())
+
+
+@app.get("/api/session/{session_id}/urls.json")
+def api_session_urls_json(session_id: str):
+    """All tracked items (url, title, status) for a session."""
+    data = _read_progress_json(session_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    items = [
+        {"url": url, "title": item.get("title", ""), "status": item.get("status", "")}
+        for url, item in data.get("download_items", {}).items()
+    ]
+    return {"session_id": session_id, "items": items, "count": len(items)}
+
+
+# ─────────────────── Feature 4: Integrity scanner ───────────────────
+
+class IntegrityScanBody(BaseModel):
+    directory: Optional[str] = None
+    recursive: bool = False
+
+
+@app.get("/integrity")
+def integrity_page(request: Request):
+    """File integrity scanner — flags truncated or corrupt video files."""
+    return templates.TemplateResponse(
+        request, "integrity.html",
+        {"default_scan_directory": DOWNLOADS_ROOT_RESOLVED},
+    )
+
+
+@app.post("/api/integrity/scan")
+def api_integrity_scan(body: IntegrityScanBody):
+    try:
+        root = resolve_scan_directory(body.directory or "", USER_DATA_DIR, "downloads")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    video_exts = {".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v", ".wmv", ".flv", ".mpeg", ".mpg"}
+    file_records = iter_files(root, body.recursive)
+    results = []
+    for rec in file_records:
+        path, name, size = rec["path"], rec["name"], rec["size"]
+        if Path(name).suffix.lower() not in video_exts:
+            continue
+        if size == 0:
+            results.append({"path": path, "name": name, "size": 0, "ok": False, "detail": "Empty file (0 bytes)"})
+            continue
+        ok, detail = _run_ffprobe(path)
+        results.append({"path": path, "name": name, "size": size, "ok": ok, "detail": detail})
+    corrupt = [r for r in results if not r["ok"]]
+    return {
+        "scanned_root": str(root),
+        "file_count": len(results),
+        "corrupt_count": len(corrupt),
+        "results": results,
+    }
+
+
+# ─────────────────── Feature 5: Thumbnail library browser ───────────────────
+
+@app.get("/library")
+def library_page(request: Request):
+    """Thumbnail grid browser for all downloaded video files."""
+    video_exts = {".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v", ".wmv", ".flv"}
+    dl_root = Path(DOWNLOADS_ROOT_RESOLVED)
+    videos = []
+    if dl_root.is_dir():
+        for f in sorted(dl_root.iterdir()):
+            if f.is_file() and f.suffix.lower() in video_exts:
+                videos.append({"filename": f.name, "size": f.stat().st_size})
+    return templates.TemplateResponse(request, "library.html", {"videos": videos})
+
+
+@app.get("/thumbs/{filename}")
+def get_thumb(filename: str):
+    """Serve a thumbnail for a video file, generating it on demand via ffmpeg."""
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename.")
+    stem = Path(filename).stem
+    thumb_path = THUMBS_DIR / f"{stem}.jpg"
+    if not thumb_path.is_file():
+        video_path = Path(DOWNLOADS_ROOT_RESOLVED) / filename
+        if not video_path.is_file():
+            raise HTTPException(status_code=404, detail="Video not found.")
+        _generate_thumbnail(str(video_path), str(thumb_path))
+    if thumb_path.is_file():
+        return FileResponse(str(thumb_path), media_type="image/jpeg")
+    raise HTTPException(
+        status_code=404,
+        detail="Thumbnail unavailable — ffmpeg not installed or extraction failed.",
+    )
+
+
+# ─────────────────── Feature 6: Session history ───────────────────
+
+@app.get("/history")
+def history_page(request: Request):
+    """Persistent log of all completed download runs."""
+    return templates.TemplateResponse(request, "history.html", {})
+
+
+@app.get("/api/history")
+def api_history(limit: int = Query(100, ge=1, le=1000)):
+    """Return the last *limit* session history records (oldest first within the slice)."""
+    if not SESSION_HISTORY_FILE.is_file():
+        return []
+    try:
+        lines = SESSION_HISTORY_FILE.read_text(encoding="utf-8").splitlines()
+        records = [json.loads(ln) for ln in lines if ln.strip()]
+        return records[-limit:]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":

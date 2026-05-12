@@ -20,6 +20,9 @@
             <nav class="site-nav" aria-label="Site">
                 <a href="/" class="site-nav-link" {% if request.url.path == '/' %}aria-current="page"{% endif %}>Downloader</a>
                 <a href="/duplicates" class="site-nav-link" {% if request.url.path.startswith('/duplicates') %}aria-current="page"{% endif %}>Duplicate checker</a>
+                <a href="/library" class="site-nav-link" {% if request.url.path.startswith('/library') %}aria-current="page"{% endif %}>Library</a>
+                <a href="/integrity" class="site-nav-link" {% if request.url.path.startswith('/integrity') %}aria-current="page"{% endif %}>Integrity</a>
+                <a href="/history" class="site-nav-link" {% if request.url.path.startswith('/history') %}aria-current="page"{% endif %}>History</a>
                 <a href="#important-information" class="site-nav-link site-nav-link-muted">Important info</a>
             </nav>
             <span class="site-header-corn" aria-hidden="true">
@@ -53,6 +56,9 @@
                     <ul class="site-footer-list site-footer-links">
                         <li><a href="/">Video downloader</a> — favourites-based downloads (manual login in browser).</li>
                         <li><a href="/duplicates">Duplicate file checker</a> — scan any folder, preview videos, remove extras.</li>
+                        <li><a href="/library">Library browser</a> — thumbnail grid of all downloaded videos.</li>
+                        <li><a href="/integrity">Integrity scanner</a> — detect truncated or corrupt video files.</li>
+                        <li><a href="/history">Session history</a> — log of all completed download runs.</li>
                     </ul>
                 </section>
                 <section class="site-footer-col" aria-labelledby="footer-tech">

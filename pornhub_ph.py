@@ -490,3 +490,35 @@ def download_pornhub_videos_parallel(
     finally:
         executor.shutdown(wait=False, cancel_futures=True)
     logger.info("PornHub parallel download batch finished.")
+
+
+def check_cookie_health(cookie_file: str) -> Tuple[bool, str]:
+    """Quick sanity-check that the saved Netscape cookie file still authenticates on PornHub.
+
+    Returns ``(True, message)`` when the session appears valid, or ``(False, reason)``
+    when cookies are missing, expired, or the request fails.
+    """
+    if not os.path.isfile(cookie_file):
+        return False, "Cookie file not found."
+    session = _session_with_cookies(cookie_file)
+    try:
+        r = session.get("https://www.pornhub.com/user/get_user_info", timeout=15)
+        if r.status_code == 200:
+            try:
+                data = r.json()
+                if data.get("loggedin") in (1, True, "1"):
+                    return True, "Cookies valid — PornHub user is authenticated."
+            except Exception:
+                pass
+        # Fallback: homepage embeds an isLoggedIn flag in the page JSON when authenticated
+        r2 = session.get("https://www.pornhub.com/", timeout=15)
+        html = r2.text
+        if (
+            '"isLoggedIn":true' in html
+            or '"loggedin":1' in html
+            or 'class="usernameBadge"' in html
+        ):
+            return True, "Cookies valid — PornHub user is authenticated."
+        return False, "Cookies appear invalid or session expired — please sign in again."
+    except Exception as e:
+        return False, f"Cookie health check request failed: {e}"

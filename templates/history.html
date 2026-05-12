@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block title %}Session history · SHUCK3R{% endblock %}
+
+{% block extra_head %}
+<style>
+  .history-table { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+  .history-table th,
+  .history-table td { padding: 0.55rem 0.85rem; text-align: left; border-bottom: 1px solid rgba(255,255,255,0.08); }
+  .history-table th { color: var(--color-accent, #ffd94a); font-weight: 600; white-space: nowrap; }
+  .history-table tr:last-child td { border-bottom: none; }
+  .history-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .badge-failed { color: #f87171; font-weight: 600; }
+  .badge-ok { color: #4ade80; }
+  .empty-msg { padding: 2rem; text-align: center; opacity: 0.5; }
+  .session-link { font-family: monospace; font-size: 0.8em; opacity: 0.65; }
+  .retry-btn {
+    font-size: 0.78rem; padding: 0.2rem 0.55rem;
+    background: transparent; border: 1px solid #ffd94a; color: #ffd94a;
+    border-radius: 4px; cursor: pointer;
+  }
+  .retry-btn:hover { background: rgba(255,217,74,0.12); }
+</style>
+{% endblock %}
+
+{% block content %}
+<section class="layout-hero layout-hero-session" aria-labelledby="history-title">
+  <div class="layout-hero-copy">
+    <p class="page-eyebrow page-eyebrow-left">SHUCK3R</p>
+    <h1 id="history-title" class="page-title-left">Session history</h1>
+    <p class="subtitle subtitle-left">All completed download runs, most recent first.</p>
+  </div>
+</section>
+
+<div class="container" style="margin-top:1.5rem">
+  <div id="history-wrap">
+    <table class="history-table" id="historyTable" style="display:none">
+      <thead>
+        <tr>
+          <th>When</th>
+          <th>Site</th>
+          <th class="num">Total</th>
+          <th class="num">Downloaded</th>
+          <th class="num">Skipped</th>
+          <th class="num">Failed</th>
+          <th class="num">Duration</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="historyBody"></tbody>
+    </table>
+    <p class="empty-msg" id="emptyMsg" style="display:none">No sessions recorded yet. Run a download to populate history.</p>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  function fmtDuration(s) {
+    if (s < 60) return s + 's';
+    const m = Math.floor(s / 60), r = s % 60;
+    return m + 'm ' + r + 's';
+  }
+
+  fetch('/api/history?limit=200')
+    .then(r => r.json())
+    .then(data => {
+      const body = document.getElementById('historyBody');
+      const table = document.getElementById('historyTable');
+      const empty = document.getElementById('emptyMsg');
+      if (!data.length) { empty.style.display = ''; return; }
+      const rows = [...data].reverse().map(s => {
+        const failedCls = s.failed > 0 ? ' badge-failed' : ' badge-ok';
+        const retryBtn = s.failed > 0 && s.site === 'pornhub'
+          ? `<button class="retry-btn" onclick="retrySession('${s.session_id}','${s.site}')">Retry failed</button>`
+          : '';
+        return `<tr>
+          <td>${s.ts.replace('T', ' ')}</td>
+          <td>${s.site}</td>
+          <td class="num">${s.total}</td>
+          <td class="num badge-ok">${s.downloaded}</td>
+          <td class="num">${s.skipped}</td>
+          <td class="num${failedCls}">${s.failed}</td>
+          <td class="num">${fmtDuration(s.duration_s)}</td>
+          <td>${retryBtn}</td>
+        </tr>`;
+      });
+      body.innerHTML = rows.join('');
+      table.style.display = '';
+    })
+    .catch(() => {
+      document.getElementById('emptyMsg').textContent = 'Failed to load history.';
+      document.getElementById('emptyMsg').style.display = '';
+    });
+
+  window.retrySession = function (sessionId, site) {
+    if (!confirm('Start a new download session retrying only the failed URLs from this session?')) return;
+    fetch(`/api/session/${sessionId}/retry-failed?site=${site}`, { method: 'POST' })
+      .then(r => r.json())
+      .then(d => {
+        if (d.retry_session_id) {
+          window.location.href = d.progress_url;
+        } else {
+          alert(d.message || 'Nothing to retry.');
+        }
+      })
+      .catch(() => alert('Request failed.'));
+  };
+})();
+</script>
+{% endblock %}
