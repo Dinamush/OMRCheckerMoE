@@ -21,3 +21,7 @@ release/SHUCK3RWebView.exe
 
 # Optional Cursor ui-ux-pro-max skill bundle (install under .shared/ — see .shared/README.md)
 .shared/ui-ux-pro-max/
+
+# graphify intermediate pipeline artifacts (keep GRAPH_REPORT.md, graph.json, graph.html)
+graphify-out/cache/
+graphify-out/.graphify_*
