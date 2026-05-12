@@ -747,13 +747,9 @@ def pornhub_workflow(
                 "Collecting favourites in Chrome (scroll + Load more) — ph.py style…",
             )
             video_urls = pornhub_ph.collect_favorites_urls_with_driver(driver, playlist_url)
-            if driver is not None:
-                try:
-                    driver.quit()
-                    logging.info("Chrome WebDriver closed after favourites scan.")
-                except Exception as e:
-                    logging.error(f"Error closing Chrome WebDriver: {e}")
-                driver = None
+            # Keep Chrome open — video pages must be opened in the authenticated
+            # browser so flashvars_* (mediaDefinitions) is present in the HTML.
+            # ph.py does the same: driver stays alive for the full download batch.
 
         if not video_urls:
             logging.error("No video URLs extracted.")
@@ -813,6 +809,7 @@ def pornhub_workflow(
                     download_dir,
                     cookie_file,
                     session_id,
+                    driver=driver,
                 )
             else:
                 logging.info("All favorites matched files in the library folder; nothing to download.")
@@ -825,6 +822,7 @@ def pornhub_workflow(
                 download_dir,
                 cookie_file,
                 session_id,
+                driver=driver,
             )
 
         ok = True

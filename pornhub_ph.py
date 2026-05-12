@@ -316,7 +316,26 @@ def fetch_video_title_from_page(cookie_file: str, video_page_url: str, timeout: 
     return f"video_{abs(hash(video_page_url)) % 10_000_000}"
 
 
-def _get_video_page_html(video_url: str, cookie_file: str, timeout: float = 30.0) -> Optional[str]:
+def _get_video_page_html(
+    video_url: str,
+    cookie_file: str,
+    *,
+    driver=None,
+    timeout: float = 30.0,
+) -> Optional[str]:
+    """Fetch a PornHub video page HTML.
+
+    Prefer the authenticated browser (driver) when available — ph.py style.
+    Falls back to requests + cookie file when driver is None.
+    """
+    if driver is not None:
+        try:
+            driver.get(video_url)
+            time.sleep(2.5)  # wait for inline JS (flashvars_*) to be present in page_source
+            return driver.page_source
+        except Exception as e:
+            logger.error("Error loading PornHub video page in browser %s: %s", video_url, e)
+            return None
     session = _session_with_cookies(cookie_file)
     try:
         r = session.get(video_url, timeout=timeout)
@@ -379,16 +398,20 @@ def download_pornhub_video_page(
     cookie_file: str,
     download_dir: str,
     session_id: str,
+    *,
+    driver=None,
 ) -> None:
     """
     Download one PornHub video: page URL → mediaDefinitions → file on disk.
     Integrates with progress_tracker using video_page_url as the item key.
+    When driver is provided, the video page is opened in the authenticated browser
+    (same approach as ph.py) so flashvars_* is always present.
     """
     from progress_tracker import get_tracker
 
     tracker = get_tracker(session_id)
 
-    html = _get_video_page_html(video_page_url, cookie_file)
+    html = _get_video_page_html(video_page_url, cookie_file, driver=driver)
     if not html:
         tracker.fail_download(video_page_url, "Could not load video page")
         return
@@ -424,11 +447,29 @@ def download_pornhub_videos_parallel(
     session_id: str,
     *,
     max_workers: int = 4,
+    driver=None,
 ) -> None:
-    """Parallel per-video page fetch + extract + download (requests-based, thread-safe)."""
+    """Download PornHub videos from their page URLs.
+
+    When driver is provided (Chrome browser mode), pages are opened in the
+    authenticated browser sequentially — exactly as ph.py does — so bot
+    detection is bypassed and flashvars_* is always present in the HTML.
+
+    When driver is None (embedded-login mode), falls back to parallel
+    requests with the Netscape cookie file.
+    """
     if not video_page_urls:
         return
-    logger.info("Starting %s PornHub downloads (%s workers)", len(video_page_urls), max_workers)
+    if driver is not None:
+        logger.info(
+            "Starting %s PornHub downloads (browser mode, sequential — ph.py style)",
+            len(video_page_urls),
+        )
+        for url in video_page_urls:
+            download_pornhub_video_page(url, cookie_file, download_dir, session_id, driver=driver)
+        logger.info("PornHub browser-mode download batch finished.")
+        return
+    logger.info("Starting %s PornHub downloads (%s workers, requests mode)", len(video_page_urls), max_workers)
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
     try:
         futures = [
