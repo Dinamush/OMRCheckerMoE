@@ -10,7 +10,6 @@ import os
 import logging
 import mimetypes
 import time
-import subprocess
 import concurrent.futures
 import re
 import uuid
@@ -31,7 +30,7 @@ from selenium.common.exceptions import (
     TimeoutException,
     WebDriverException,
 )
-from urllib.parse import urljoin
+from urllib.parse import parse_qs, urljoin, urlparse
 from webdriver_manager.chrome import ChromeDriverManager
 import yt_dlp
 import requests
@@ -50,6 +49,8 @@ from existing_library import (
 )
 import webview_login_bridge
 import workflow_heuristics
+import pornhub_ph
+import selenium_login_wait
 
 # ----------------------------- Configuration ----------------------------- #
 
@@ -96,6 +97,12 @@ class DuplicateScanBody(BaseModel):
 
 class DuplicateDeleteBody(BaseModel):
     paths: List[str] = Field(..., min_length=1)
+
+
+class SeleniumLoginConfirmBody(BaseModel):
+    """Progress-page confirmation after logging in inside Selenium Chrome (non-embedded mode)."""
+
+    session_id: str = Field(..., min_length=1)
 
 
 # ----------------------------- Helper Functions ----------------------------- #
@@ -182,12 +189,20 @@ def setup_chrome_driver(headless: bool = False) -> webdriver.Chrome:
         raise
 
 
-def wait_for_manual_login(driver, login_url: str) -> None:
-    """Prompt the user to log in manually and wait for confirmation."""
+def wait_for_manual_login(driver, login_url: str, session_id: str) -> None:
+    """Prompt the user to log in manually and wait for confirmation (terminal or progress page)."""
     try:
         driver.get(login_url)
         logging.info("Navigated to login page. Please log in manually in the browser window.")
-        input("After logging in, press Enter here to continue...")
+        workflow_heuristics.set_detail(
+            session_id,
+            "When Chrome shows you signed in, press Enter in the terminal **or** click "
+            "**Continue after Chrome login** on this progress page.",
+        )
+        selenium_login_wait.wait_for_user_after_chrome_login(
+            session_id,
+            "After logging in, press Enter here to continue...",
+        )
         logging.info("User confirmed login.")
     except Exception as e:
         logging.error(f"Error during manual login: {e}")
@@ -248,50 +263,14 @@ def load_netscape_cookies_into_driver(driver: webdriver.Chrome, cookie_file: str
     driver.get(landing_url)
     time.sleep(1.0)
 
-def extract_video_urls_ytdlp(cookie_file: str, playlist_url: str) -> List[str]:
-    """Extract individual video URLs from a PornHub playlist/favourites page via yt-dlp.
-
-    Returns an empty list if yt-dlp exits with a non-zero status.
-    """
-    command = [
-        "python", "-m", "yt_dlp",
-        "--cookies", cookie_file,
-        "--flat-playlist",
-        "--print", "url",
-        playlist_url
-    ]
-    logging.info("Extracting video URLs with yt-dlp...")
-    
-    result = subprocess.run(command, capture_output=True, text=True)
-    if result.returncode != 0:
-        logging.error("Error extracting video URLs with yt-dlp:")
-        logging.error(result.stderr)
-        return []
-    
-    urls = result.stdout.strip().splitlines()
-    logging.info(f"Extracted {len(urls)} video URLs with yt-dlp.")
-    return urls
-
-
-def fetch_video_title_ytdlp(url: str, cookie_file: Optional[str]) -> str:
-    """Resolve display/filename title via yt-dlp (no download). Used for library dedupe on PornHub."""
-    opts: dict = {
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
-    }
-    if cookie_file:
-        opts["cookiefile"] = cookie_file
-    try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            raw = (info or {}).get("title") or ""
-            t = re.sub(r'[<>:"/\\|?*]', "_", str(raw).strip())
-            t = re.sub(r"\s+", "_", t)
-            return t[:100] if t else f"video_{abs(hash(url)) % 10_000_000}"
-    except Exception as e:
-        logging.warning("yt-dlp could not read title for %s: %s", url, e)
-        return f"video_{abs(hash(url)) % 10_000_000}"
+def _pornhub_tracker_titles(video_urls: List[str]) -> List[str]:
+    """Short labels for progress UI (viewkey when present)."""
+    out: List[str] = []
+    for u in video_urls:
+        q = parse_qs(urlparse(u).query)
+        vk = (q.get("viewkey") or [""])[0]
+        out.append(vk or u[-20:])
+    return out
 
 
 def fetch_html_selenium(driver, url: str) -> Optional[str]:
@@ -717,7 +696,7 @@ def pornhub_workflow(
     library_dir: Optional[str] = None,
     library_recursive: bool = False,
 ) -> None:
-    """PornHub workflow using Chrome and yt-dlp."""
+    """PornHub workflow: ph.py-style favourites collection + mediaDefinitions downloads."""
     if not session_id:
         session_id = str(int(time.time()))
 
@@ -743,23 +722,48 @@ def pornhub_workflow(
             driver = setup_chrome_driver(headless)
             driver.get("https://www.pornhub.com")
             logging.info("Please log in to PornHub in the opened browser.")
-            input("After logging in, press Enter to continue...")
+            workflow_heuristics.set_detail(
+                session_id,
+                "When you are signed in in Chrome, press Enter in the server terminal **or** click "
+                "**Continue after Chrome login** on this progress page.",
+            )
+            selenium_login_wait.wait_for_user_after_chrome_login(
+                session_id,
+                "After logging in to PornHub in Chrome, press Enter here to continue...",
+            )
             time.sleep(5)
             save_cookies_netscape(driver, cookie_file)
 
         workflow_heuristics.advance(session_id, "extract_list")
-        workflow_heuristics.set_detail(session_id, "Reading your favorites playlist with yt-dlp…")
+        if use_embedded:
+            workflow_heuristics.set_detail(
+                session_id,
+                "Collecting favourites (HTTP, paginated) — same approach as ph.py…",
+            )
+            video_urls = pornhub_ph.collect_favorites_urls_requests(cookie_file, playlist_url)
+        else:
+            workflow_heuristics.set_detail(
+                session_id,
+                "Collecting favourites in Chrome (scroll + Load more) — ph.py style…",
+            )
+            video_urls = pornhub_ph.collect_favorites_urls_with_driver(driver, playlist_url)
+            if driver is not None:
+                try:
+                    driver.quit()
+                    logging.info("Chrome WebDriver closed after favourites scan.")
+                except Exception as e:
+                    logging.error(f"Error closing Chrome WebDriver: {e}")
+                driver = None
 
-        video_urls = extract_video_urls_ytdlp(cookie_file, playlist_url)
         if not video_urls:
             logging.error("No video URLs extracted.")
             workflow_heuristics.mark_error(
                 session_id,
-                "No videos found in favorites (empty list or yt-dlp could not read the playlist).",
+                "No videos found in favourites (empty list, login required, or parsing found no links).",
             )
             return
 
-        workflow_heuristics.set_detail(session_id, f"Found {len(video_urls)} videos in favorites")
+        workflow_heuristics.set_detail(session_id, f"Found {len(video_urls)} videos in favourites")
 
         workflow_heuristics.advance(session_id, "download")
 
@@ -776,7 +780,7 @@ def pornhub_workflow(
             to_download: List[Tuple[str, str]] = []
             skipped_n = 0
             for i, url in enumerate(video_urls):
-                title = fetch_video_title_ytdlp(url, cookie_file)
+                title = pornhub_ph.fetch_video_title_from_page(cookie_file, url)
                 if matches_existing_library(title, norms):
                     tracker.add_urls([url], [title])
                     tracker.skip_download(url, "Already in library folder")
@@ -804,15 +808,23 @@ def pornhub_workflow(
                     [pair[0] for pair in to_download],
                     [pair[1] for pair in to_download],
                 )
-                download_videos_parallel(
-                    to_download, download_dir, cookie_file=cookie_file, session_id=session_id
+                pornhub_ph.download_pornhub_videos_parallel(
+                    [pair[0] for pair in to_download],
+                    download_dir,
+                    cookie_file,
+                    session_id,
                 )
             else:
                 logging.info("All favorites matched files in the library folder; nothing to download.")
         else:
-            video_info_list = [(url, f"video_{i}") for i, url in enumerate(video_urls)]
-            download_videos_parallel(
-                video_info_list, download_dir, cookie_file=cookie_file, session_id=session_id
+            tracker = get_tracker(session_id)
+            tracker.start_session(len(video_urls))
+            tracker.add_urls(video_urls, _pornhub_tracker_titles(video_urls))
+            pornhub_ph.download_pornhub_videos_parallel(
+                video_urls,
+                download_dir,
+                cookie_file,
+                session_id,
             )
 
         ok = True
@@ -901,7 +913,7 @@ def xhamster_workflow(
         else:
             workflow_heuristics.advance(session_id, "chrome_login")
             driver = setup_chrome_driver(headless)
-            wait_for_manual_login(driver, login_url)
+            wait_for_manual_login(driver, login_url, session_id)
             time.sleep(5)
             save_cookies_netscape(driver, cookie_file)
             workflow_heuristics.advance(session_id, "save_cookies")
@@ -1236,6 +1248,21 @@ def api_embedded_login_confirm():
         )
     webview_login_bridge.finish_embedded_login(skip_native_confirm=True)
     return {"ok": True}
+
+
+@app.post("/api/selenium-login/confirm")
+def api_selenium_login_confirm(body: SeleniumLoginConfirmBody):
+    """Unblocks legacy Chrome login when there is no interactive terminal (e.g. `python main.py`)."""
+    sid = body.session_id.strip()
+    if selenium_login_wait.confirm_chrome_login_done(sid):
+        return {"ok": True}
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "No Chrome login step is waiting for that session. Open the matching download tab, "
+            "wait until Chrome has appeared, sign in, then try again — or the job may have already continued."
+        ),
+    )
 
 
 @app.get("/download/log/{session_id}")

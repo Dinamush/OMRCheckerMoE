@@ -14,7 +14,7 @@
                     {% if embedded_login %}
                     <p>The <strong>site login</strong> window is separate; this window stays on SHUCK3R. After you sign in, use the button below so cookies can be saved.</p>
                     {% else %}
-                    <p>Use the Chrome window to log in when it appears.</p>
+                    <p>Use the Chrome window to log in when it appears, then click <strong>Continue after Chrome login</strong> below (the server has no terminal for Enter).</p>
                     {% endif %}
                 </div>
             </div>
@@ -34,6 +34,20 @@
                     <button type="button" id="btnEmbeddedLoginDone" class="btn btn-primary embedded-login-done-btn">Continue download — I'm logged in</button>
                     <p id="embeddedLoginDoneStatus" class="help-text embedded-login-status" aria-live="polite"></p>
                 </div>
+                {% else %}
+                <div class="info-box embedded-login-cta" role="region" aria-label="Continue after Chrome login">
+                    <div class="embedded-login-cta-head">
+                        <span class="dashboard-icon dashboard-icon-lock" aria-hidden="true">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 17a2 2 0 100-4 2 2 0 000 4z" stroke="currentColor" stroke-width="2"/><path d="M5 11V8a7 7 0 0114 0v3M5 11h14v9a2 2 0 01-2 2H7a2 2 0 01-2-2v-9z" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                        </span>
+                        <div>
+                            <h3 class="embedded-login-cta-title">Continue after Chrome login</h3>
+                            <p class="help-text embedded-login-cta-desc">When the automation Chrome window shows you are signed in to the site, press this so the download can continue. Only works while the workflow is waiting at the Chrome login step.</p>
+                        </div>
+                    </div>
+                    <button type="button" id="btnSeleniumLoginDone" class="btn btn-primary embedded-login-done-btn">Continue after Chrome login</button>
+                    <p id="seleniumLoginDoneStatus" class="help-text embedded-login-status" aria-live="polite"></p>
+                </div>
                 {% endif %}
 
                 <div class="layout-panel detail-panel session-quick-notes">
@@ -45,7 +59,7 @@
                         {% if embedded_login %}
                         <li>Sign in on the site window, then confirm here to resume the run.</li>
                         {% else %}
-                        <li>Complete login in the Chrome window when it appears.</li>
+                        <li>Complete login in the Chrome window, then click <strong>Continue after Chrome login</strong> above.</li>
                         {% endif %}
                         <li>Queued stays at 0 until favorites collection finishes.</li>
                         <li>If the counters stall, read the recent log lines before restarting.</li>
@@ -128,7 +142,7 @@
                     <li>Sign in on the <strong>site login</strong> window, then click <strong>Continue download — I'm logged in</strong> above (or <strong>SHUCK3R → Done logging in — continue download</strong>).</li>
                     <li>The login window closes by design; this dashboard remains open.</li>
                     {% else %}
-                    <li>Complete login in the Chrome window when prompted.</li>
+                    <li>Complete login in the Chrome window, then click <strong>Continue after Chrome login</strong> above.</li>
                     {% endif %}
                     <li>Phase 1: SHUCK3R walks your favorites pages and collects links — <strong>queued</strong> stays at 0 until that finishes.</li>
                     <li>Phase 2: videos download in batches; counters and the bar update here.</li>
@@ -465,6 +479,41 @@
                         return;
                     }
                     statusEl.textContent = 'Saved. The site window may close — that is normal. Watch Phase 1 below; favorites scanning can take a few minutes.';
+                } catch (err) {
+                    statusEl.textContent = 'Could not continue: ' + err.message;
+                    btn.disabled = false;
+                }
+            });
+        })();
+        {% else %}
+        (function () {
+            const btn = document.getElementById('btnSeleniumLoginDone');
+            const statusEl = document.getElementById('seleniumLoginDoneStatus');
+            if (!btn || !statusEl) return;
+            btn.addEventListener('click', async function () {
+                btn.disabled = true;
+                statusEl.textContent = 'Continuing…';
+                try {
+                    const r = await fetch('/api/selenium-login/confirm', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ session_id: sessionId }),
+                    });
+                    const data = await r.json().catch(function () { return {}; });
+                    if (!r.ok) {
+                        let msg = r.statusText;
+                        if (data && data.detail) {
+                            msg = typeof data.detail === 'string'
+                                ? data.detail
+                                : (Array.isArray(data.detail) && data.detail[0] && data.detail[0].msg)
+                                    ? data.detail[0].msg
+                                    : String(data.detail);
+                        }
+                        statusEl.textContent = 'Could not continue: ' + msg;
+                        btn.disabled = false;
+                        return;
+                    }
+                    statusEl.textContent = 'OK — the download will continue. Watch the log and phase text below.';
                 } catch (err) {
                     statusEl.textContent = 'Could not continue: ' + err.message;
                     btn.disabled = false;
