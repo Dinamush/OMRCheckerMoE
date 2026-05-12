@@ -69,6 +69,29 @@ THUMBS_DIR = USER_DATA_DIR / "thumbs"
 THUMBS_DIR.mkdir(parents=True, exist_ok=True)
 SESSION_HISTORY_FILE = USER_DATA_DIR / "session_history.jsonl"
 
+# --- Cancellation registry ---
+import threading as _threading
+_cancel_events: Dict[str, _threading.Event] = {}
+_cancel_lock = _threading.Lock()
+
+def _get_cancel_event(session_id: str) -> _threading.Event:
+    """Create and register a fresh cancel event for a session."""
+    ev = _threading.Event()
+    with _cancel_lock:
+        _cancel_events[session_id] = ev
+    return ev
+
+def _is_cancelled(session_id: str) -> bool:
+    """Return True if the session has been asked to stop."""
+    with _cancel_lock:
+        ev = _cancel_events.get(session_id)
+    return ev is not None and ev.is_set()
+
+def _clear_cancel_event(session_id: str) -> None:
+    """Remove the cancel event for a session (called during cleanup)."""
+    with _cancel_lock:
+        _cancel_events.pop(session_id, None)
+
 from progress_tracker import get_tracker, cleanup_tracker, set_default_log_dir
 
 set_default_log_dir(LOG_DIR)
@@ -785,6 +808,7 @@ def pornhub_workflow(
     library_dir: Optional[str] = None,
     library_recursive: bool = False,
     url_override: Optional[List[str]] = None,
+    cancel_event: Optional[_threading.Event] = None,
 ) -> None:
     """PornHub workflow: ph.py-style favourites collection + mediaDefinitions downloads."""
     if not session_id:
@@ -899,6 +923,10 @@ def pornhub_workflow(
                 f"Downloading {len(to_download)} new videos ({skipped_n} skipped · already in library)",
             )
             if to_download:
+                if cancel_event and cancel_event.is_set():
+                    logging.info("Cancellation requested before PH download batch — stopping.")
+                    workflow_heuristics.mark_error(session_id, "Download cancelled by user.")
+                    return
                 tracker.add_urls(
                     [pair[0] for pair in to_download],
                     [pair[1] for pair in to_download],
@@ -916,6 +944,10 @@ def pornhub_workflow(
             tracker = get_tracker(session_id)
             tracker.start_session(len(video_urls))
             tracker.add_urls(video_urls, _pornhub_tracker_titles(video_urls))
+            if cancel_event and cancel_event.is_set():
+                logging.info("Cancellation requested before PH download — stopping.")
+                workflow_heuristics.mark_error(session_id, "Download cancelled by user.")
+                return
             pornhub_ph.download_pornhub_videos_parallel(
                 video_urls,
                 download_dir,
@@ -948,6 +980,7 @@ def pornhub_workflow(
             except Exception as e:
                 logging.error(f"Error cleaning up tracker: {e}")
             workflow_heuristics.complete_success(session_id)
+        _clear_cancel_event(session_id)
 
 def extract_video_info_sequential(driver, video_urls: List[str]) -> List[Tuple[str, str, str]]:
     """Extract video info sequentially to avoid driver conflicts."""
@@ -976,6 +1009,7 @@ def xhamster_workflow(
     *,
     library_dir: Optional[str] = None,
     library_recursive: bool = False,
+    cancel_event: Optional[_threading.Event] = None,
 ) -> None:
     """xHamster workflow using Chrome and yt-dlp with two-phase approach."""
     if not session_id:
@@ -1118,6 +1152,11 @@ def xhamster_workflow(
             )
             page_number += 1
 
+            if cancel_event and cancel_event.is_set():
+                logging.info("Cancellation requested during page collection - stopping.")
+                workflow_heuristics.mark_error(session_id, "Download cancelled by user.")
+                return
+
             # Safety limit to prevent infinite loops
             if page_number > 100:
                 logging.warning("Reached maximum page limit (100), stopping pagination")
@@ -1197,6 +1236,11 @@ def xhamster_workflow(
             
             # Small delay between batches
             time.sleep(2)
+
+            if cancel_event and cancel_event.is_set():
+                logging.info("Cancellation requested between xHamster batches \u2014 stopping.")
+                workflow_heuristics.mark_error(session_id, "Download cancelled by user.")
+                break
         
         logging.info(f"=== PHASE 2 COMPLETE: Downloaded {total_downloaded} videos ===")
         logging.info(f"xHamster workflow completed. Total videos processed: {total_downloaded}")
@@ -1226,6 +1270,7 @@ def xhamster_workflow(
             except Exception as e:
                 logging.error(f"Error cleaning up tracker: {e}")
             workflow_heuristics.complete_success(session_id)
+        _clear_cancel_event(session_id)
 
 # ----------------------------- FastAPI Routes ----------------------------- #
 
@@ -1277,6 +1322,7 @@ def handle_form(
 
     if site == "pornhub":
         playlist_url = "https://www.pornhub.com/my/favorites/videos"
+        cancel_ev = _get_cancel_event(session_id)
         background_tasks.add_task(
             pornhub_workflow,
             playlist_url,
@@ -1286,9 +1332,11 @@ def handle_form(
             session_id,
             library_dir=library_dir_arg,
             library_recursive=library_recursive_bool,
+            cancel_event=cancel_ev,
         )
     elif site == "xhamster":
         favorites_url = "https://xhamster.com/my/favorites/videos"
+        cancel_ev = _get_cancel_event(session_id)
         background_tasks.add_task(
             xhamster_workflow,
             favorites_url,
@@ -1298,6 +1346,7 @@ def handle_form(
             session_id,
             library_dir=library_dir_arg,
             library_recursive=library_recursive_bool,
+            cancel_event=cancel_ev,
         )
     else:
         return {"error": "Invalid site selected"}
@@ -1524,6 +1573,21 @@ def api_duplicates_delete(body: DuplicateDeleteBody):
 
 # ─────────────────── Feature 2: Session URL export & retry ───────────────────
 
+@app.post("/api/session/{session_id}/cancel")
+def api_session_cancel(session_id: str):
+    """Signal the running workflow for this session to stop after the current item."""
+    with _cancel_lock:
+        ev = _cancel_events.get(session_id)
+    if ev is None:
+        raise HTTPException(status_code=404, detail="No active session found with that ID.")
+    if ev.is_set():
+        return {"ok": True, "message": "Cancel already requested."}
+    ev.set()
+    logging.info("Cancel requested for session %s", session_id)
+    workflow_heuristics.mark_error(session_id, "Download cancelled by user.")
+    return {"ok": True, "message": "Cancel signal sent. The workflow will stop after the current item."}
+
+
 @app.get("/api/session/{session_id}/failed")
 def api_session_failed(session_id: str):
     """Return all failed download items for a session (reads the persisted progress JSON)."""
@@ -1560,6 +1624,7 @@ def api_session_retry_failed(
     new_session_id = str(uuid.uuid4())
     log_file = os.path.join(LOG_DIR, f"video_downloader_{new_session_id}.log")
     timestamp = int(time.time())
+    cancel_ev = _get_cancel_event(new_session_id)
     background_tasks.add_task(
         pornhub_workflow,
         "https://www.pornhub.com/my/favorites/videos",
@@ -1568,6 +1633,7 @@ def api_session_retry_failed(
         log_file,
         new_session_id,
         url_override=failed_urls,
+        cancel_event=cancel_ev,
     )
     workflow_heuristics.register_session(new_session_id, site, embedded=False)
     return {

@@ -161,6 +161,7 @@
         <div class="session-actions-footer">
             <a href="/download/log/{{ session_id }}" class="btn btn-primary" target="_blank" rel="noopener noreferrer">Open full log</a>
             <a href="/progress/{{ session_id }}/json" class="btn btn-secondary" download>Download progress JSON file</a>
+            <button type="button" class="btn btn-danger" id="btnStopDownload">Stop download</button>
             <a href="/" class="btn btn-secondary">Start new download</a>
         </div>
 {% endblock %}
@@ -521,6 +522,33 @@
             });
         })();
         {% endif %}
+
+        (function () {
+            const stopBtn = document.getElementById('btnStopDownload');
+            if (!stopBtn) return;
+            stopBtn.addEventListener('click', async function () {
+                if (!confirm('Stop the download? The current item will finish, then the workflow will exit. You can retry failed URLs later.')) return;
+                stopBtn.disabled = true;
+                stopBtn.textContent = 'Stopping…';
+                try {
+                    const r = await fetch('/api/session/' + sessionId + '/cancel', { method: 'POST' });
+                    const data = await r.json().catch(function () { return {}; });
+                    if (r.ok) {
+                        stopBtn.textContent = 'Stopped';
+                        clearInterval(progressInterval);
+                        clearInterval(logInterval);
+                    } else {
+                        stopBtn.textContent = 'Stop download';
+                        stopBtn.disabled = false;
+                        alert('Could not stop: ' + (data.detail || r.statusText));
+                    }
+                } catch (err) {
+                    stopBtn.textContent = 'Stop download';
+                    stopBtn.disabled = false;
+                    alert('Request failed: ' + err.message);
+                }
+            });
+        })();
 
         window.addEventListener('beforeunload', function () {
             if (progressInterval) clearInterval(progressInterval);
