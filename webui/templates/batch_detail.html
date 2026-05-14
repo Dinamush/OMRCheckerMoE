@@ -181,6 +181,15 @@
 <section class="panel">
     <h2>Template / config / evaluation</h2>
     <p class="muted small">All three are optional JSON files. Only <code>template.json</code> is required before running.</p>
+
+    <div class="preset-bar" id="preset-bar">
+        <label for="preset-select" class="preset-label">Load preset:</label>
+        <select id="preset-select" class="preset-select">
+            <option value="">— choose a preset —</option>
+        </select>
+        <button class="btn small" type="button" id="apply-preset-btn">Apply</button>
+        <span class="feedback muted small" id="preset-feedback" hidden></span>
+    </div>
     <details class="template-help">
         <summary>Template parameter help</summary>
         <ul class="template-help-list">

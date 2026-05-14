@@ -1546,6 +1546,62 @@ const handleRestart = async () => {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Presets
+// ---------------------------------------------------------------------------
+
+const loadPresetOptions = async () => {
+    const select = document.getElementById("preset-select")
+    if (!select) return
+    try {
+        const presets = await jsonFetch("/api/v1/presets")
+        presets.forEach((name) => {
+            const option = document.createElement("option")
+            option.value = name
+            option.textContent = name.replace(/_/g, " ")
+            select.appendChild(option)
+        })
+    } catch (_err) {
+        // presets endpoint unavailable — silently skip
+    }
+}
+
+const handleApplyPreset = async () => {
+    const select = document.getElementById("preset-select")
+    const feedback = document.getElementById("preset-feedback")
+    if (!select || !select.value) {
+        if (feedback) { feedback.hidden = false; feedback.textContent = "Choose a preset first." }
+        return
+    }
+    const presetName = select.value
+    try {
+        const docs = await jsonFetch(`/api/v1/presets/${encodeURIComponent(presetName)}`)
+        const docNames = ["template", "config", "evaluation"]
+        for (const docName of docNames) {
+            if (!docs[docName]) continue
+            const box = document.querySelector(`.json-box[data-doc="${docName}"]`)
+            if (!box) continue
+            const textarea = box.querySelector("[data-doc-textarea]")
+            if (textarea) textarea.value = JSON.stringify(docs[docName], null, 2)
+            const state = getEditorState(box)
+            state.doc = docs[docName]
+            // Save to server
+            await jsonFetch(apiUrl(`/documents/${docName}`), {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(docs[docName]),
+            })
+        }
+        if (feedback) {
+            feedback.hidden = false
+            feedback.textContent = `Preset "${presetName.replace(/_/g, " ")}" applied.`
+            setTimeout(() => { feedback.hidden = true }, 3000)
+        }
+    } catch (err) {
+        if (feedback) { feedback.hidden = false; feedback.textContent = `Error: ${err.message}` }
+    }
+}
+
 document.addEventListener("DOMContentLoaded", () => {
     const uploadForm = document.getElementById("upload-form")
     if (uploadForm) uploadForm.addEventListener("submit", handleUpload)
@@ -1563,6 +1619,9 @@ document.addEventListener("DOMContentLoaded", () => {
     if (rotationForm) rotationForm.addEventListener("change", handleRotationChange)
     bootstrapFileBrowser()
     applyPreviewRotation()
+    loadPresetOptions()
+    const applyPresetBtn = document.getElementById("apply-preset-btn")
+    if (applyPresetBtn) applyPresetBtn.addEventListener("click", handleApplyPreset)
     document.addEventListener("click", (event) => {
         handleFileBrowserSelect(event)
         handleDeleteFile(event)

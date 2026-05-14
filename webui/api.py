@@ -40,10 +40,39 @@ from webui.schemas import (
 from webui.services import batches as batches_service
 from webui.services import omr as omr_service
 from webui.services import prefill as prefill_service
+from webui.services import presets as presets_service
 from webui.services.batches import BatchNotFound, InvalidBatchRequest
 from webui.settings import Settings, get_settings
 
 router = APIRouter(prefix="/api/v1", tags=["omr"])
+
+
+# ---------------------------------------------------------------------------
+# Presets
+# ---------------------------------------------------------------------------
+
+
+@router.get("/presets")
+async def list_presets(
+    settings: Settings = Depends(get_settings),
+) -> list[str]:
+    """Return the names of all available presets."""
+    return presets_service.list_presets(settings)
+
+
+@router.get("/presets/{preset_name}")
+async def get_preset(
+    preset_name: str,
+    settings: Settings = Depends(get_settings),
+) -> dict[str, Any]:
+    """Return all JSON documents (template/config/evaluation) for a preset."""
+    try:
+        docs = presets_service.get_preset_documents(preset_name, settings)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    if not docs:
+        raise HTTPException(status_code=404, detail=f"Preset {preset_name!r} not found.")
+    return docs
 
 
 def _handle_errors(func):

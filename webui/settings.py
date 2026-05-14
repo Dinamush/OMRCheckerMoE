@@ -49,6 +49,22 @@ class Settings(BaseSettings):
         description="Per-file upload limit in bytes (default 50 MiB).",
     )
 
+    presets_dir: Path = Field(
+        default=REPO_ROOT,
+        description=(
+            "Directory scanned for preset subdirectories. Each direct subdir "
+            "that contains a template.json is treated as a named preset."
+        ),
+    )
+
+    default_preset: str | None = Field(
+        default="custom_25_definitive_final",
+        description=(
+            "Preset applied automatically when a new batch is created. "
+            "Set to null or empty string to disable auto-apply."
+        ),
+    )
+
     def ensure_storage(self) -> Path:
         """Create and return the batches root directory."""
         self.storage_root.mkdir(parents=True, exist_ok=True)

@@ -194,6 +194,15 @@ def create_batch(name: str, settings: Settings | None = None) -> Batch:
         "rotation_degrees": 0,
     }
     _save_metadata(settings, batch_id, meta)
+
+    # Auto-apply the default preset (best-effort — batch is valid without it)
+    if settings.default_preset:
+        try:
+            from webui.services.presets import apply_preset_to_batch
+            apply_preset_to_batch(batch_dir, settings.default_preset, settings)
+        except Exception:
+            pass
+
     return _to_batch(settings, batch_id, meta)
 
 
