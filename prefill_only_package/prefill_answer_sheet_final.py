@@ -19,8 +19,8 @@ CFG = {
 
     'candidate_grid': (0.636, 0.121, 0.962, 0.400),  # x1, y1, x2, y2
     'candidate_header_band': (0.121, 0.200),         # y1, y2 relative to image
-    'candidate_bubble_top': 0.215,
-    'candidate_bubble_step': 0.0192,
+    'candidate_bubble_top': 0.2094,
+    'candidate_bubble_step': 0.01985,
 
     # Text sizes (approximate; auto-reduced when needed)
     'student_start_size': 28,
@@ -29,7 +29,7 @@ CFG = {
     'header_digit_size': 18,
 
     'header_digit_y_offset': 22,
-    'bubble_row_y_offsets': [-10, -5, -5, 0, 0, 0, 0, 0, 0, 0],
+    'bubble_row_y_offsets': [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
 }
 
 
