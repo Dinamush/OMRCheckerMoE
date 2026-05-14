@@ -74,3 +74,8 @@ async def batch_detail(
             "allow_directory_import": settings.allow_directory_import,
         },
     )
+
+
+@router.get("/prefill", response_class=HTMLResponse)
+async def prefill_page(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(request, "prefill.html", {})

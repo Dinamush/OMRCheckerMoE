@@ -8,17 +8,21 @@ from __future__ import annotations
 
 from typing import Any
 
+import csv
+import io
+
 from fastapi import (
     APIRouter,
     BackgroundTasks,
     Body,
     Depends,
     File,
+    Form,
     HTTPException,
     UploadFile,
     status,
 )
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
 from webui.schemas import (
     Batch,
@@ -35,6 +39,7 @@ from webui.schemas import (
 )
 from webui.services import batches as batches_service
 from webui.services import omr as omr_service
+from webui.services import prefill as prefill_service
 from webui.services.batches import BatchNotFound, InvalidBatchRequest
 from webui.settings import Settings, get_settings
 
@@ -419,3 +424,93 @@ async def download_output_file(
 ) -> FileResponse:
     resolved = batches_service.resolve_output_file(batch_id, file_path, settings)
     return FileResponse(resolved, filename=resolved.name)
+
+
+# ---------------------------------------------------------------------------
+# Prefill endpoints
+# ---------------------------------------------------------------------------
+
+@router.post("/prefill/single")
+async def prefill_single(
+    student_name: str = Form(...),
+    school_name: str = Form(...),
+    exam_name: str = Form(...),
+    candidate_number: str = Form(...),
+    output_format: str = Form("png"),
+) -> StreamingResponse:
+    """Generate a single pre-filled answer sheet and stream it as a download."""
+    try:
+        if output_format == "pdf":
+            data = prefill_service.generate_single_pdf(
+                student_name, school_name, exam_name, candidate_number
+            )
+            media_type = "application/pdf"
+            filename = "prefilled_sheet.pdf"
+        else:
+            data = prefill_service.generate_single_png(
+                student_name, school_name, exam_name, candidate_number
+            )
+            media_type = "image/png"
+            filename = "prefilled_sheet.png"
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    return StreamingResponse(
+        io.BytesIO(data),
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.post("/prefill/batch")
+async def prefill_batch(
+    csv_text: str | None = Form(default=None),
+    csv_file: UploadFile | None = File(default=None),
+    output_mode: str = Form("pdf"),
+) -> StreamingResponse:
+    """Generate pre-filled answer sheets for multiple students and stream as PDF or ZIP."""
+    if not csv_text and (csv_file is None or not csv_file.filename):
+        raise HTTPException(
+            status_code=422,
+            detail="Provide either csv_text or a csv_file.",
+        )
+
+    if csv_text and csv_text.strip():
+        raw = csv_text.strip()
+    else:
+        raw = (await csv_file.read()).decode("utf-8-sig")
+
+    try:
+        reader = csv.DictReader(io.StringIO(raw))
+        rows = [row for row in reader]
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Failed to parse CSV: {exc}")
+
+    if not rows:
+        raise HTTPException(status_code=422, detail="CSV contains no data rows.")
+
+    required_cols = {"student_name", "school_name", "exam_name", "candidate_number"}
+    missing_cols = required_cols - set(rows[0].keys())
+    if missing_cols:
+        raise HTTPException(
+            status_code=422,
+            detail=f"CSV is missing required columns: {', '.join(sorted(missing_cols))}",
+        )
+
+    try:
+        if output_mode == "zip":
+            data = prefill_service.generate_batch_zip(rows)
+            media_type = "application/zip"
+            filename = "prefilled_sheets.zip"
+        else:
+            data = prefill_service.generate_batch_pdf(rows)
+            media_type = "application/pdf"
+            filename = "prefilled_sheets.pdf"
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    return StreamingResponse(
+        io.BytesIO(data),
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

@@ -1,0 +1,137 @@
+{% extends "base.html" %}
+{% block title %}Prefill Answer Sheets — OMRChecker{% endblock %}
+
+{% block content %}
+<div class="panel-head">
+    <h1>Prefill Answer Sheets</h1>
+    <p class="muted small">Generate pre-filled answer sheets with student name, school, exam, and candidate number bubbled in.</p>
+</div>
+
+<div class="prefill-tabs">
+    <button class="tab-btn active" data-tab="single">Single Sheet</button>
+    <button class="tab-btn" data-tab="batch">Batch</button>
+</div>
+
+<!-- ─── Single Sheet ─────────────────────────────────────────────────── -->
+<div id="tab-single" class="tab-pane">
+    <div class="panel">
+        <h2>Single Sheet</h2>
+        <form id="single-form" novalidate>
+            <div class="stack">
+                <div class="form-group">
+                    <label for="s-student-name">Student Name</label>
+                    <input id="s-student-name" name="student_name" type="text" required placeholder="e.g. Johnathan Ragnauth Brigmohan" />
+                </div>
+                <div class="form-group">
+                    <label for="s-school-name">School Name</label>
+                    <input id="s-school-name" name="school_name" type="text" required placeholder="e.g. The New Sapodilla Primary" />
+                </div>
+                <div class="form-group">
+                    <label for="s-exam-name">Exam Name</label>
+                    <input id="s-exam-name" name="exam_name" type="text" required placeholder="e.g. National Grade Four Reading Assessment" />
+                </div>
+                <div class="form-group">
+                    <label for="s-candidate-number">Candidate Number <span class="muted small">(exactly 10 digits)</span></label>
+                    <input id="s-candidate-number" name="candidate_number" type="text"
+                           inputmode="numeric" pattern="\d{10}" maxlength="10"
+                           required placeholder="e.g. 9010690012" />
+                </div>
+                <div class="form-group">
+                    <label>Output Format</label>
+                    <div class="radio-group">
+                        <label class="radio-label">
+                            <input type="radio" name="output_format" value="png" checked /> PNG image
+                        </label>
+                        <label class="radio-label">
+                            <input type="radio" name="output_format" value="pdf" /> PDF
+                        </label>
+                    </div>
+                </div>
+            </div>
+            <div id="single-error" class="error small" style="display:none;margin-block-end:0.75rem;"></div>
+            <div class="actions">
+                <button type="submit" id="single-submit" class="btn primary">Generate &amp; Download</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- ─── Batch ────────────────────────────────────────────────────────── -->
+<div id="tab-batch" class="tab-pane" style="display:none;">
+    <div class="panel">
+        <h2>Batch</h2>
+
+        <div class="prefill-tabs prefill-subtabs">
+            <button class="subtab-btn active" data-subtab="manual">Enter manually</button>
+            <button class="subtab-btn" data-subtab="upload">Upload CSV</button>
+        </div>
+
+        <!-- Manual table -->
+        <div id="subtab-manual" class="subtab-pane">
+            <p class="muted small" style="margin-block:0.5rem 1rem;">
+                Required columns: <span class="mono">student_name</span>, <span class="mono">school_name</span>,
+                <span class="mono">exam_name</span>, <span class="mono">candidate_number</span>.
+                The <span class="mono">output_file</span> column is optional (PNG filename in ZIP mode).
+            </p>
+            <div class="table-scroll" style="margin-block-end:0.75rem;">
+                <table class="table batch-table" id="batch-table">
+                    <thead>
+                        <tr>
+                            <th>Student Name</th>
+                            <th>School Name</th>
+                            <th>Exam Name</th>
+                            <th>Candidate Number</th>
+                            <th>Output File (optional)</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody id="batch-body">
+                        <!-- rows injected by JS -->
+                    </tbody>
+                </table>
+            </div>
+            <div class="actions" style="margin-block-end:1rem;">
+                <button type="button" id="add-row-btn" class="btn small">+ Add Row</button>
+                <button type="button" id="clear-rows-btn" class="btn small danger">Clear All</button>
+            </div>
+        </div>
+
+        <!-- Upload CSV -->
+        <div id="subtab-upload" class="subtab-pane" style="display:none;">
+            <p class="muted small" style="margin-block:0.5rem 0.75rem;">
+                Upload a CSV file with headers: <span class="mono">student_name, school_name, exam_name, candidate_number[, output_file]</span>
+            </p>
+            <div class="form-group" style="margin-block-end:0.75rem;">
+                <label for="csv-upload">CSV file</label>
+                <input type="file" id="csv-upload" accept=".csv,text/csv" />
+            </div>
+            <div id="csv-preview" style="display:none;">
+                <p class="muted small" id="csv-preview-count"></p>
+                <div class="table-scroll">
+                    <table class="table" id="csv-preview-table">
+                        <thead><tr id="csv-preview-head"></tr></thead>
+                        <tbody id="csv-preview-body"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <div class="form-group" style="margin-block-start:1rem;">
+            <label for="batch-output-mode">Output Format</label>
+            <select id="batch-output-mode">
+                <option value="pdf">Combined PDF</option>
+                <option value="zip">ZIP of individual PNGs</option>
+            </select>
+        </div>
+
+        <div id="batch-error" class="error small" style="display:none;margin-block-end:0.75rem;"></div>
+        <div class="actions">
+            <button type="button" id="batch-submit" class="btn primary">Generate &amp; Download</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/prefill.js"></script>
+{% endblock %}

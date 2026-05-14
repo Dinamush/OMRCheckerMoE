@@ -1,0 +1,53 @@
+{
+  "description": "Current tuning values for the final landscape prefill template.",
+  "template_file": "blank_template_reference.png",
+  "cfg": {
+    "student_name_box": [
+      0.04,
+      0.178,
+      0.245,
+      0.288
+    ],
+    "school_name_box": [
+      0.262,
+      0.178,
+      0.43,
+      0.288
+    ],
+    "exam_name_box": [
+      0.438,
+      0.178,
+      0.6,
+      0.33
+    ],
+    "candidate_grid": [
+      0.636,
+      0.121,
+      0.962,
+      0.4
+    ],
+    "candidate_header_band": [
+      0.121,
+      0.2
+    ],
+    "candidate_bubble_top": 0.215,
+    "candidate_bubble_step": 0.0192,
+    "student_start_size": 28,
+    "school_start_size": 26,
+    "exam_start_size": 25,
+    "header_digit_size": 18,
+    "header_digit_y_offset": 22,
+    "bubble_row_y_offsets": [
+      -2,
+      -2,
+      -2,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ]
+  }
+}
