@@ -1575,23 +1575,32 @@ const handleApplyPreset = async () => {
     }
     const presetName = select.value
     try {
-        const docs = await jsonFetch(`/api/v1/presets/${encodeURIComponent(presetName)}`)
+        // Single call — copies template, config, evaluation AND all asset files (e.g. omr_marker.jpg)
+        await jsonFetch(apiUrl("/preset"), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ preset_name: presetName }),
+        })
+
+        // Reload the JSON doc editors from the server so they reflect the new files
         const docNames = ["template", "config", "evaluation"]
         for (const docName of docNames) {
-            if (!docs[docName]) continue
             const box = document.querySelector(`.json-box[data-doc="${docName}"]`)
             if (!box) continue
-            const textarea = box.querySelector("[data-doc-textarea]")
-            if (textarea) textarea.value = JSON.stringify(docs[docName], null, 2)
-            const state = getEditorState(box)
-            state.doc = docs[docName]
-            // Save to server
-            await jsonFetch(apiUrl(`/documents/${docName}`), {
-                method: "PUT",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(docs[docName]),
-            })
+            try {
+                const doc = await jsonFetch(apiUrl(`/documents/${docName}`))
+                const textarea = box.querySelector("[data-doc-textarea]")
+                if (textarea) textarea.value = doc.content ? JSON.stringify(doc.content, null, 2) : ""
+                const state = getEditorState(box)
+                state.doc = doc.content || null
+                const statusEl = box.querySelector("[data-doc-status]")
+                if (statusEl) statusEl.textContent = doc.content ? "present" : "empty"
+            } catch (_err) { /* doc might not exist in this preset */ }
         }
+
+        // Reload asset list so the newly-copied marker files show as present
+        location.reload()
+
         if (feedback) {
             feedback.hidden = false
             feedback.textContent = `Preset "${presetName.replace(/_/g, " ")}" applied.`

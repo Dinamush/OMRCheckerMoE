@@ -75,6 +75,23 @@ async def get_preset(
     return docs
 
 
+@router.post("/batches/{batch_id}/preset")
+async def apply_preset(
+    batch_id: str,
+    preset_name: str = Body(..., embed=True),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, str]:
+    """Copy all files from a preset (template, config, assets) into a batch."""
+    batch_root = settings.ensure_storage() / batch_id
+    if not batch_root.is_dir():
+        raise HTTPException(status_code=404, detail=f"Batch {batch_id!r} not found.")
+    try:
+        presets_service.apply_preset_to_batch(batch_root, preset_name, settings)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return {"status": "ok", "preset": preset_name}
+
+
 def _handle_errors(func):
     """Wrap service calls so our custom exceptions map to HTTP status codes."""
     from functools import wraps
