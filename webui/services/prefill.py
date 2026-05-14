@@ -6,7 +6,6 @@ in-memory bytes so HTTP handlers can stream them directly.
 
 from __future__ import annotations
 
-import csv
 import io
 import zipfile
 from pathlib import Path
@@ -72,11 +71,6 @@ def generate_single_pdf(
     prefill_sheet = _import_prefill()
     image = prefill_sheet(DEFAULT_TEMPLATE, student_name, school_name, exam_name, candidate_number)
     return _images_to_pdf_bytes([image])
-
-
-def _parse_csv_text(csv_text: str) -> list[dict[str, str]]:
-    reader = csv.DictReader(io.StringIO(csv_text.strip()))
-    return [row for row in reader]
 
 
 def generate_batch_pdf(rows: list[dict[str, Any]]) -> bytes:

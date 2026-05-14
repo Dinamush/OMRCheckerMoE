@@ -206,14 +206,15 @@ A thin FastAPI wrapper around the same engine is available for batch-style workf
 Start it with:
 
 ```bash
-uvicorn webui.app:app --reload
+uvicorn webui.app:create_app --factory --reload
 # or choose a port
-uvicorn webui.app:app --reload --port 5050
+uvicorn webui.app:create_app --factory --reload --port 5050
 ```
 
 Then open:
 
 - `http://127.0.0.1:8000/` – HTML UI for creating batches, uploading scans, editing `template.json` / `config.json` / `evaluation.json`, running OMR, and reviewing results.
+- `http://127.0.0.1:8000/prefill` – Pre-fill answer sheets with student details (see [Prefill Sheets](#prefill-sheets) below).
 - `http://127.0.0.1:8000/docs` – auto-generated Swagger UI for the `/api/v1/*` endpoints.
 - `http://127.0.0.1:8000/openapi.json` – OpenAPI schema for machine consumption.
 
@@ -270,6 +271,33 @@ This means:
 Processing is handled in-process via FastAPI `BackgroundTasks`, which is fine for local use. For hosted deployments, keep the service layer as-is and replace the task handoff with a real queue (RQ, Arq, or Celery with Redis); no engine changes required.
 
 Tests for the web UI live in `webui/tests/` and run as part of the standard `pytest` invocation.
+
+### Prefill Sheets
+
+The `/prefill` page generates pre-filled answer sheets from the blank landscape template, bubbling in a student's candidate number and printing their name, school, and exam name into the text boxes. It is useful for issuing personalised sheets before an exam.
+
+The feature lives in `prefill_only_package/` and is exposed through the web UI and the JSON API.
+
+**Web UI** — navigate to `http://127.0.0.1:8000/prefill`:
+
+| Mode | Input | Output |
+| ---- | ----- | ------ |
+| **Single Sheet** | Form fields for name, school, exam, candidate number | Download PNG or PDF |
+| **Batch** | Upload a CSV file *or* enter rows in the inline table | Download combined PDF or ZIP of PNGs |
+
+**JSON API** endpoints (under `/api/v1/prefill/`):
+
+- `POST /api/v1/prefill/single` — form fields: `student_name`, `school_name`, `exam_name`, `candidate_number`, `output_format` (`png` or `pdf`). Returns a streaming download.
+- `POST /api/v1/prefill/batch` — form fields: `csv_text` or `csv_file`, `output_mode` (`pdf` or `zip`). Returns a streaming download.
+
+**CSV format** (required columns: `student_name`, `school_name`, `exam_name`, `candidate_number`; optional: `output_file`):
+
+```csv
+student_name,school_name,exam_name,candidate_number,output_file
+Johnathan Ragnauth Brigmohan,The New Sapodilla Primary,Grade 4 Reading,9010690012,johnathan.png
+```
+
+Candidate numbers must be exactly 10 digits. Bubble placement is calibrated to `prefill_only_package/blank_template_reference.png` — do not swap in a different template without re-calibrating the `CFG` values in `prefill_answer_sheet_final.py`.
 
 ### Common Issues
 
