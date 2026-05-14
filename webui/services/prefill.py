@@ -102,7 +102,7 @@ def generate_batch_zip(rows: list[dict[str, Any]]) -> bytes:
                 str(row["exam_name"]).strip(),
                 str(row["candidate_number"]).strip(),
             )
-            filename = (str(row.get("output_file") or "").strip()) or f"sheet_{i:03d}.png"
+            filename = Path((str(row.get("output_file") or "").strip())).name or f"sheet_{i:03d}.png"
             if not filename.lower().endswith(".png"):
                 filename += ".png"
             img_buf = io.BytesIO()

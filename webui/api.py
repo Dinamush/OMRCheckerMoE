@@ -475,10 +475,17 @@ async def prefill_batch(
             detail="Provide either csv_text or a csv_file.",
         )
 
+    _CSV_MAX =50 * 1024 * 1024  # 10 MiB — covers ~100 000 student rows
+
     if csv_text and csv_text.strip():
         raw = csv_text.strip()
+        if len(raw.encode()) > _CSV_MAX:
+            raise HTTPException(status_code=413, detail="CSV text exceeds 1 MiB limit.")
     else:
-        raw = (await csv_file.read()).decode("utf-8-sig")
+        file_bytes = await csv_file.read()
+        if len(file_bytes) > _CSV_MAX:
+            raise HTTPException(status_code=413, detail=f"File {csv_file.filename!r} exceeds 1 MiB limit.")
+        raw = file_bytes.decode("utf-8-sig")
 
     try:
         reader = csv.DictReader(io.StringIO(raw))
