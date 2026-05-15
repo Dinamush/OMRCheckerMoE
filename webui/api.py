@@ -7,7 +7,9 @@ and any third-party API consumer go through identical codepaths.
 from __future__ import annotations
 
 import asyncio
+import secrets
 import threading
+import time as _time_mod
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +73,27 @@ _PREFILL_SINGLE_SEM = threading.BoundedSemaphore(_PREFILL_SINGLE_LIMIT)
 _PREFILL_PDF_MAX_ROWS = int(os.environ.get("OMR_WEBUI_PREFILL_PDF_MAX_ROWS", "5000"))
 _PREFILL_ZIP_MAX_ROWS = int(os.environ.get("OMR_WEBUI_PREFILL_ZIP_MAX_ROWS", "10000"))
 _PREFILL_CSV_MAX_BYTES = int(os.environ.get("OMR_WEBUI_PREFILL_CSV_MAX_BYTES", str(50 * 1024 * 1024)))
+
+# Download token store: maps token -> (tmp_path, media_type, filename, expires_at)
+# Tokens are single-use and expire after 10 minutes so orphaned files are cleaned up.
+_DOWNLOAD_STORE: dict[str, tuple[Path, str, str, float]] = {}
+_DOWNLOAD_STORE_LOCK = threading.Lock()
+
+def _register_download(tmp_path: Path, media_type: str, filename: str) -> str:
+    """Store a completed batch file and return a one-time download token."""
+    token = secrets.token_urlsafe(24)
+    expires_at = _time_mod.monotonic() + 600  # 10 minutes
+    with _DOWNLOAD_STORE_LOCK:
+        # Evict any expired tokens first
+        expired = [k for k, (_, _, _, exp) in _DOWNLOAD_STORE.items() if _time_mod.monotonic() > exp]
+        for k in expired:
+            try:
+                _DOWNLOAD_STORE[k][0].unlink(missing_ok=True)
+            except OSError:
+                pass
+            del _DOWNLOAD_STORE[k]
+        _DOWNLOAD_STORE[token] = (tmp_path, media_type, filename, expires_at)
+    return token
 
 
 # ---------------------------------------------------------------------------
@@ -636,12 +659,12 @@ async def prefill_batch(
     csv_text: str | None = Form(default=None),
     csv_file: UploadFile | None = File(default=None),
     output_mode: str = Form("pdf"),
-) -> FileResponse:
+) -> dict:
     """Generate pre-filled answer sheets for multiple students.
 
-    Streams generation directly to a server-side temp file (bounded memory) and
-    returns it as a download. Backpressures concurrent heavy jobs via a
-    semaphore (HTTP 429 when saturated).
+    Streams generation to a server-side temp file then returns a one-time
+    download token as JSON. The client uses window.location.href on the
+    download URL so large files stream directly to disk (no browser buffering).
     """
     # 1) Validate output_mode early — reject unknown values explicitly.
     output_mode = (output_mode or "").strip().lower()
@@ -754,6 +777,9 @@ async def prefill_batch(
             pass
         _PREFILL_BATCH_SEM.release()
 
+    def _release_sem() -> None:
+        _PREFILL_BATCH_SEM.release()
+
     try:
         # Offload to a thread so a long-running batch cannot block the event
         # loop and stall every other request (incl. health checks).
@@ -787,18 +813,82 @@ async def prefill_batch(
             },
         )
 
-    background_tasks.add_task(_cleanup)
-    headers = {
-        "Content-Disposition": f'attachment; filename="{filename}"',
-        "X-Prefill-Count": str(meta["count"]),
-        "X-Prefill-Successes": str(meta["successes"]),
-        "X-Prefill-Errors": str(len(meta["errors"])),
-        "X-Prefill-Elapsed-Seconds": str(meta["elapsed_s"]),
+    # Release the semaphore now — generation is done, file is held for download.
+    _release_sem()
+    # Register the file for a one-time token-based GET download instead of
+    # streaming directly. This allows the frontend to use window.location.href
+    # which bypasses browser PDF viewer buffering for large files.
+    token = _register_download(tmp_path, media_type, filename)
+    return {
+        "download_url": f"/api/v1/prefill/batch/download/{token}",
+        "filename": filename,
+        "count": meta["count"],
+        "successes": meta["successes"],
+        "errors": meta["errors"],
+        "elapsed_s": meta["elapsed_s"],
+        "size_bytes": meta["size_bytes"],
     }
+
+
+@router.get("/prefill/batch/download/{token}")
+async def prefill_batch_download(token: str, background_tasks: BackgroundTasks):
+    """One-time token download endpoint. Returns the generated file and deletes it."""
+    with _DOWNLOAD_STORE_LOCK:
+        entry = _DOWNLOAD_STORE.pop(token, None)
+
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Download link not found or already used.")
+
+    tmp_path, media_type, filename, expires_at = entry
+    if not tmp_path.exists():
+        raise HTTPException(status_code=410, detail="File no longer available.")
+    if _time_mod.monotonic() > expires_at:
+        tmp_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=410, detail="Download link has expired.")
+
+    def _cleanup():
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    background_tasks.add_task(_cleanup)
     return FileResponse(
         path=str(tmp_path),
         media_type=media_type,
         filename=filename,
-        headers=headers,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        background=background_tasks,
+    )
+
+
+@router.get("/prefill/batch/download/{token}")
+async def prefill_batch_download(token: str, background_tasks: BackgroundTasks):
+    """One-time token download endpoint. Returns the generated file and deletes it."""
+    with _DOWNLOAD_STORE_LOCK:
+        entry = _DOWNLOAD_STORE.pop(token, None)
+
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Download link not found or already used.")
+
+    tmp_path, media_type, filename, expires_at = entry
+    if not tmp_path.exists():
+        raise HTTPException(status_code=410, detail="File no longer available.")
+    if _time_mod.monotonic() > expires_at:
+        tmp_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=410, detail="Download link has expired.")
+
+    def _cleanup():
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    background_tasks.add_task(_cleanup)
+    return FileResponse(
+        path=str(tmp_path),
+        media_type=media_type,
+        filename=filename,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         background=background_tasks,
     )

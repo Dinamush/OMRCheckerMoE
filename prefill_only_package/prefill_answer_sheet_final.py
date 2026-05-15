@@ -41,6 +41,14 @@ _font_cache: dict = {}
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Per-worker-process stamped-template cache (set by _init_worker_stamped).
+# Using a process-level global avoids shipping the 1.8 MB template PNG through
+# the IPC pipe on every task.  The initializer loads it once per worker.
+# ---------------------------------------------------------------------------
+_WORKER_STAMPED_ARR: 'np.ndarray | None' = None
+_WORKER_LAYOUT: 'dict | None' = None  # pre-computed pixel geometry for fixed template size
+
 
 def load_font(size: int, bold: bool = False):
     key = (size, bold)
@@ -170,6 +178,44 @@ def load_stamped_template(template_path: Path) -> Image.Image:
     return draw_aruco_corners(img)
 
 
+def _build_layout(w: int, h: int) -> dict:
+    """Pre-compute all pixel-space layout values for a template of size (w, h).
+    Cached once per process so repeated calls for the same template size are free.
+    """
+    gx1, gy1, gx2, gy2 = relative_box(CFG['candidate_grid'], w, h)
+    grid_w = gx2 - gx1
+    header_font = load_font(CFG['header_digit_size'], bold=True)
+    # Pre-compute digit text extents for 0-9 using a throw-away ImageDraw.
+    _tmp = Image.new('RGB', (1, 1))
+    _drw = ImageDraw.Draw(_tmp)
+    digit_sizes = {
+        str(d): _drw.textbbox((0, 0), str(d), font=header_font)[2:4]
+        for d in range(10)
+    }
+    return {
+        'student_box': relative_box(CFG['student_name_box'], w, h),
+        'school_box': relative_box(CFG['school_name_box'], w, h),
+        'exam_box': relative_box(CFG['exam_name_box'], w, h),
+        'col_centers': [round(gx1 + (i + 0.5) * grid_w / 10) for i in range(10)],
+        'header_y': round(((CFG['candidate_header_band'][0] + CFG['candidate_header_band'][1]) / 2) * h),
+        'row_centers': [round((CFG['candidate_bubble_top'] + i * CFG['candidate_bubble_step']) * h) for i in range(10)],
+        'header_font': header_font,
+        'digit_sizes': digit_sizes,
+        'radius': max(8, round(h * 0.009)),
+        'y_offset': CFG['header_digit_y_offset'],
+    }
+
+
+_LAYOUT_CACHE: dict[tuple[int, int], dict] = {}
+
+
+def _get_layout(w: int, h: int) -> dict:
+    key = (w, h)
+    if key not in _LAYOUT_CACHE:
+        _LAYOUT_CACHE[key] = _build_layout(w, h)
+    return _LAYOUT_CACHE[key]
+
+
 def _draw_sheet_content(
     img: Image.Image,
     student_name: str,
@@ -180,28 +226,28 @@ def _draw_sheet_content(
     """Draw text fields and candidate bubbles onto *img* (already ArUco-stamped)."""
     draw = ImageDraw.Draw(img)
     w, h = img.size
+    L = _get_layout(w, h)
 
-    wrap_and_draw(draw, student_name, relative_box(CFG['student_name_box'], w, h), CFG['student_start_size'])
-    wrap_and_draw(draw, school_name, relative_box(CFG['school_name_box'], w, h), CFG['school_start_size'])
-    wrap_and_draw(draw, exam_name, relative_box(CFG['exam_name_box'], w, h), CFG['exam_start_size'])
+    wrap_and_draw(draw, student_name, L['student_box'], CFG['student_start_size'])
+    wrap_and_draw(draw, school_name, L['school_box'], CFG['school_start_size'])
+    wrap_and_draw(draw, exam_name, L['exam_box'], CFG['exam_start_size'])
 
-    gx1, gy1, gx2, gy2 = relative_box(CFG['candidate_grid'], w, h)
-    grid_w = gx2 - gx1
-    col_centers = [round(gx1 + (i + 0.5) * grid_w / 10) for i in range(10)]
-    header_y = round(((CFG['candidate_header_band'][0] + CFG['candidate_header_band'][1]) / 2) * h)
-    row_centers = [round((CFG['candidate_bubble_top'] + i * CFG['candidate_bubble_step']) * h) for i in range(10)]
+    col_centers = L['col_centers']
+    header_y = L['header_y']
+    row_centers = L['row_centers']
+    header_font = L['header_font']
+    digit_sizes = L['digit_sizes']
+    radius = L['radius']
+    y_offset = L['y_offset']
 
-    header_font = load_font(CFG['header_digit_size'], bold=True)
-    radius = max(8, round(h * 0.009))
     for idx, digit in enumerate(candidate_number):
         cx = col_centers[idx]
-        bbox = draw.textbbox((0, 0), digit, font=header_font)
-        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        tw, th = digit_sizes[digit]
         draw.text(
-            (cx - tw / 2, header_y - th / 2 - 1 + CFG['header_digit_y_offset']),
+            (cx - tw / 2, header_y - th / 2 - 1 + y_offset),
             digit,
             fill='black',
-            font=header_font
+            font=header_font,
         )
         cy = row_centers[int(digit)]
         draw.ellipse((cx - radius, cy - radius, cx + radius, cy + radius), fill='black')
@@ -225,6 +271,49 @@ def _prefill_worker(payload: dict) -> bytes:
     )
     buf = io.BytesIO()
     img.save(buf, format='PNG', compress_level=1)
+    return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Fast worker path — zero IPC overhead for the template.
+# The ProcessPoolExecutor is created with initializer=_init_worker_stamped so
+# each worker process decodes the stamped PIL image once at startup.  Task
+# payloads then only carry the small per-student text fields.
+# ---------------------------------------------------------------------------
+
+def _init_worker_stamped(arr_bytes: bytes, shape: tuple) -> None:
+    """Initializer for fast worker pool: decode stamped template once per process."""
+    global _WORKER_STAMPED_ARR, _WORKER_LAYOUT
+    arr = np.frombuffer(arr_bytes, dtype=np.uint8).reshape(shape).copy()
+    _WORKER_STAMPED_ARR = arr
+    # Pre-warm the layout cache for this template size.
+    h, w = shape[:2]
+    _WORKER_LAYOUT = _get_layout(w, h)
+
+
+def _prefill_worker_fast(payload: dict) -> bytes:
+    """Like _prefill_worker but uses the worker-global pre-decoded template.
+
+    Payload keys: student_name, school_name, exam_name, candidate_number.
+    Optional keys:
+      output_format: 'png' (default) | 'jpeg'
+      jpeg_quality:  int 1-95 (default 85), only used when output_format='jpeg'
+    No stamped_bytes key needed — template lives in _WORKER_STAMPED_ARR.
+    """
+    img = Image.fromarray(_WORKER_STAMPED_ARR.copy())
+    img = _draw_sheet_content(
+        img,
+        payload['student_name'],
+        payload['school_name'],
+        payload['exam_name'],
+        payload['candidate_number'],
+    )
+    buf = io.BytesIO()
+    fmt = payload.get('output_format', 'png').lower()
+    if fmt == 'jpeg':
+        img.save(buf, format='JPEG', quality=payload.get('jpeg_quality', 75))
+    else:
+        img.save(buf, format='PNG', compress_level=1)
     return buf.getvalue()
 
 

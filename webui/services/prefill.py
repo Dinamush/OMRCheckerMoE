@@ -18,6 +18,8 @@ from concurrent.futures import BrokenExecutor, ProcessPoolExecutor
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 # Built-in blank template shipped with the package
 DEFAULT_TEMPLATE = (
     Path(__file__).resolve().parents[2]
@@ -97,7 +99,7 @@ def _validate_candidate_number(candidate_number: str) -> None:
 
 
 def _build_payload(stamped_bytes: bytes, row: dict[str, Any]) -> dict[str, Any]:
-    """Validate + sanitise a row into a worker payload."""
+    """Validate + sanitise a row into a legacy worker payload (includes stamped_bytes)."""
     candidate_number = _clean_field(row.get("candidate_number"), max_len=10)
     _validate_candidate_number(candidate_number)
     return {
@@ -109,55 +111,116 @@ def _build_payload(stamped_bytes: bytes, row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _build_fast_payload(row: dict[str, Any], output_format: str = "png") -> dict[str, Any]:
+    """Validate + sanitise a row into a fast worker payload (no stamped_bytes)."""
+    candidate_number = _clean_field(row.get("candidate_number"), max_len=10)
+    _validate_candidate_number(candidate_number)
+    return {
+        "student_name": _clean_field(row.get("student_name")),
+        "school_name": _clean_field(row.get("school_name")),
+        "exam_name": _clean_field(row.get("exam_name")),
+        "candidate_number": candidate_number,
+        "output_format": output_format,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Module-level stamped template cache.
+# The stamped PIL image (ArUco corners drawn) is constant for the lifetime of
+# the process.  Caching it here avoids ~50 ms of disk-read + ArUco work on
+# every single-sheet HTTP request.
+# ---------------------------------------------------------------------------
+_STAMPED_IMG_CACHE: 'Image.Image | None' = None  # type: ignore[name-defined]  # noqa: F821
+_STAMPED_ARR_CACHE: 'np.ndarray | None' = None  # type: ignore[name-defined]  # noqa: F821
+
+
+def _get_stamped_img():
+    """Return the stamped PIL Image, building and caching it on first call."""
+    global _STAMPED_IMG_CACHE, _STAMPED_ARR_CACHE
+    if _STAMPED_IMG_CACHE is None:
+        m = _import_prefill_module()
+        t = time.perf_counter()
+        _STAMPED_IMG_CACHE = m.load_stamped_template(DEFAULT_TEMPLATE)
+        _STAMPED_ARR_CACHE = np.array(_STAMPED_IMG_CACHE)
+        logger.info("Stamped template cached | %.1fms", (time.perf_counter() - t) * 1000)
+    return _STAMPED_IMG_CACHE, _STAMPED_ARR_CACHE
+
+
 def _stamp_template_once() -> bytes:
     """Render the ArUco-stamped template once, returning its PNG bytes."""
-    m = _import_prefill_module()
-    t_stamp = time.perf_counter()
-    stamped_img = m.load_stamped_template(DEFAULT_TEMPLATE)
+    stamped_img, _ = _get_stamped_img()
     stamped_buf = io.BytesIO()
     stamped_img.save(stamped_buf, format="PNG", compress_level=1)
-    stamped_bytes = stamped_buf.getvalue()
-    logger.info("Template stamped | %.1fms", (time.perf_counter() - t_stamp) * 1000)
-    return stamped_bytes
+    return stamped_buf.getvalue()
 
 
 def _max_workers() -> int:
     return max(1, min((os.cpu_count() or 2) - 1, 8))
 
 
-def _iter_pngs_with_fallback(payloads: list[dict]):
-    """Yield ``(index, png_bytes_or_None, error_or_None)`` for each payload.
+def _iter_pngs_fast(payloads: list[dict]):
+    """Yield ``(index, png_bytes_or_None, error_or_None)`` using the fast worker.
 
-    Uses a process pool with chunked map for throughput. If the pool dies
-    (``BrokenExecutor``), falls back to in-process serial processing for the
-    remaining payloads so a single bad input cannot kill the whole batch.
+    Each worker process receives the stamped template as a numpy array via the
+    pool initializer (once per worker process), so task payloads carry only the
+    small per-student text fields.  Falls back to serial on BrokenExecutor.
     """
+    import numpy as np
     m = _import_prefill_module()
+    _, stamped_arr = _get_stamped_img()
+    arr_bytes = stamped_arr.tobytes()
+    shape = stamped_arr.shape
     n = len(payloads)
+    # Larger chunksize reduces IPC round-trips; cap so short batches still parallelise.
+    chunksize = max(1, min(200, n // (_max_workers() * 4) + 1))
     yielded = 0
     try:
-        with ProcessPoolExecutor(max_workers=_max_workers()) as ex:
-            for png_bytes in ex.map(m._prefill_worker, payloads, chunksize=20):
+        with ProcessPoolExecutor(
+            max_workers=_max_workers(),
+            initializer=m._init_worker_stamped,
+            initargs=(arr_bytes, shape),
+        ) as ex:
+            for png_bytes in ex.map(m._prefill_worker_fast, payloads, chunksize=chunksize):
                 yield yielded, png_bytes, None
                 yielded += 1
     except BrokenExecutor as exc:
         logger.warning(
-            "Prefill worker pool broken after %d/%d rows; falling back to serial: %s",
+            "Fast worker pool broken after %d/%d rows; falling back to serial: %s",
             yielded, n, exc,
         )
-    except Exception as exc:  # noqa: BLE001 - graceful: any worker fault → serial
+    except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "Prefill worker pool error after %d/%d rows; falling back to serial: %s",
+            "Fast worker pool error after %d/%d rows; falling back to serial: %s",
             yielded, n, exc,
         )
 
-    # Serial fallback for any remaining payloads.
+    # Serial fallback for remaining.
     for idx in range(yielded, n):
         try:
-            png_bytes = m._prefill_worker(payloads[idx])
-            yield idx, png_bytes, None
-        except Exception as inner:  # noqa: BLE001 - never abort whole batch
+            # Re-use stamped img directly in-process to avoid another pool.
+            stamped_img, _ = _get_stamped_img()
+            img = stamped_img.copy()
+            m2 = _import_prefill_module()
+            img = m2._draw_sheet_content(
+                img,
+                payloads[idx]['student_name'],
+                payloads[idx]['school_name'],
+                payloads[idx]['exam_name'],
+                payloads[idx]['candidate_number'],
+            )
+            buf = io.BytesIO()
+            img.save(buf, format='PNG', compress_level=1)
+            yield idx, buf.getvalue(), None
+        except Exception as inner:  # noqa: BLE001
             yield idx, None, f"{type(inner).__name__}: {inner}"
+
+
+def _iter_pngs_with_fallback(payloads: list[dict]):
+    """Legacy path kept for backward compatibility. Delegates to fast path."""
+    fast_payloads = [
+        {k: v for k, v in p.items() if k != "stamped_bytes"} for p in payloads
+    ]
+    yield from _iter_pngs_fast(fast_payloads)
 
 
 def generate_single_png(
@@ -168,16 +231,17 @@ def generate_single_png(
 ) -> bytes:
     candidate_number = _clean_field(candidate_number, max_len=10)
     _validate_candidate_number(candidate_number)
-    prefill_sheet = _import_prefill()
-    image = prefill_sheet(
-        DEFAULT_TEMPLATE,
+    m = _import_prefill_module()
+    stamped_img, _ = _get_stamped_img()
+    image = m._draw_sheet_content(
+        stamped_img.copy(),
         _clean_field(student_name),
         _clean_field(school_name),
         _clean_field(exam_name),
         candidate_number,
     )
     buf = io.BytesIO()
-    image.save(buf, format="PNG")
+    image.save(buf, format="PNG", compress_level=1)
     return buf.getvalue()
 
 
@@ -187,56 +251,67 @@ def generate_single_pdf(
     exam_name: str,
     candidate_number: str,
 ) -> bytes:
+    import fitz
+    import struct
     candidate_number = _clean_field(candidate_number, max_len=10)
     _validate_candidate_number(candidate_number)
-    prefill_sheet = _import_prefill()
-    image = prefill_sheet(
-        DEFAULT_TEMPLATE,
-        _clean_field(student_name),
-        _clean_field(school_name),
-        _clean_field(exam_name),
-        candidate_number,
-    )
-    return _images_to_pdf_bytes([image])
+    png_bytes = generate_single_png(student_name, school_name, exam_name, candidate_number)
+    w, h = struct.unpack('>II', png_bytes[16:24])
+    doc = fitz.open()
+    page = doc.new_page(width=w, height=h)
+    page.insert_image(page.rect, stream=png_bytes)
+    buf = io.BytesIO()
+    doc.save(buf, garbage=0)
+    doc.close()
+    return buf.getvalue()
 
 
 def generate_batch_pdf_to_file(rows: list[dict[str, Any]], dst_path: Path) -> dict:
     """Stream PDF generation directly to ``dst_path``.
 
-    Memory peak is one PNG (~5MB) + the open PyMuPDF doc (incremental).
+    Workers output JPEG bytes; JPEG is stored natively in PDF as DCT so no
+    re-encoding or deflate pass is needed.  Progress is logged every 500 sheets.
     Returns a metadata dict: ``{count, successes, errors, elapsed_s, size_bytes}``.
-    Caller must validate row count beforehand.
     """
     import fitz  # PyMuPDF
 
     count = len(rows)
-    logger.info("Prefill batch started (streaming) | count=%d output=pdf", count)
+    logger.info("Prefill batch PDF started | count=%d", count)
     t_batch = time.perf_counter()
 
-    stamped_bytes = _stamp_template_once()
-    payloads = [_build_payload(stamped_bytes, row) for row in rows]
+    payloads = [_build_fast_payload(row, output_format="jpeg") for row in rows]
 
     dst_path.parent.mkdir(parents=True, exist_ok=True)
     doc = fitz.open()
     successes = 0
     errors: list[str] = []
+    last_log = time.perf_counter()
 
     try:
-        for idx, png_bytes, err in _iter_pngs_with_fallback(payloads):
-            if err or png_bytes is None:
+        for idx, img_bytes, err in _iter_pngs_fast(payloads):
+            if err or img_bytes is None:
                 errors.append(f"row {idx}: {err or 'empty result'}")
                 continue
             try:
-                img_doc = fitz.open("png", png_bytes)
-                pdf_bytes = img_doc.convert_to_pdf()
-                img_doc.close()
-                src = fitz.open("pdf", pdf_bytes)
-                doc.insert_pdf(src)
-                src.close()
+                # JPEG bytes: read dimensions via fitz (avoids struct parsing JPEG SOF)
+                tmp = fitz.open("jpeg", img_bytes)
+                w, h = tmp[0].rect.width, tmp[0].rect.height
+                tmp.close()
+                page = doc.new_page(width=int(w), height=int(h))
+                page.insert_image(page.rect, stream=img_bytes)
                 successes += 1
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"row {idx}: {type(exc).__name__}: {exc}")
-        doc.save(str(dst_path), garbage=4, deflate=True)
+            # Progress log every ~500 sheets or every 30s
+            now = time.perf_counter()
+            if successes % 500 == 0 and successes > 0 or now - last_log > 30:
+                rate = successes / (now - t_batch) * 60
+                logger.info(
+                    "Prefill PDF progress | %d/%d (%.0f/min) | err=%d",
+                    successes, count, rate, len(errors),
+                )
+                last_log = now
+        doc.save(str(dst_path), garbage=4)
     finally:
         doc.close()
 
@@ -244,7 +319,7 @@ def generate_batch_pdf_to_file(rows: list[dict[str, Any]], dst_path: Path) -> di
     size_bytes = dst_path.stat().st_size if dst_path.exists() else 0
     rate = (successes / elapsed) * 60 if elapsed > 0 else 0
     logger.info(
-        "Prefill batch complete | count=%d | ok=%d | err=%d | elapsed=%.1fs | "
+        "Prefill batch PDF complete | count=%d | ok=%d | err=%d | elapsed=%.1fs | "
         "rate=%.0f/min | size_mb=%.1f",
         count, successes, len(errors), elapsed, rate, size_bytes / (1024 * 1024),
     )
@@ -260,14 +335,13 @@ def generate_batch_pdf_to_file(rows: list[dict[str, Any]], dst_path: Path) -> di
 def generate_batch_zip_to_file(rows: list[dict[str, Any]], dst_path: Path) -> dict:
     """Stream ZIP generation directly to ``dst_path``. Bounded memory."""
     count = len(rows)
-    logger.info("Prefill batch started (streaming) | count=%d output=zip", count)
+    logger.info("Prefill batch ZIP started | count=%d", count)
     t_batch = time.perf_counter()
 
-    stamped_bytes = _stamp_template_once()
     payloads: list[dict] = []
     filenames: list[str] = []
     for i, row in enumerate(rows, start=1):
-        payloads.append(_build_payload(stamped_bytes, row))
+        payloads.append(_build_fast_payload(row))
         filename = Path(_clean_field(row.get("output_file", "")) or "").name \
             or f"sheet_{i:03d}.png"
         if not filename.lower().endswith(".png"):
@@ -280,7 +354,7 @@ def generate_batch_zip_to_file(rows: list[dict[str, Any]], dst_path: Path) -> di
     with zipfile.ZipFile(
         dst_path, mode="w", compression=zipfile.ZIP_DEFLATED, compresslevel=1
     ) as zf:
-        for idx, png_bytes, err in _iter_pngs_with_fallback(payloads):
+        for idx, png_bytes, err in _iter_pngs_fast(payloads):
             if err or png_bytes is None:
                 errors.append(f"row {idx} ({filenames[idx]}): {err or 'empty result'}")
                 continue
@@ -294,7 +368,7 @@ def generate_batch_zip_to_file(rows: list[dict[str, Any]], dst_path: Path) -> di
     size_bytes = dst_path.stat().st_size if dst_path.exists() else 0
     rate = (successes / elapsed) * 60 if elapsed > 0 else 0
     logger.info(
-        "Prefill batch complete | count=%d | ok=%d | err=%d | elapsed=%.1fs | "
+        "Prefill batch ZIP complete | count=%d | ok=%d | err=%d | elapsed=%.1fs | "
         "rate=%.0f/min | size_mb=%.1f",
         count, successes, len(errors), elapsed, rate, size_bytes / (1024 * 1024),
     )

@@ -59,6 +59,17 @@ async function postFormAndDownload(url, formData, submitBtn, errorEl) {
             showError(errorEl, detail);
             return;
         }
+        const contentType = res.headers.get('Content-Type') || '';
+        if (contentType.includes('application/json')) {
+            // Two-step download: server returns {download_url} to avoid buffering
+            // the entire file in the browser before saving.
+            const body = await res.json();
+            if (body.download_url) {
+                window.location.href = body.download_url;
+                return;
+            }
+        }
+        // Fallback: single-sheet responses are small enough to blob-download
         const disposition = res.headers.get('Content-Disposition') || '';
         const match = disposition.match(/filename="([^"]+)"/);
         const filename = match ? match[1] : 'download';
