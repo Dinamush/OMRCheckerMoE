@@ -89,6 +89,22 @@ TEMPLATE_SCHEMA = {
                                     "type": "object",
                                     "additionalProperties": False,
                                     "properties": {
+                                        "type": {
+                                            "type": "string",
+                                            "enum": ["template_matching", "aruco"],
+                                            "description": "Marker detection mode. 'template_matching' (default) uses the classic multi-scale template matching against a marker image. 'aruco' detects unique ArUco fiducial markers at each corner, which automatically resolves sheet orientation.",
+                                        },
+                                        "arucoDictionary": {
+                                            "type": "string",
+                                            "description": "ArUco dictionary name (e.g. 'DICT_4X4_50'). Only used when type='aruco'.",
+                                        },
+                                        "arucoCornerIds": {
+                                            "type": "array",
+                                            "minItems": 4,
+                                            "maxItems": 4,
+                                            "items": {"type": "integer"},
+                                            "description": "ArUco marker IDs for [top-left, top-right, bottom-left, bottom-right] corners. Only used when type='aruco'. Defaults to [0, 1, 2, 3].",
+                                        },
                                         "apply_erode_subtract": {"type": "boolean"},
                                         "marker_rescale_range": two_positive_numbers,
                                         "marker_rescale_steps": {"type": "number"},
@@ -129,7 +145,14 @@ TEMPLATE_SCHEMA = {
                                             "description": "Expected marker centres on the processing canvas in [[x, y], ...] order (top-left, top-right, bottom-left, bottom-right). Required when preserveFullImage is true.",
                                         },
                                     },
-                                    "required": ["relativePath"],
+                                    "if": {
+                                        "properties": {
+                                            "type": {"const": "template_matching"}
+                                        }
+                                    },
+                                    "then": {
+                                        "required": ["relativePath"]
+                                    },
                                 }
                             }
                         },

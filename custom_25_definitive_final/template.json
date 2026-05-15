@@ -99,61 +99,15 @@
     {
       "name": "CropOnMarkers",
       "options": {
-        "relativePath": "omr_marker.jpg",
-        "sheetToMarkerWidthRatio": 28,
-        "min_matching_threshold": 0.5,
-        "max_matching_variation": 0.5,
-        "marker_rescale_range": [
-          90,
-          110
-        ],
-        "marker_rescale_steps": 5,
-        "markerCorners": [
-          [
-            0,
-            40,
-            0,
-            40
-          ],
-          [
-            0,
-            40,
-            626,
-            666
-          ],
-          [
-            475,
-            515,
-            0,
-            40
-          ],
-          [
-            475,
-            515,
-            626,
-            666
-          ]
-        ],
-        "markerSearchPadding": 20,
-        "fallbackToExpandedMarkerCorners": true,
+        "type": "aruco",
+        "arucoDictionary": "DICT_4X4_50",
+        "arucoCornerIds": [0, 1, 2, 3],
         "preserveFullImage": true,
         "referenceMarkerCenters": [
-          [
-            13.5,
-            13.2
-          ],
-          [
-            651.5,
-            13.2
-          ],
-          [
-            13.5,
-            499.0
-          ],
-          [
-            651.5,
-            499.0
-          ]
+          [13.5, 13.2],
+          [651.5, 13.2],
+          [13.5, 499.0],
+          [651.5, 499.0]
         ]
       }
     }
