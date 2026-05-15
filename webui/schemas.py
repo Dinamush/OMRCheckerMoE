@@ -133,6 +133,10 @@ class BatchStatusResponse(BaseModel):
     latest_dynamic_dimensions: DynamicDimensions | None = None
     cancel_requested: bool = False
     preprocess_failures: list[str] = Field(default_factory=list)
+    # Live timing fields (populated while status == "running")
+    elapsed_s: float | None = None
+    rate_per_min: float | None = None
+    eta_s: float | None = None
 
 
 class ResultsRow(BaseModel):

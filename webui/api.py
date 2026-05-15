@@ -49,6 +49,25 @@ router = APIRouter(prefix="/api/v1", tags=["omr"])
 
 
 # ---------------------------------------------------------------------------
+# System info
+# ---------------------------------------------------------------------------
+
+
+@router.get("/system/info")
+async def system_info() -> dict:
+    """Return static system capabilities: GPU status and default worker count."""
+    import os
+    from src.utils.gpu import gpu_status, is_gpu_available
+    from webui.services.omr import _default_max_workers
+    return {
+        "gpu_available": is_gpu_available(),
+        "gpu_status": gpu_status(),
+        "cpu_count": os.cpu_count(),
+        "default_max_workers": _default_max_workers(),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Presets
 # ---------------------------------------------------------------------------
 
@@ -418,20 +437,41 @@ async def restart_batch(
 async def batch_status(
     batch_id: str, settings: Settings = Depends(get_settings)
 ) -> BatchStatusResponse:
+    import time as _time
     batch = batches_service.get_batch(batch_id, settings)
     metadata = batches_service.get_batch_metadata(batch_id, settings)
+    processed = int(metadata.get("processed_files", 0))
+    total = int(metadata.get("total_files", batch.file_count))
+    elapsed_s: float | None = None
+    rate_per_min: float | None = None
+    eta_s: float | None = None
+    run_started_at = metadata.get("run_started_at")
+    run_elapsed = metadata.get("run_elapsed_s")
+    if batch.status.value == "running" and run_started_at is not None:
+        elapsed_s = round(_time.time() - float(run_started_at), 1)
+    elif run_elapsed is not None:
+        elapsed_s = float(run_elapsed)
+    if elapsed_s and elapsed_s > 0 and processed > 0:
+        rate_per_min = round(processed / elapsed_s * 60, 1)
+        if batch.status.value == "running":
+            remaining = total - processed
+            if rate_per_min > 0:
+                eta_s = round(remaining / (processed / elapsed_s))
     return BatchStatusResponse(
         id=batch.id,
         status=batch.status,
         last_error=batch.last_error,
         file_count=batch.file_count,
         updated_at=batch.updated_at,
-        processed_files=metadata.get("processed_files", 0),
-        total_files=metadata.get("total_files", batch.file_count),
+        processed_files=processed,
+        total_files=total,
         latest_processed_file=metadata.get("latest_processed_file"),
         latest_dynamic_dimensions=metadata.get("latest_dynamic_dimensions"),
         cancel_requested=bool(metadata.get("cancel_requested", False)),
         preprocess_failures=list(metadata.get("preprocess_failures", [])),
+        elapsed_s=elapsed_s,
+        rate_per_min=rate_per_min,
+        eta_s=eta_s,
     )
 
 

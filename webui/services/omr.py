@@ -571,6 +571,7 @@ def run_batch_sync(batch_id: str, settings: Settings | None = None) -> None:
             return
 
         batches_service.update_status(batch_id, BatchStatus.running, settings=settings)
+        run_started_at = time.monotonic()
         batches_service.update_batch_metadata(
             batch_id,
             {
@@ -580,6 +581,7 @@ def run_batch_sync(batch_id: str, settings: Settings | None = None) -> None:
                 "latest_dynamic_dimensions": None,
                 "dynamic_dimensions_by_file": {},
                 "preprocess_failures": [],
+                "run_started_at": time.time(),
             },
             settings,
         )
@@ -710,6 +712,7 @@ def run_batch_sync(batch_id: str, settings: Settings | None = None) -> None:
                             "latest_dynamic_dimensions": latest_dimensions,
                             "dynamic_dimensions_by_file": dynamic_dimensions_by_file,
                             "preprocess_failures": list(preprocess_failures),
+                            "run_elapsed_s": round(time.monotonic() - run_started_at, 1),
                         },
                         settings,
                     )
@@ -771,6 +774,12 @@ def run_batch_sync(batch_id: str, settings: Settings | None = None) -> None:
                 settings,
             )
 
+        batches_service.update_batch_metadata(
+            batch_id,
+            {"run_elapsed_s": round(time.monotonic() - run_started_at, 1)},
+            settings,
+        )
+
         if preprocess_failures and len(preprocess_failures) == len(input_images):
             batches_service.update_status(
                 batch_id,
@@ -801,6 +810,11 @@ def run_batch_sync(batch_id: str, settings: Settings | None = None) -> None:
             )
     except BaseException as exc:
         logger.exception("OMR run failed for batch %s", batch_id)
+        batches_service.update_batch_metadata(
+            batch_id,
+            {"run_elapsed_s": round(time.monotonic() - run_started_at, 1)},
+            settings,
+        )
         batches_service.update_status(
             batch_id,
             BatchStatus.failed,

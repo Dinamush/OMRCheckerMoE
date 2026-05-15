@@ -11,6 +11,7 @@
         </div>
         <div class="status-block">
             <span id="status-pill" class="pill status-{{ batch.status.value }}">{{ batch.status.value }}</span>
+            <span id="gpu-badge" class="gpu-badge"></span>
             {% if batch.last_error %}
                 <p id="last-error" class="error">{{ batch.last_error }}</p>
             {% else %}
@@ -29,6 +30,19 @@
         <button id="stop-btn" class="btn danger" type="button">Stop</button>
         <button id="restart-btn" class="btn" type="button">Restart</button>
         <a id="download-csv" class="btn" href="/api/v1/batches/{{ batch.id }}/results/download">Download CSV</a>
+    </div>
+
+    <div id="run-progress" class="run-progress" hidden>
+        <div class="run-progress-bar-wrap">
+            <div id="run-progress-bar" class="run-progress-bar" style="width:0%"></div>
+        </div>
+        <div class="run-stats">
+            <span id="run-stat-count" class="run-stat">0 / 0</span>
+            <span id="run-stat-elapsed" class="run-stat">0s elapsed</span>
+            <span id="run-stat-rate" class="run-stat">—</span>
+            <span id="run-stat-eta" class="run-stat">—</span>
+            <span id="run-stat-file" class="run-stat muted run-stat-file"></span>
+        </div>
     </div>
 </section>
 

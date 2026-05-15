@@ -345,17 +345,88 @@ const updateStatus = (status, lastError, preprocessFailures = []) => {
     if (restartBtn) {
         restartBtn.disabled = status === "queued" || status === "running"
     }
+
+    // Show/hide progress panel
+    const progressEl = document.getElementById("run-progress")
+    if (progressEl) {
+        const showPanel = status === "running" || status === "queued" || status === "done" || status === "failed" || status === "cancelled"
+        progressEl.hidden = !showPanel
+    }
+}
+
+const _fmtSeconds = (s) => {
+    if (s == null) return "—"
+    if (s < 60) return `${Math.round(s)}s`
+    const m = Math.floor(s / 60), sec = Math.round(s % 60)
+    return sec > 0 ? `${m}m ${sec}s` : `${m}m`
+}
+
+// One-time fetch of system GPU/worker info, shown permanently in the status block
+let _systemInfoLoaded = false
+const _loadSystemInfo = async () => {
+    if (_systemInfoLoaded) return
+    _systemInfoLoaded = true
+    try {
+        const info = await fetch("/api/v1/system/info").then(r => r.json())
+        const gpuEl = document.getElementById("gpu-badge")
+        if (gpuEl) {
+            if (info.gpu_available) {
+                gpuEl.textContent = "\u26a1 GPU active"
+                gpuEl.classList.add("gpu-active")
+            } else {
+                gpuEl.textContent = "CPU only"
+                gpuEl.title = info.gpu_status
+                gpuEl.classList.add("gpu-inactive")
+            }
+        }
+    } catch (_) { /* system/info unavailable — skip silently */ }
+}
+
+const updateProgress = (data) => {
+    const processed = data.processed_files ?? 0
+    const total = data.total_files ?? 0
+    const pct = total > 0 ? Math.round(processed / total * 100) : 0
+    const isDone = data.status === "done" || data.status === "failed" || data.status === "cancelled"
+
+    const bar = document.getElementById("run-progress-bar")
+    if (bar) {
+        bar.style.width = `${isDone ? 100 : pct}%`
+        bar.classList.toggle("run-progress-bar--done", isDone)
+    }
+
+    const countEl = document.getElementById("run-stat-count")
+    if (countEl) countEl.textContent = `${processed} / ${total} (${isDone ? 100 : pct}%)`
+
+    const elapsedEl = document.getElementById("run-stat-elapsed")
+    if (elapsedEl) elapsedEl.textContent = data.elapsed_s != null ? `${_fmtSeconds(data.elapsed_s)} elapsed` : ""
+
+    const rateEl = document.getElementById("run-stat-rate")
+    if (rateEl) rateEl.textContent = data.rate_per_min != null ? `${data.rate_per_min}/min` : (isDone ? "" : "—")
+
+    const etaEl = document.getElementById("run-stat-eta")
+    if (etaEl) {
+        if (isDone) {
+            etaEl.textContent = data.status === "done" ? "\u2713 Completed" : (data.status === "cancelled" ? "Cancelled" : "Failed")
+        } else {
+            etaEl.textContent = data.eta_s != null ? `ETA ${_fmtSeconds(data.eta_s)}` : (processed > 0 ? "calculating\u2026" : "")
+        }
+    }
+
+    const fileEl = document.getElementById("run-stat-file")
+    if (fileEl) fileEl.textContent = (!isDone && data.latest_processed_file) ? `last: ${data.latest_processed_file}` : ""
 }
 
 const pollStatus = async () => {
     try {
         const data = await jsonFetch(apiUrl("/status"))
         updateStatus(data.status, data.last_error, data.preprocess_failures)
-        if (data.status === "queued" || data.status === "running") {
+        if (data.status === "running") {
+            updateProgress(data)
+            setTimeout(pollStatus, 1500)
+        } else if (data.status === "queued") {
             setTimeout(pollStatus, 2000)
-        } else if (data.status === "done") {
-            await refreshResults()
-        } else if (data.status === "cancelled") {
+        } else if (data.status === "done" || data.status === "cancelled" || data.status === "failed") {
+            updateProgress(data)
             await refreshResults()
         }
     } catch (error) {
@@ -1739,6 +1810,10 @@ document.addEventListener("DOMContentLoaded", () => {
         const current = initialStatus.textContent.trim()
         if (current === "queued" || current === "running") {
             setTimeout(pollStatus, 1000)
+        } else if (current === "done" || current === "failed" || current === "cancelled") {
+            // Populate progress strip with stored final stats
+            setTimeout(pollStatus, 0)
         }
     }
+    _loadSystemInfo()
 })
