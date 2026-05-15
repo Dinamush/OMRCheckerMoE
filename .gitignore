@@ -44,3 +44,17 @@ samples/**/outputs/
 
 # Python bytecode (complements __pycache__ rule above)
 **/*.pyc
+
+# --- Stress test & log artifacts ---
+
+# OMR stress test scratch directory (per-variant image dirs + output dirs)
+omr_stress_artifacts/
+
+# Test run log files at repo root
+*.log
+
+# Stray OMR results CSVs dropped at repo root during ad-hoc runs
+*_Results_*.csv
+
+# Generated workflow diagram PNG (source of truth is the .excalidraw file)
+NERS_OMR_Workflow.png

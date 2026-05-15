@@ -222,6 +222,31 @@ def process_files(
 
         in_omr = cv2.imread(str(file_path), cv2.IMREAD_GRAYSCALE)
 
+        if in_omr is None:
+            logger.error(
+                f"({files_counter}) Could not read image: '{file_path}'"
+                " — file is corrupt, empty, or not a valid image format"
+            )
+            new_file_path = outputs_namespace.paths.errors_dir.joinpath(file_name)
+            outputs_namespace.OUTPUT_SET.append(
+                [file_name] + outputs_namespace.empty_resp
+            )
+            if check_and_move(ERROR_CODES.NO_MARKER_ERR, file_path, new_file_path):
+                err_line = [
+                    file_name,
+                    serialize_path(file_path),
+                    serialize_path(new_file_path),
+                    "NA",
+                ] + outputs_namespace.empty_resp
+                pd.DataFrame(err_line, dtype=str).T.to_csv(
+                    outputs_namespace.files_obj["Errors"],
+                    mode="a",
+                    quoting=QUOTE_NONNUMERIC,
+                    header=False,
+                    index=False,
+                )
+            continue
+
         logger.info("")
         logger.info(
             f"({files_counter}) Opening image: \t'{file_path}'\tResolution: {in_omr.shape}"
@@ -236,7 +261,7 @@ def process_files(
         )
 
         if in_omr is None:
-            # Error OMR case
+            # Error OMR case (markers not found or preprocessor failure)
             new_file_path = outputs_namespace.paths.errors_dir.joinpath(file_name)
             outputs_namespace.OUTPUT_SET.append(
                 [file_name] + outputs_namespace.empty_resp

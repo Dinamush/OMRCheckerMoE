@@ -1,18 +1,37 @@
 from dataclasses import dataclass
 
 import cv2
-from screeninfo import get_monitors
 
 from src.logger import logger
 from src.utils.image import ImageUtils
 
-monitor_window = get_monitors()[0]
+# Headless-safe monitor probe. screeninfo raises in environments without a
+# display server (Docker, CI, SSH without X forwarding), so swallow any
+# failure and fall back to a sane virtual desktop size. Display features
+# (cv2.imshow / cv2.moveWindow) are no-ops in headless mode anyway.
+try:
+    from screeninfo import get_monitors
+
+    _monitors = get_monitors()
+    monitor_window = _monitors[0] if _monitors else None
+except Exception as _exc:  # pragma: no cover - environment-dependent
+    logger.warning(
+        f"screeninfo unavailable ({_exc!r}); falling back to virtual 1920x1080 desktop"
+    )
+    monitor_window = None
+
+if monitor_window is not None:
+    _DEFAULT_WINDOW_WIDTH = monitor_window.width
+    _DEFAULT_WINDOW_HEIGHT = monitor_window.height
+else:
+    _DEFAULT_WINDOW_WIDTH = 1920
+    _DEFAULT_WINDOW_HEIGHT = 1080
 
 
 @dataclass
 class ImageMetrics:
     # TODO: Move TEXT_SIZE, etc here and find a better class name
-    window_width, window_height = monitor_window.width, monitor_window.height
+    window_width, window_height = _DEFAULT_WINDOW_WIDTH, _DEFAULT_WINDOW_HEIGHT
     # for positioning image windows
     window_x, window_y = 0, 0
     reset_pos = [0, 0]
