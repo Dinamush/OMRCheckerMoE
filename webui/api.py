@@ -6,11 +6,15 @@ and any third-party API consumer go through identical codepaths.
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from pathlib import Path
 from typing import Any
 
 import csv
 import io
+import os
+import tempfile
 
 from fastapi import (
     APIRouter,
@@ -46,6 +50,27 @@ from webui.services.batches import BatchNotFound, InvalidBatchRequest
 from webui.settings import Settings, get_settings
 
 router = APIRouter(prefix="/api/v1", tags=["omr"])
+
+# ---------------------------------------------------------------------------
+# Prefill backpressure: cap concurrent batch jobs server-side. A 5k-row PDF
+# crashed the server in stress testing because each concurrent batch spawns
+# its own pool of (cpu_count - 1) workers — N concurrent batches × W workers
+# easily exceeds RAM. The semaphore enforces "at most this many heavy
+# prefill batches at once" and excess requests get a fast HTTP 429.
+_PREFILL_BATCH_LIMIT = max(1, int(os.environ.get("OMR_WEBUI_PREFILL_CONCURRENCY", "2")))
+_PREFILL_BATCH_SEM = threading.BoundedSemaphore(_PREFILL_BATCH_LIMIT)
+
+# Single-sheet endpoint also forks a process pool for PNG/PDF rendering, so
+# uncapped concurrency (e.g. 50 simultaneous requests) can wedge the host.
+# Allow a higher limit than batches but still bounded.
+_PREFILL_SINGLE_LIMIT = max(2, int(os.environ.get("OMR_WEBUI_PREFILL_SINGLE_CONCURRENCY", "8")))
+_PREFILL_SINGLE_SEM = threading.BoundedSemaphore(_PREFILL_SINGLE_LIMIT)
+
+# Hard caps on prefill batch sizes. PDF assembly is heavier than ZIP because
+# each page incurs PyMuPDF parsing overhead; ZIP just stores PNG bytes verbatim.
+_PREFILL_PDF_MAX_ROWS = int(os.environ.get("OMR_WEBUI_PREFILL_PDF_MAX_ROWS", "5000"))
+_PREFILL_ZIP_MAX_ROWS = int(os.environ.get("OMR_WEBUI_PREFILL_ZIP_MAX_ROWS", "10000"))
+_PREFILL_CSV_MAX_BYTES = int(os.environ.get("OMR_WEBUI_PREFILL_CSV_MAX_BYTES", str(50 * 1024 * 1024)))
 
 
 # ---------------------------------------------------------------------------
@@ -554,21 +579,49 @@ async def prefill_single(
     output_format: str = Form("png"),
 ) -> StreamingResponse:
     """Generate a single pre-filled answer sheet and stream it as a download."""
+    output_format = (output_format or "").strip().lower()
+    if output_format not in {"png", "pdf"}:
+        raise HTTPException(
+            status_code=422,
+            detail="output_format must be 'png' or 'pdf'.",
+        )
+    # Backpressure: bounded concurrency so a flood of requests cannot exhaust
+    # the threadpool / RAM. Excess requests get a fast 429 with Retry-After.
+    if not _PREFILL_SINGLE_SEM.acquire(blocking=False):
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Server busy: max {_PREFILL_SINGLE_LIMIT} concurrent single "
+                "prefill requests in flight. Please retry shortly."
+            ),
+            headers={"Retry-After": "2"},
+        )
     try:
+        # Offload CPU-heavy rendering off the event loop so a flood of
+        # /prefill/single requests cannot block other endpoints (e.g. health).
         if output_format == "pdf":
-            data = prefill_service.generate_single_pdf(
-                student_name, school_name, exam_name, candidate_number
+            data = await asyncio.to_thread(
+                prefill_service.generate_single_pdf,
+                student_name, school_name, exam_name, candidate_number,
             )
             media_type = "application/pdf"
             filename = "prefilled_sheet.pdf"
         else:
-            data = prefill_service.generate_single_png(
-                student_name, school_name, exam_name, candidate_number
+            data = await asyncio.to_thread(
+                prefill_service.generate_single_png,
+                student_name, school_name, exam_name, candidate_number,
             )
             media_type = "image/png"
             filename = "prefilled_sheet.png"
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:  # noqa: BLE001 - never leak stack traces
+        raise HTTPException(
+            status_code=500,
+            detail=f"Single prefill failed: {type(exc).__name__}: {exc}",
+        )
+    finally:
+        _PREFILL_SINGLE_SEM.release()
 
     return StreamingResponse(
         io.BytesIO(data),
@@ -579,38 +632,80 @@ async def prefill_single(
 
 @router.post("/prefill/batch")
 async def prefill_batch(
+    background_tasks: BackgroundTasks,
     csv_text: str | None = Form(default=None),
     csv_file: UploadFile | None = File(default=None),
     output_mode: str = Form("pdf"),
-) -> StreamingResponse:
-    """Generate pre-filled answer sheets for multiple students and stream as PDF or ZIP."""
+) -> FileResponse:
+    """Generate pre-filled answer sheets for multiple students.
+
+    Streams generation directly to a server-side temp file (bounded memory) and
+    returns it as a download. Backpressures concurrent heavy jobs via a
+    semaphore (HTTP 429 when saturated).
+    """
+    # 1) Validate output_mode early — reject unknown values explicitly.
+    output_mode = (output_mode or "").strip().lower()
+    if output_mode not in {"pdf", "zip"}:
+        raise HTTPException(
+            status_code=422,
+            detail="output_mode must be 'pdf' or 'zip'.",
+        )
+
     if not csv_text and (csv_file is None or not csv_file.filename):
         raise HTTPException(
             status_code=422,
             detail="Provide either csv_text or a csv_file.",
         )
 
-    _CSV_MAX =50 * 1024 * 1024  # 10 MiB — covers ~100 000 student rows
-
+    # 2) Bound the CSV body size BEFORE materialising it. For uploads we read
+    # in chunks so a hostile client can't blow up RAM by sending a multi-GB file.
+    max_bytes = _PREFILL_CSV_MAX_BYTES
     if csv_text and csv_text.strip():
-        raw = csv_text.strip()
-        if len(raw.encode()) > _CSV_MAX:
-            raise HTTPException(status_code=413, detail="CSV text exceeds 1 MiB limit.")
+        encoded = csv_text.strip().encode("utf-8")
+        if len(encoded) > max_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=f"CSV text exceeds the {max_bytes // (1024*1024)} MiB limit.",
+            )
+        raw = encoded.decode("utf-8-sig")
     else:
-        file_bytes = await csv_file.read()
-        if len(file_bytes) > _CSV_MAX:
-            raise HTTPException(status_code=413, detail=f"File {csv_file.filename!r} exceeds 1 MiB limit.")
-        raw = file_bytes.decode("utf-8-sig")
+        # csv_text was empty/blank, so csv_file must be present (validated above).
+        assert csv_file is not None
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = await csv_file.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"File {csv_file.filename!r} exceeds the "
+                           f"{max_bytes // (1024*1024)} MiB limit.",
+                )
+            chunks.append(chunk)
+        try:
+            raw = b"".join(chunks).decode("utf-8-sig")
+        except UnicodeDecodeError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"CSV must be UTF-8 encoded: {exc}",
+            )
 
+    # 3) Parse CSV defensively. csv.DictReader raises for some malformed inputs.
     try:
         reader = csv.DictReader(io.StringIO(raw))
-        rows = [row for row in reader]
-    except Exception as exc:
+        rows = [row for row in reader if row]
+    except csv.Error as exc:
+        raise HTTPException(status_code=422, detail=f"Failed to parse CSV: {exc}")
+    except Exception as exc:  # noqa: BLE001 - normalise to 422
         raise HTTPException(status_code=422, detail=f"Failed to parse CSV: {exc}")
 
     if not rows:
         raise HTTPException(status_code=422, detail="CSV contains no data rows.")
 
+    # 4) Required column check happens once on the first row.
     required_cols = {"student_name", "school_name", "exam_name", "candidate_number"}
     missing_cols = required_cols - set(rows[0].keys())
     if missing_cols:
@@ -619,20 +714,91 @@ async def prefill_batch(
             detail=f"CSV is missing required columns: {', '.join(sorted(missing_cols))}",
         )
 
-    try:
-        if output_mode == "zip":
-            data = prefill_service.generate_batch_zip(rows)
-            media_type = "application/zip"
-            filename = "prefilled_sheets.zip"
-        else:
-            data = prefill_service.generate_batch_pdf(rows)
-            media_type = "application/pdf"
-            filename = "prefilled_sheets.pdf"
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
+    # 5) Row-count cap so a runaway batch can't dominate the server.
+    row_cap = _PREFILL_PDF_MAX_ROWS if output_mode == "pdf" else _PREFILL_ZIP_MAX_ROWS
+    if len(rows) > row_cap:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"CSV has {len(rows)} rows but the per-batch limit for "
+                f"{output_mode.upper()} output is {row_cap}. Split the file into "
+                "smaller batches or set the OMR_WEBUI_PREFILL_*_MAX_ROWS env var."
+            ),
+        )
 
-    return StreamingResponse(
-        io.BytesIO(data),
+    # 6) Backpressure heavy jobs server-wide.
+    if not _PREFILL_BATCH_SEM.acquire(blocking=False):
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Server is already running {_PREFILL_BATCH_LIMIT} prefill batch "
+                "job(s). Try again shortly."
+            ),
+            headers={"Retry-After": "10"},
+        )
+
+    suffix = ".pdf" if output_mode == "pdf" else ".zip"
+    media_type = "application/pdf" if output_mode == "pdf" else "application/zip"
+    filename = "prefilled_sheets" + suffix
+
+    # 7) Write to a temp file the response will stream from. The file is
+    # deleted after the response finishes via background_tasks.
+    fd, tmp_path_str = tempfile.mkstemp(prefix="prefill_", suffix=suffix)
+    os.close(fd)
+    tmp_path = Path(tmp_path_str)
+
+    def _cleanup() -> None:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        _PREFILL_BATCH_SEM.release()
+
+    try:
+        # Offload to a thread so a long-running batch cannot block the event
+        # loop and stall every other request (incl. health checks).
+        if output_mode == "zip":
+            meta = await asyncio.to_thread(
+                prefill_service.generate_batch_zip_to_file, rows, tmp_path,
+            )
+        else:
+            meta = await asyncio.to_thread(
+                prefill_service.generate_batch_pdf_to_file, rows, tmp_path,
+            )
+    except ValueError as exc:
+        _cleanup()
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:  # noqa: BLE001 - never leak stack traces over HTTP
+        _cleanup()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Prefill batch generation failed: {type(exc).__name__}: {exc}",
+        )
+
+    # If literally every row failed, surface that as a 422 instead of returning
+    # an empty PDF/zip the user has to inspect to discover.
+    if meta["successes"] == 0:
+        _cleanup()
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "All rows failed to generate.",
+                "errors": meta["errors"],
+            },
+        )
+
+    background_tasks.add_task(_cleanup)
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "X-Prefill-Count": str(meta["count"]),
+        "X-Prefill-Successes": str(meta["successes"]),
+        "X-Prefill-Errors": str(len(meta["errors"])),
+        "X-Prefill-Elapsed-Seconds": str(meta["elapsed_s"]),
+    }
+    return FileResponse(
+        path=str(tmp_path),
         media_type=media_type,
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        filename=filename,
+        headers=headers,
+        background=background_tasks,
     )
