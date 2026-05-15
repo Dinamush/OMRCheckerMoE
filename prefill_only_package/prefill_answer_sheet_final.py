@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+import io
+import logging
 import os
 from pathlib import Path
 from typing import Iterable
@@ -35,7 +37,15 @@ CFG = {
 }
 
 
+_font_cache: dict = {}
+
+logger = logging.getLogger(__name__)
+
+
 def load_font(size: int, bold: bool = False):
+    key = (size, bold)
+    if key in _font_cache:
+        return _font_cache[key]
     paths = [
         '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf' if bold else '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
         '/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf' if bold else '/usr/share/fonts/dejavu/DejaVuSans.ttf',
@@ -44,10 +54,14 @@ def load_font(size: int, bold: bool = False):
     for p in paths:
         if os.path.exists(p):
             try:
-                return ImageFont.truetype(p, size)
+                font = ImageFont.truetype(p, size)
+                _font_cache[key] = font
+                return font
             except Exception:
                 pass
-    return ImageFont.load_default()
+    font = ImageFont.load_default()
+    _font_cache[key] = font
+    return font
 
 
 def wrap_and_draw(draw: ImageDraw.ImageDraw, text: str, box: tuple[int, int, int, int], start_size: int) -> None:
@@ -146,22 +160,31 @@ def draw_aruco_corners(img: Image.Image) -> Image.Image:
     return Image.fromarray(img_cv[:, :, ::-1])
 
 
-def prefill_sheet(template_path: Path, student_name: str, school_name: str, exam_name: str, candidate_number: str) -> Image.Image:
-    if len(candidate_number) != 10 or not candidate_number.isdigit():
-        raise ValueError('Candidate number must be exactly 10 digits.')
+def load_stamped_template(template_path: Path) -> Image.Image:
+    """Open the template and stamp ArUco corners once.
 
+    Call this once before a batch loop and pass copies of the result to
+    individual sheet workers instead of re-stamping on every sheet.
+    """
     img = Image.open(template_path).convert('RGB')
-    # Stamp ArUco corner markers (erases any pre-printed square markers first).
-    img = draw_aruco_corners(img)
+    return draw_aruco_corners(img)
+
+
+def _draw_sheet_content(
+    img: Image.Image,
+    student_name: str,
+    school_name: str,
+    exam_name: str,
+    candidate_number: str,
+) -> Image.Image:
+    """Draw text fields and candidate bubbles onto *img* (already ArUco-stamped)."""
     draw = ImageDraw.Draw(img)
     w, h = img.size
 
-    # Fill top fields
     wrap_and_draw(draw, student_name, relative_box(CFG['student_name_box'], w, h), CFG['student_start_size'])
     wrap_and_draw(draw, school_name, relative_box(CFG['school_name_box'], w, h), CFG['school_start_size'])
     wrap_and_draw(draw, exam_name, relative_box(CFG['exam_name_box'], w, h), CFG['exam_start_size'])
 
-    # Candidate number grid
     gx1, gy1, gx2, gy2 = relative_box(CFG['candidate_grid'], w, h)
     grid_w = gx2 - gx1
     col_centers = [round(gx1 + (i + 0.5) * grid_w / 10) for i in range(10)]
@@ -186,12 +209,93 @@ def prefill_sheet(template_path: Path, student_name: str, school_name: str, exam
     return img
 
 
+def _prefill_worker(payload: dict) -> bytes:
+    """ProcessPoolExecutor worker: render one sheet from pre-stamped template bytes.
+
+    Expected payload keys: stamped_bytes, student_name, school_name, exam_name,
+    candidate_number.  Returns PNG bytes with fast (level-1) compression.
+    """
+    img = Image.open(io.BytesIO(payload['stamped_bytes'])).convert('RGB')
+    img = _draw_sheet_content(
+        img,
+        payload['student_name'],
+        payload['school_name'],
+        payload['exam_name'],
+        payload['candidate_number'],
+    )
+    buf = io.BytesIO()
+    img.save(buf, format='PNG', compress_level=1)
+    return buf.getvalue()
+
+
+def prefill_sheet(template_path: Path, student_name: str, school_name: str, exam_name: str, candidate_number: str) -> Image.Image:
+    logger.debug("prefill_sheet | candidate=%s", candidate_number)
+    if len(candidate_number) != 10 or not candidate_number.isdigit():
+        raise ValueError('Candidate number must be exactly 10 digits.')
+    img = Image.open(template_path).convert('RGB')
+    img = draw_aruco_corners(img)
+    return _draw_sheet_content(img, student_name, school_name, exam_name, candidate_number)
+
+
 def save_pdf(images: Iterable[Image.Image], output_path: Path) -> None:
     imgs = [im.convert('RGB') for im in images]
     if not imgs:
         raise ValueError('No images to save.')
     output_path.parent.mkdir(parents=True, exist_ok=True)
     imgs[0].save(output_path, format='PDF', save_all=True, append_images=imgs[1:], resolution=300.0)
+
+
+def save_pdf_fast(png_bytes_list: list, output_path: Path, chunk_size: int = 500) -> None:
+    """Assemble a list of PNG byte strings into a PDF using PyMuPDF.
+
+    Uses insert_image() to embed PNGs directly (no re-encoding) and saves
+    without deflate re-compression (PNG data is already zlib-compressed).
+    Processes pages in chunks to keep peak RAM bounded.
+    """
+    import fitz  # PyMuPDF
+    import struct
+    import tempfile
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _png_dims(data: bytes) -> tuple[int, int]:
+        """Read width/height from PNG IHDR chunk (bytes 16-23) without decoding."""
+        return struct.unpack('>II', data[16:24])
+
+    def _build_chunk_doc(chunk: list) -> 'fitz.Document':
+        doc = fitz.open()
+        for data in chunk:
+            w, h = _png_dims(data)
+            page = doc.new_page(width=w, height=h)
+            page.insert_image(page.rect, stream=data)
+        return doc
+
+    if len(png_bytes_list) <= chunk_size:
+        doc = _build_chunk_doc(png_bytes_list)
+        doc.save(str(output_path), garbage=0)
+        doc.close()
+        return
+
+    # Large page count — write chunks to temp files then merge.
+    with tempfile.TemporaryDirectory() as tmpdir:
+        chunk_paths: list[str] = []
+        for chunk_start in range(0, len(png_bytes_list), chunk_size):
+            chunk = png_bytes_list[chunk_start:chunk_start + chunk_size]
+            chunk_path = str(Path(tmpdir) / f'chunk_{chunk_start:06d}.pdf')
+            chunk_doc = _build_chunk_doc(chunk)
+            chunk_doc.save(chunk_path, garbage=0)
+            chunk_doc.close()
+            chunk_paths.append(chunk_path)
+            print(f'  PDF chunk {chunk_start + len(chunk)}/{len(png_bytes_list)} assembled')
+
+        # Merge all chunk PDFs into the final file.
+        final_doc = fitz.open()
+        for chunk_path in chunk_paths:
+            src = fitz.open(chunk_path)
+            final_doc.insert_pdf(src)
+            src.close()
+        final_doc.save(str(output_path), garbage=0)
+        final_doc.close()
 
 
 def parse_args() -> argparse.Namespace:
@@ -212,30 +316,67 @@ def main() -> None:
     args = parse_args()
 
     if args.csv:
+        import time
+        from concurrent.futures import ProcessPoolExecutor
+
         rows = list(csv.DictReader(args.csv.open('r', newline='', encoding='utf-8-sig')))
-        images = []
         if args.output_dir:
             args.output_dir.mkdir(parents=True, exist_ok=True)
-        for i, row in enumerate(rows, start=1):
-            image = prefill_sheet(
-                args.template,
-                row['student_name'].strip(),
-                row['school_name'].strip(),
-                row['exam_name'].strip(),
-                str(row['candidate_number']).strip(),
-            )
-            images.append(image)
-            if args.output_dir:
-                filename = (row.get('output_file') or f'sheet_{i:03d}.png').strip()
-                image.save(args.output_dir / filename)
+
+        logger.info("Prefill batch starting | count=%d template=%s", len(rows), args.template)
+        # Pre-stamp template ONCE — ArUco stamping is the biggest per-sheet cost.
+        t_stamp = time.perf_counter()
+        stamped_img = load_stamped_template(args.template)
+        stamped_buf = io.BytesIO()
+        stamped_img.save(stamped_buf, format='PNG', compress_level=1)
+        stamped_bytes = stamped_buf.getvalue()
+        logger.info("Template ArUco-stamped | elapsed=%.1fs", time.perf_counter() - t_stamp)
+
+        payloads = [
+            {
+                'stamped_bytes': stamped_bytes,
+                'student_name': row['student_name'].strip(),
+                'school_name': row['school_name'].strip(),
+                'exam_name': row['exam_name'].strip(),
+                'candidate_number': str(row['candidate_number']).strip(),
+            }
+            for row in rows
+        ]
+
+        max_workers = max(1, min((os.cpu_count() or 2) - 1, 8))
+        print(f'Generating {len(rows)} sheets with {max_workers} workers...')
+        t0 = time.perf_counter()
+
+        png_bytes_list: list[bytes] = []
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            for i, png_bytes in enumerate(
+                executor.map(_prefill_worker, payloads, chunksize=20), start=1
+            ):
+                png_bytes_list.append(png_bytes)
+                if i % 100 == 0:
+                    elapsed = time.perf_counter() - t0
+                    rate = (i / elapsed) * 60 if elapsed > 0 else 0
+                    print(f'  {i}/{len(rows)} done ({elapsed:.1f}s, {i / elapsed:.1f} sheets/s)')
+                    logger.info("Prefill progress | %d/%d sheets done | elapsed=%.1fs | rate=%.0f sheets/min", i, len(rows), elapsed, rate)
+
+        elapsed = time.perf_counter() - t0
+        rate = (len(rows) / elapsed) * 60 if elapsed > 0 else 0
+        print(f'Generated {len(rows)} sheets in {elapsed:.1f}s ({len(rows) / elapsed:.1f} sheets/s)')
+        logger.info("Prefill batch complete | count=%d | elapsed=%.1fs | rate=%.0f sheets/min | output=%s", len(rows), elapsed, rate, args.combined_pdf or args.output or args.output_dir)
+
+        if args.output_dir:
+            for i, (row, png_bytes) in enumerate(zip(rows, png_bytes_list), start=0):
+                filename = (row.get('output_file') or f'sheet_{i:04d}.png').strip()
+                (args.output_dir / filename).write_bytes(png_bytes)
+
         if args.combined_pdf:
-            save_pdf(images, args.combined_pdf)
+            save_pdf_fast(png_bytes_list, args.combined_pdf)
             print(f'Created {args.combined_pdf}')
         elif args.output:
-            save_pdf(images, args.output)
+            save_pdf_fast(png_bytes_list, args.output)
             print(f'Created {args.output}')
-        else:
-            raise SystemExit('For batch mode, provide --combined-pdf or --output.')
+        elif not args.output_dir:
+            raise SystemExit('For batch mode, provide --combined-pdf, --output, or --output-dir.')
         return
 
     required = [args.student_name, args.school_name, args.exam_name, args.candidate_number, args.output]

@@ -319,14 +319,29 @@ def _prepare_runtime_base(batch_root: Path) -> Path:
     return base_root
 
 
-def _rotate_image_for_runtime(src: Path, dst: Path, rotation_degrees: int) -> None:
-    if rotation_degrees == 0:
+def _rotate_image_for_runtime(
+    src: Path,
+    dst: Path,
+    rotation_degrees: int,
+    pre_resize_to: tuple[int, int] | None = None,
+) -> None:
+    """Copy *src* into *dst*, applying rotation and optional downscale.
+
+    ``pre_resize_to`` is ``(width, height)`` and is only applied when the
+    operation would make the image *smaller* (never upscales).
+    """
+    if rotation_degrees == 0 and pre_resize_to is None:
         shutil.copy2(src, dst)
         return
 
+    # Build a cache key that encodes both rotation and resize so the cached
+    # file stays valid across different processing-dimension configs.
+    resize_tag = f"_s{pre_resize_to[0]}x{pre_resize_to[1]}" if pre_resize_to else ""
+    rot_tag = f"_rot{rotation_degrees}" if rotation_degrees else ""
+    cache_key = f"{src.stem}{rot_tag}{resize_tag}{src.suffix.lower()}"
+
     rotated_dir = dst.parent.parent / "_rotated"
     rotated_dir.mkdir(parents=True, exist_ok=True)
-    cache_key = f"{src.stem}_rot{rotation_degrees}{src.suffix.lower()}"
     cached = rotated_dir / cache_key
     try:
         if cached.exists() and cached.stat().st_mtime >= src.stat().st_mtime:
@@ -335,23 +350,31 @@ def _rotate_image_for_runtime(src: Path, dst: Path, rotation_degrees: int) -> No
     except OSError:
         pass
 
-    rotate_codes = {
-        90: cv2.ROTATE_90_CLOCKWISE,
-        180: cv2.ROTATE_180,
-        270: cv2.ROTATE_90_COUNTERCLOCKWISE,
-    }
-    rotate_code = rotate_codes.get(rotation_degrees)
-    if rotate_code is None:
-        raise ValueError(f"Unsupported rotation: {rotation_degrees}")
-
     image = cv2.imread(str(src), cv2.IMREAD_UNCHANGED)
     if image is None:
-        raise ValueError(f"Could not read image for rotation: {src.as_posix()}")
-    rotated = cv2.rotate(image, rotate_code)
-    if not cv2.imwrite(str(dst), rotated):
-        raise ValueError(f"Could not write rotated runtime image: {dst.as_posix()}")
+        raise ValueError(f"Could not read image: {src.as_posix()}")
+
+    if rotation_degrees:
+        rotate_codes = {
+            90: cv2.ROTATE_90_CLOCKWISE,
+            180: cv2.ROTATE_180,
+            270: cv2.ROTATE_90_COUNTERCLOCKWISE,
+        }
+        rotate_code = rotate_codes.get(rotation_degrees)
+        if rotate_code is None:
+            raise ValueError(f"Unsupported rotation: {rotation_degrees}")
+        image = cv2.rotate(image, rotate_code)
+
+    if pre_resize_to is not None:
+        proc_w, proc_h = pre_resize_to
+        h, w = image.shape[:2]
+        if w > proc_w or h > proc_h:
+            image = cv2.resize(image, (proc_w, proc_h), interpolation=cv2.INTER_AREA)
+
+    if not cv2.imwrite(str(dst), image):
+        raise ValueError(f"Could not write runtime image: {dst.as_posix()}")
     try:
-        cv2.imwrite(str(cached), rotated)
+        cv2.imwrite(str(cached), image)
     except Exception:
         pass
 
@@ -363,6 +386,7 @@ def _prepare_runtime_dir(
     index: int,
     rotation_degrees: int = 0,
     base_root: Path | None = None,
+    pre_resize_to: tuple[int, int] | None = None,
 ) -> Path:
     """Build an isolated single-image runtime directory for engine execution."""
     runtime_root = batch_root / _RUNTIME_DIR_NAME / f"{index:04d}_{image_path.stem}"
@@ -370,7 +394,12 @@ def _prepare_runtime_dir(
         shutil.rmtree(runtime_root)
     runtime_root.mkdir(parents=True, exist_ok=True)
 
-    _rotate_image_for_runtime(image_path, runtime_root / image_path.name, rotation_degrees)
+    _rotate_image_for_runtime(
+        image_path,
+        runtime_root / image_path.name,
+        rotation_degrees,
+        pre_resize_to=pre_resize_to,
+    )
     if base_root is None:
         base_root = _prepare_runtime_base(batch_root)
     for name in ("template.json", "evaluation.json"):
@@ -394,11 +423,17 @@ def _cleanup_runtime_dir(runtime_dir: Path | None) -> None:
 
 
 def _default_max_workers() -> int:
+    # Allow explicit override via environment variable.
+    env_val = os.environ.get("OMR_WEBUI_MAX_WORKERS")
+    if env_val:
+        try:
+            return max(1, min(32, int(env_val)))
+        except (TypeError, ValueError):
+            pass
     cpu = os.cpu_count() or 2
-    # Leave 1 core free for the main process; cap at 8 to stay memory-safe
-    # on machines that have many cores but limited RAM.
-    # Override via max_workers in config.json (accepts 1-32).
-    return max(1, min(cpu - 1, 8))
+    # Leave 1 core free for the main process; cap at 16 for modern many-core
+    # machines. Override via max_workers in config.json (accepts 1-32).
+    return max(1, min(cpu - 1, 16))
 
 
 def _coerce_max_workers(value: Any) -> int:
@@ -429,6 +464,8 @@ def _process_one_image(payload: dict[str, Any]) -> dict[str, Any]:
     index = int(payload.get("index", 1))
 
     runtime_dir: Path | None = None
+    logger.debug("Worker | index=%d | file=%s", index, image_path.name)
+    t_start = time.perf_counter()
     try:
         if not base_root.exists():
             base_root = _prepare_runtime_base(batch_root)
@@ -436,6 +473,19 @@ def _process_one_image(payload: dict[str, Any]) -> dict[str, Any]:
             image_path, template_payload, rotation_degrees
         )
         runtime_config = _merge_dimensions_into_config(base_config, dynamic_dimensions)
+
+        # Pre-resize: if the source image is meaningfully larger than the
+        # processing dimensions, shrink it before writing to the runtime dir.
+        # The engine will then read a smaller file and its own resize becomes
+        # a near-no-op, saving both I/O and per-pixel work in ArUco/bubble steps.
+        src_w = dynamic_dimensions["source_width"]
+        src_h = dynamic_dimensions["source_height"]
+        proc_w = dynamic_dimensions["processing_width"]
+        proc_h = dynamic_dimensions["processing_height"]
+        pre_resize_to: tuple[int, int] | None = None
+        if src_w > proc_w * 1.1 or src_h > proc_h * 1.1:
+            pre_resize_to = (proc_w, proc_h)
+
         runtime_dir = _prepare_runtime_dir(
             batch_root,
             image_path,
@@ -443,6 +493,7 @@ def _process_one_image(payload: dict[str, Any]) -> dict[str, Any]:
             index,
             rotation_degrees,
             base_root=base_root,
+            pre_resize_to=pre_resize_to,
         )
         worker_outputs_dir = outputs_dir / "_workers" / f"{index:04d}_{image_path.stem}"
         worker_outputs_dir.mkdir(parents=True, exist_ok=True)
@@ -478,6 +529,8 @@ def _process_one_image(payload: dict[str, Any]) -> dict[str, Any]:
         error_image = worker_outputs_dir / "Manual" / "ErrorFiles" / image_path.name
         mm_image = worker_outputs_dir / "Manual" / "MultiMarkedFiles" / image_path.name
 
+        elapsed_ms = (time.perf_counter() - t_start) * 1000
+        logger.debug("Worker done | index=%d | file=%s | elapsed_ms=%.0f | error=%s", index, image_path.name, elapsed_ms, None)
         return {
             "file_name": image_path.name,
             "index": index,
@@ -497,6 +550,8 @@ def _process_one_image(payload: dict[str, Any]) -> dict[str, Any]:
             "error": None,
         }
     except BaseException as exc:
+        elapsed_ms = (time.perf_counter() - t_start) * 1000
+        logger.debug("Worker done | index=%d | file=%s | elapsed_ms=%.0f | error=%s", index, image_path.name, elapsed_ms, f"{type(exc).__name__}: {exc}")
         return {
             "file_name": image_path.name,
             "index": index,
@@ -597,6 +652,7 @@ def run_batch_sync(batch_id: str, settings: Settings | None = None) -> None:
         )
 
         base_root = _prepare_runtime_base(batch_root)
+        logger.info("OMR batch started | batch_id=%s | images=%d | workers=%d", batch_id, len(input_images), max_workers)
 
         dynamic_dimensions_by_file: dict[str, dict[str, int]] = {}
         latest_persisted_config = copy.deepcopy(base_config)
@@ -645,6 +701,7 @@ def run_batch_sync(batch_id: str, settings: Settings | None = None) -> None:
                 futures[executor.submit(_process_one_image, submit_payload(next_index, image))] = image
                 next_index += 1
 
+            last_milestone = 0
             completed = 0
             while futures:
                 done, _ = wait(futures.keys(), return_when=FIRST_COMPLETED)
@@ -652,6 +709,14 @@ def run_batch_sync(batch_id: str, settings: Settings | None = None) -> None:
                     image = futures.pop(future)
                     result = future.result()
                     completed += 1
+                    _total = len(input_images)
+                    _pct = completed * 100 // _total
+                    _milestone = (_pct // 10) * 10
+                    if _milestone > last_milestone and _milestone > 0:
+                        last_milestone = _milestone
+                        _elapsed_s = time.monotonic() - run_started_at
+                        _rate_min = (completed / _elapsed_s * 60) if _elapsed_s > 0 else 0
+                        logger.info("OMR progress | %d/%d | elapsed=%.1fs | rate=%.0f/min | failures=%d", completed, _total, _elapsed_s, _rate_min, len(preprocess_failures))
                     file_name = result.get("file_name") or image.name
                     result_index = int(result.get("index") or 0)
                     dyn = result.get("dynamic_dimensions") or {}
@@ -762,6 +827,10 @@ def run_batch_sync(batch_id: str, settings: Settings | None = None) -> None:
                 writer.writerows(
                     row for _, row in sorted(aggregated_err_rows, key=lambda item: item[0])
                 )
+
+        _elapsed_total = time.monotonic() - run_started_at
+        _rate_total = (completed * 60 / _elapsed_total) if _elapsed_total > 0 else 0
+        logger.info("OMR batch complete | batch_id=%s | total=%d | failures=%d | elapsed=%.1fs | rate=%.0f/min", batch_id, completed, len(preprocess_failures), _elapsed_total, _rate_total)
 
         shutil.rmtree(outputs_dir / "_workers", ignore_errors=True)
 

@@ -15,3 +15,32 @@ webui/storage/
 **/__pycache__
 venv/
 OMRChecker.wiki/
+
+# --- Benchmark & pipeline artifacts ---
+
+# Benchmark output folders (timings JSONs, CSVs, reports, _benchmark_batch runtime)
+benchmark_results*/
+
+# Benchmark scripts (generated/one-off, not part of core src)
+benchmark_*.py
+run_*_benchmark.py
+
+# Throwaway extraction/utility scripts at repo root
+extract_*.py
+
+# Prefill package: generated PDFs, extracted PNG folders, generated test CSVs
+prefill_only_package/outputs/
+prefill_only_package/benchmark_*.csv
+
+# Generated PDFs anywhere inside template/preset folders
+custom_25_definitive_final/*.pdf
+old_custom25_answer_sheet_v1/*.pdf
+
+# OMR processing runtime directories (created during processing)
+**/_runtime/
+
+# Generated OMR results inside sample directories (source files are kept)
+samples/**/outputs/
+
+# Python bytecode (complements __pycache__ rule above)
+**/*.pyc

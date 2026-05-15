@@ -66,6 +66,16 @@ class CropOnMarkers(ImagePreprocessor):
             self.aruco_corner_ids: list[int] = [int(i) for i in raw_ids]
             aruco_dict = cv2.aruco.getPredefinedDictionary(aruco_dict_id)
             params = cv2.aruco.DetectorParameters()
+            # Speed-tuned parameters: smaller adaptive-threshold window range
+            # means fewer passes over the image, and skipping sub-pixel corner
+            # refinement avoids a per-marker iterative solve (not needed for
+            # the homography accuracy we require).
+            params.adaptiveThreshWinSizeMin = 3
+            params.adaptiveThreshWinSizeMax = 15   # default 23
+            params.adaptiveThreshWinSizeStep = 4   # default 10
+            params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_NONE
+            params.minMarkerPerimeterRate = 0.02
+            params.maxMarkerPerimeterRate = 0.5
             self.aruco_detector = cv2.aruco.ArucoDetector(aruco_dict, params)
             # template_matching fields not needed in ArUco mode
             self.marker = None
