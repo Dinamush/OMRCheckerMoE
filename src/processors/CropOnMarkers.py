@@ -22,6 +22,12 @@ from src.utils.image import ImageUtils
 from src.utils.interaction import InteractionUtils
 
 
+# Corner index convention shared by both detection modes:
+#   0 = top-left   1 = top-right
+#   2 = bottom-left  3 = bottom-right
+_CORNER_NAMES = ("top-left", "top-right", "bottom-left", "bottom-right")
+
+
 class CropOnMarkers(ImagePreprocessor):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -30,26 +36,9 @@ class CropOnMarkers(ImagePreprocessor):
         self.threshold_circles = []
         # img_utils = ImageUtils()
 
-        # options with defaults
-        self.marker_path = os.path.join(
-            self.relative_dir, marker_ops.get("relativePath", "omr_marker.jpg")
-        )
-        self.min_matching_threshold = marker_ops.get("min_matching_threshold", 0.3)
-        self.max_matching_variation = marker_ops.get("max_matching_variation", 0.41)
-        self.marker_rescale_range = tuple(
-            int(r) for r in marker_ops.get("marker_rescale_range", (35, 100))
-        )
-        self.marker_rescale_steps = int(marker_ops.get("marker_rescale_steps", 10))
-        self.apply_erode_subtract = marker_ops.get("apply_erode_subtract", True)
-        self.marker_corners = self._parse_marker_corners(
-            marker_ops.get("markerCorners")
-        )
-        self.marker_search_padding = max(
-            0, int(marker_ops.get("markerSearchPadding", 20))
-        )
-        self.fallback_to_expanded_marker_corners = bool(
-            marker_ops.get("fallbackToExpandedMarkerCorners", True)
-        )
+        # Marker detection type: "template_matching" (default) or "aruco"
+        self.marker_type = marker_ops.get("type", "template_matching")
+
         self.preserve_full_image = bool(marker_ops.get("preserveFullImage", False))
         self.reference_marker_centers = self._parse_reference_centers(
             marker_ops.get("referenceMarkerCenters")
@@ -61,7 +50,46 @@ class CropOnMarkers(ImagePreprocessor):
                 "processing canvas, in top-left, top-right, bottom-left, "
                 "bottom-right order."
             )
-        self.marker = self.load_marker(marker_ops, config)
+
+        if self.marker_type == "aruco":
+            dict_name = marker_ops.get("arucoDictionary", "DICT_4X4_50")
+            aruco_dict_id = getattr(cv2.aruco, dict_name, None)
+            if aruco_dict_id is None:
+                raise ValueError(
+                    f"Unknown arucoDictionary {dict_name!r}. "
+                    "Use a name from cv2.aruco, e.g. 'DICT_4X4_50'."
+                )
+            raw_ids = marker_ops.get("arucoCornerIds", [0, 1, 2, 3])
+            if len(raw_ids) != 4:
+                raise ValueError("arucoCornerIds must contain exactly 4 integer IDs.")
+            self.aruco_corner_ids: list[int] = [int(i) for i in raw_ids]
+            aruco_dict = cv2.aruco.getPredefinedDictionary(aruco_dict_id)
+            params = cv2.aruco.DetectorParameters()
+            self.aruco_detector = cv2.aruco.ArucoDetector(aruco_dict, params)
+            # template_matching fields not needed in ArUco mode
+            self.marker = None
+        else:
+            # options with defaults (template_matching mode)
+            self.marker_path = os.path.join(
+                self.relative_dir, marker_ops.get("relativePath", "omr_marker.jpg")
+            )
+            self.min_matching_threshold = marker_ops.get("min_matching_threshold", 0.3)
+            self.max_matching_variation = marker_ops.get("max_matching_variation", 0.41)
+            self.marker_rescale_range = tuple(
+                int(r) for r in marker_ops.get("marker_rescale_range", (35, 100))
+            )
+            self.marker_rescale_steps = int(marker_ops.get("marker_rescale_steps", 10))
+            self.apply_erode_subtract = marker_ops.get("apply_erode_subtract", True)
+            self.marker_corners = self._parse_marker_corners(
+                marker_ops.get("markerCorners")
+            )
+            self.marker_search_padding = max(
+                0, int(marker_ops.get("markerSearchPadding", 20))
+            )
+            self.fallback_to_expanded_marker_corners = bool(
+                marker_ops.get("fallbackToExpandedMarkerCorners", True)
+            )
+            self.marker = self.load_marker(marker_ops, config)
 
     @staticmethod
     def _parse_reference_centers(raw):
@@ -210,12 +238,155 @@ class CropOnMarkers(ImagePreprocessor):
         return best_scale, max(best_corner_scores)
 
     def __str__(self):
+        if self.marker_type == "aruco":
+            return f"CropOnMarkers[aruco ids={self.aruco_corner_ids}]"
         return self.marker_path
 
     def exclude_files(self):
+        if self.marker_type == "aruco":
+            return []
         return [self.marker_path]
 
+    def _apply_aruco_filter(self, image, file_path):
+        """Detect 4 ArUco corner markers, orient them by ID, then warp.
+
+        Each corner has a unique ArUco ID so the canonical orientation is
+        determined from the IDs alone — no rotation ambiguity.
+
+        Corner index → ID mapping comes from ``self.aruco_corner_ids``:
+            index 0 = top-left, 1 = top-right, 2 = bottom-left, 3 = bottom-right
+        """
+        config = self.tuning_config
+
+        # ArUco detector works best on grayscale
+        gray = (
+            cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            if len(image.shape) == 3
+            else image.copy()
+        )
+        # Pad with white before detection so markers near the image border have
+        # a full quiet zone, which the adaptive threshold algorithm requires.
+        _PAD = 60
+        gray_padded = cv2.copyMakeBorder(
+            gray, _PAD, _PAD, _PAD, _PAD, cv2.BORDER_CONSTANT, value=255
+        )
+        corners_raw, ids_raw, _ = self.aruco_detector.detectMarkers(gray_padded)
+        # Shift detected corner coordinates back to unpadded image space.
+        if corners_raw:
+            corners_raw = [c - [[[_PAD, _PAD]]] for c in corners_raw]
+
+        if ids_raw is None or len(ids_raw) == 0:
+            logger.error(
+                file_path,
+                "\nArUco: no markers detected. "
+                "Ensure the sheet has ArUco markers printed at the corners.",
+            )
+            return None
+
+        # Build id → center mapping
+        detected: dict[int, list[float]] = {}
+        for i, marker_id in enumerate(ids_raw.flatten()):
+            # corners_raw[i] has shape (1, 4, 2); mean over the 4 sub-corners
+            center = corners_raw[i][0].mean(axis=0).tolist()
+            detected[int(marker_id)] = center
+
+        # Map expected IDs to canonical corner indices
+        id_to_corner = {
+            id_val: idx for idx, id_val in enumerate(self.aruco_corner_ids)
+        }
+        centres_by_index: list[list[float] | None] = [None, None, None, None]
+        missing_indices: list[int] = []
+        for id_val, corner_idx in id_to_corner.items():
+            if id_val in detected:
+                centres_by_index[corner_idx] = detected[id_val]
+            else:
+                missing_indices.append(corner_idx)
+                logger.warning(
+                    file_path,
+                    f"\nArUco: marker ID {id_val} "
+                    f"({_CORNER_NAMES[corner_idx]}) not detected.",
+                )
+
+        detected_count = 4 - len(missing_indices)
+        if detected_count < 3:
+            logger.error(
+                file_path,
+                f"\nArUco: only {detected_count}/4 markers detected — "
+                "need at least 3 to recover orientation.",
+            )
+            return None
+
+        # Extrapolate the one missing corner using an affine fit over the 3
+        # detected corners and their reference positions.
+        if missing_indices:
+            if self.reference_marker_centers is None:
+                logger.error(
+                    file_path,
+                    "\nArUco: one marker missing and referenceMarkerCenters "
+                    "is not set — cannot extrapolate. Set referenceMarkerCenters.",
+                )
+                return None
+            missing_idx = missing_indices[0]
+            good_indices = [k for k in range(4) if k != missing_idx]
+            src_three = np.array(
+                [centres_by_index[k] for k in good_indices], dtype=np.float32
+            )
+            dst_three = np.array(
+                [self.reference_marker_centers[k] for k in good_indices],
+                dtype=np.float32,
+            )
+            affine = cv2.getAffineTransform(dst_three, src_three)
+            missing_ref = np.array(
+                [[self.reference_marker_centers[missing_idx]]],
+                dtype=np.float32,
+            )
+            estimated = cv2.transform(missing_ref, affine)[0, 0]
+            centres_by_index[missing_idx] = [
+                float(estimated[0]), float(estimated[1])
+            ]
+            logger.warning(
+                file_path,
+                f"\nArUco: extrapolated {_CORNER_NAMES[missing_idx]} corner "
+                f"from 3 detected markers → "
+                f"[{round(float(estimated[0]), 1)}, {round(float(estimated[1]), 1)}]",
+            )
+
+        centres = [c for c in centres_by_index if c is not None]
+
+        if self.preserve_full_image:
+            src_pts = np.array(centres, dtype=np.float32)
+            dst_pts = np.array(self.reference_marker_centers, dtype=np.float32)
+            homography, _ = cv2.findHomography(src_pts, dst_pts, method=0)
+            if homography is None:
+                logger.error(
+                    file_path,
+                    "\nArUco: could not compute homography from detected markers.",
+                )
+                return None
+            image = cv2.warpPerspective(
+                image,
+                homography,
+                (image.shape[1], image.shape[0]),
+                flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_REPLICATE,
+            )
+        else:
+            image = ImageUtils.four_point_transform(image, np.array(centres))
+
+        if config.outputs.show_image_level >= 2:
+            InteractionUtils.show(
+                f"ArUco Warped: {file_path}",
+                ImageUtils.resize_util(image, config.dimensions.display_width),
+                0,
+                0,
+                [0, 0],
+                config=config,
+            )
+        return image
+
     def apply_filter(self, image, file_path):
+        if self.marker_type == "aruco":
+            return self._apply_aruco_filter(image, file_path)
         config = self.tuning_config
         image_instance_ops = self.image_instance_ops
         image_eroded_sub = ImageUtils.normalize_util(
@@ -525,6 +696,9 @@ class CropOnMarkers(ImagePreprocessor):
         return image
 
     def load_marker(self, marker_ops, config):
+        """Load and preprocess the template marker image (template_matching mode only)."""
+        if self.marker_type == "aruco":
+            return None
         if not os.path.exists(self.marker_path):
             logger.error(
                 "Marker not found at path provided in template:",
