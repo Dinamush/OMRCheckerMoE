@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 import cv2
+from PIL import Image as _PILImage
 
 from src.defaults.config import CONFIG_DEFAULTS
 from webui.schemas import (
@@ -137,12 +138,17 @@ def _compute_dynamic_dimensions(
     template_payload: dict[str, Any] | None = None,
     rotation_degrees: int = 0,
 ) -> dict[str, int]:
-    """Compute per-image display and processing dimensions."""
-    image = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
-    if image is None:
-        raise ValueError(f"Could not read image: {image_path.as_posix()}")
+    """Compute per-image display and processing dimensions.
 
-    source_height, source_width = image.shape[:2]
+    Uses PIL header-only decoding to read image size without decompressing
+    pixel data, which is significantly faster than cv2.imread for this purpose.
+    """
+    try:
+        with _PILImage.open(image_path) as _pil:
+            # PIL returns (width, height); no pixel decoding happens here.
+            source_width, source_height = _pil.size
+    except Exception as exc:
+        raise ValueError(f"Could not read image: {image_path.as_posix()}") from exc
     if rotation_degrees in {90, 270}:
         source_width, source_height = source_height, source_width
     display_width, display_height = _scale_dimensions(
@@ -389,7 +395,10 @@ def _cleanup_runtime_dir(runtime_dir: Path | None) -> None:
 
 def _default_max_workers() -> int:
     cpu = os.cpu_count() or 2
-    return max(1, min(4, int(cpu)))
+    # Leave 1 core free for the main process; cap at 8 to stay memory-safe
+    # on machines that have many cores but limited RAM.
+    # Override via max_workers in config.json (accepts 1-32).
+    return max(1, min(cpu - 1, 8))
 
 
 def _coerce_max_workers(value: Any) -> int:
@@ -402,6 +411,12 @@ def _coerce_max_workers(value: Any) -> int:
 
 def _process_one_image(payload: dict[str, Any]) -> dict[str, Any]:
     """Worker entrypoint to process a single image in its own runtime dir."""
+    # Each worker process should use exactly 1 OpenCV thread so that the
+    # OS-level ProcessPoolExecutor provides the parallelism without internal
+    # thread-pool contention (N workers × M OpenCV threads = N*M threads
+    # competing for N cores).
+    cv2.setNumThreads(1)
+
     from main import entry_point_for_args
 
     batch_root = Path(payload["batch_root"])

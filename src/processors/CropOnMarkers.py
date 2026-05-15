@@ -18,6 +18,7 @@ from src.constants.image_processing import (
 )
 from src.logger import logger
 from src.processors.interfaces.ImagePreprocessor import ImagePreprocessor
+from src.utils.gpu import warp_perspective as gpu_warp_perspective
 from src.utils.image import ImageUtils
 from src.utils.interaction import InteractionUtils
 
@@ -363,12 +364,12 @@ class CropOnMarkers(ImagePreprocessor):
                     "\nArUco: could not compute homography from detected markers.",
                 )
                 return None
-            image = cv2.warpPerspective(
+            image = gpu_warp_perspective(
                 image,
                 homography,
                 (image.shape[1], image.shape[0]),
                 flags=cv2.INTER_LINEAR,
-                borderMode=cv2.BORDER_REPLICATE,
+                border_mode=cv2.BORDER_REPLICATE,
             )
         else:
             image = ImageUtils.four_point_transform(image, np.array(centres))
@@ -657,12 +658,12 @@ class CropOnMarkers(ImagePreprocessor):
                     "\nError: could not compute homography from detected markers.",
                 )
                 return None
-            image = cv2.warpPerspective(
+            image = gpu_warp_perspective(
                 image,
                 homography,
                 (image.shape[1], image.shape[0]),
                 flags=cv2.INTER_LINEAR,
-                borderMode=cv2.BORDER_REPLICATE,
+                border_mode=cv2.BORDER_REPLICATE,
             )
         else:
             image = ImageUtils.four_point_transform(image, np.array(centres))

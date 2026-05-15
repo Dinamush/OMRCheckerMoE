@@ -239,21 +239,31 @@ class ImageInstanceOps:
             self.append_save_img(5, img)
 
             # Get mean bubbleValues n other stats
+            #
+            # Compute a summed-area table (integral image) once per sheet so
+            # each per-bubble mean is a single O(1) lookup instead of an
+            # cv2.mean() call that copies a sub-array on every iteration.
+            # cv2.integral() returns float64, shape (H+1, W+1).
+            _ii = cv2.integral(img)
+
             all_q_vals, all_q_strip_arrs, all_q_std_vals = [], [], []
             total_q_strip_no = 0
             for field_block in template.field_blocks:
                 box_w, box_h = field_block.bubble_dimensions
+                _area_inv = 1.0 / (box_w * box_h)
                 q_std_vals = []
                 for field_block_bubbles in field_block.traverse_bubbles:
                     q_strip_vals = []
                     for pt in field_block_bubbles:
                         # shifted
                         x, y = (pt.x + field_block.shift, pt.y)
-                        rect = [y, y + box_h, x, x + box_w]
-                        q_strip_vals.append(
-                            cv2.mean(img[rect[0] : rect[1], rect[2] : rect[3]])[0]
-                            # detectCross(img, rect) ? 100 : 0
-                        )
+                        # Summed-area table: mean = (I[y2,x2]-I[y1,x2]-I[y2,x1]+I[y1,x1]) / area
+                        q_strip_vals.append(float(
+                            (_ii[y + box_h, x + box_w]
+                             - _ii[y,        x + box_w]
+                             - _ii[y + box_h, x       ]
+                             + _ii[y,         x       ]) * _area_inv
+                        ))
                     q_std_vals.append(round(np.std(q_strip_vals), 2))
                     all_q_strip_arrs.append(q_strip_vals)
                     # _, _, _ = get_global_threshold(q_strip_vals, "QStrip Plot",
@@ -586,28 +596,35 @@ class ImageInstanceOps:
 
         # Sort the Q bubbleValues
         # TODO: Change var name of q_vals
-        q_vals = sorted(q_vals_orig)
+        q_arr = np.sort(np.asarray(q_vals_orig, dtype=np.float64))
+        q_vals = q_arr.tolist()  # kept for the plotting code below
+        n = len(q_arr)
         # Find the FIRST LARGE GAP and set it as threshold:
         ls = (looseness + 1) // 2
-        l = len(q_vals) - ls
+        span = n - 2 * ls  # number of candidate positions
+
         max1, thr1 = MIN_JUMP, global_default_threshold
-        for i in range(ls, l):
-            jump = q_vals[i + ls] - q_vals[i - ls]
-            if jump > max1:
-                max1 = jump
-                thr1 = q_vals[i - ls] + jump / 2
+        if span > 0:
+            # jumps[j] = q_arr[j + 2*ls] - q_arr[j]  for j in 0..span-1
+            # (equivalent to the original loop with i = j + ls)
+            jumps = q_arr[2 * ls:] - q_arr[:span]
+            best_j = int(np.argmax(jumps))
+            if jumps[best_j] > MIN_JUMP:
+                max1 = float(jumps[best_j])
+                thr1 = float(q_arr[best_j] + jumps[best_j] / 2)
 
         # NOTE: thr2 is deprecated, thus is JUMP_DELTA
         # Make use of the fact that the JUMP_DELTA(Vertical gap ofc) between
         # values at detected jumps would be atleast 20
         max2, thr2 = MIN_JUMP, global_default_threshold
         # Requires atleast 1 gray box to be present (Roll field will ensure this)
-        for i in range(ls, l):
-            jump = q_vals[i + ls] - q_vals[i - ls]
-            new_thr = q_vals[i - ls] + jump / 2
-            if jump > max2 and abs(thr1 - new_thr) > JUMP_DELTA:
-                max2 = jump
-                thr2 = new_thr
+        if span > 0:
+            new_thrs = q_arr[:span] + jumps / 2
+            valid2 = (jumps > MIN_JUMP) & (np.abs(thr1 - new_thrs) > JUMP_DELTA)
+            if valid2.any():
+                best_j2 = int(np.argmax(np.where(valid2, jumps, -np.inf)))
+                max2 = float(jumps[best_j2])
+                thr2 = float(new_thrs[best_j2])
         # global_thr = min(thr1,thr2)
         global_thr, j_low, j_high = thr1, thr1 - max1 // 2, thr1 + max1 // 2
 
@@ -667,15 +684,16 @@ class ImageInstanceOps:
         """
         config = self.tuning_config
         # Sort the Q bubbleValues
-        q_vals = sorted(q_vals)
+        q_arr = np.sort(np.asarray(q_vals, dtype=np.float64))
+        q_vals = q_arr.tolist()  # kept for the plotting code below
 
         # Small no of pts cases:
         # base case: 1 or 2 pts
-        if len(q_vals) < 3:
+        if len(q_arr) < 3:
             thr1 = (
                 global_thr
-                if np.max(q_vals) - np.min(q_vals) < config.threshold_params.MIN_GAP
-                else np.mean(q_vals)
+                if np.max(q_arr) - np.min(q_arr) < config.threshold_params.MIN_GAP
+                else float(np.mean(q_arr))
             )
         else:
             # qmin, qmax, qmean, qstd = round(np.min(q_vals),2), round(np.max(q_vals),2),
@@ -696,13 +714,15 @@ class ImageInstanceOps:
 
             # else:
             # Find the LARGEST GAP and set it as threshold: //(FIRST LARGE GAP)
-            l = len(q_vals) - 1
-            max1, thr1 = config.threshold_params.MIN_JUMP, 255
-            for i in range(1, l):
-                jump = q_vals[i + 1] - q_vals[i - 1]
-                if jump > max1:
-                    max1 = jump
-                    thr1 = q_vals[i - 1] + jump / 2
+            # jumps[j] = q_arr[j+2] - q_arr[j]  for j in 0..n-3
+            # (equivalent to the original loop: jump = q_vals[i+1] - q_vals[i-1] with i = j+1)
+            max1, thr1 = config.threshold_params.MIN_JUMP, 255.0
+            local_jumps = q_arr[2:] - q_arr[:-2]
+            if local_jumps.size > 0:
+                best_lj = int(np.argmax(local_jumps))
+                if local_jumps[best_lj] > max1:
+                    max1 = float(local_jumps[best_lj])
+                    thr1 = float(q_arr[best_lj] + local_jumps[best_lj] / 2)
             # print(field_label,q_vals,max1)
 
             confident_jump = (
