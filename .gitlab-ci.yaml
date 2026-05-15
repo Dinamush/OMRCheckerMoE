@@ -1,0 +1,62 @@
+stages:
+  - setup
+  - test
+  - build
+  - deploy
+
+variables:
+  PYTHON_VERSION: "3.11"
+  VENV_PATH: ".venv"
+
+before_script:
+  - python3 --version || true
+
+setup:
+  stage: setup
+  tags:
+    - shell
+  script:
+    - python3 -m venv $VENV_PATH
+    - source $VENV_PATH/bin/activate
+    - pip install --upgrade pip
+    - pip install -r backend/requirements.txt
+    - pip install -r frontend/requirements.txt
+  artifacts:
+    paths:
+      - $VENV_PATH
+    expire_in: 1h
+
+test:
+  stage: test
+  tags:
+    - shell
+  dependencies:
+    - setup
+  script:
+    - source $VENV_PATH/bin/activate
+    - python -m compileall backend
+    - python -m compileall frontend
+
+build:
+  stage: build
+  tags:
+    - shell
+  script:
+    - docker build -t omrchecker:latest .
+  only:
+    - main
+
+deploy:
+  stage: deploy
+  tags:
+    - shell
+  script:
+    - docker stop omrchecker || true
+    - docker rm omrchecker || true
+    - docker run -d \
+        --name omrchecker \
+        -p 8000:8000 \
+        -v /data/omr:/app/data \
+        omrchecker:latest
+  only:
+    - main
