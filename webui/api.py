@@ -6,6 +6,7 @@ and any third-party API consumer go through identical codepaths.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import csv
@@ -470,6 +471,34 @@ async def download_output_file(
 ) -> FileResponse:
     resolved = batches_service.resolve_output_file(batch_id, file_path, settings)
     return FileResponse(resolved, filename=resolved.name)
+
+
+@router.get("/batches/{batch_id}/results/{filename}/checked")
+@_handle_errors
+async def get_checked_output_image(
+    batch_id: str,
+    filename: str,
+    settings: Settings = Depends(get_settings),
+) -> FileResponse:
+    """Serve the OMR-annotated output image for a given input filename.
+
+    Searches CheckedOMRs first, then MultiMarkedFiles, then ErrorFiles so a
+    single URL works regardless of which output subdirectory the engine used.
+    """
+    safe_name = Path(filename).name  # strip any path components
+    if not safe_name or safe_name != filename:
+        raise HTTPException(status_code=400, detail="Invalid filename.")
+    batch_root = batches_service.get_batch_root(batch_id, settings)
+    outputs_dir = batch_root / "outputs"
+    for subdir in ("CheckedOMRs", "Manual/MultiMarkedFiles", "Manual/ErrorFiles"):
+        candidate = (outputs_dir / subdir / safe_name).resolve()
+        try:
+            candidate.relative_to(outputs_dir.resolve())
+        except ValueError:
+            continue
+        if candidate.is_file():
+            return FileResponse(candidate, filename=safe_name)
+    raise HTTPException(status_code=404, detail=f"No checked output image found for {filename!r}.")
 
 
 # ---------------------------------------------------------------------------

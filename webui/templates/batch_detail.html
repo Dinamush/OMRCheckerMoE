@@ -299,6 +299,9 @@
             </div>
             <div class="result-file-detail">
                 {% for row in results.rows %}
+                {% set input_filename = (row.input_path.split('/')|last).split('\\')|last if row.input_path else (row.file_id or "") %}
+                {% set input_url = "/api/v1/batches/" ~ batch.id ~ "/files/" ~ (input_filename|urlencode) ~ "/preview" %}
+                {% set checked_url = "/api/v1/batches/" ~ batch.id ~ "/results/" ~ (input_filename|urlencode) ~ "/checked" %}
                 <article class="result-card" data-result-card="{{ loop.index0 }}" {% if not loop.first %}hidden{% endif %}>
                     <div class="flex-between result-card-head">
                         <div>
@@ -321,31 +324,83 @@
                         <span class="pill status-done">Score {{ row.score }}</span>
                         {% endif %}
                     </div>
+                    <div class="result-view-toggle" role="group" aria-label="Result view mode">
+                        <button class="btn small active" type="button" data-view-toggle="answers">Answers</button>
+                        <button class="btn small" type="button" data-view-toggle="review">Review</button>
+                    </div>
                     {% if row.status == "failed" %}
-                    {% if row.output_path %}
-                    <p class="muted small mono result-output-path">Output: {{ row.output_path }}</p>
-                    {% endif %}
+                    <div data-view-panel="answers">
+                        {% if row.output_path %}
+                        <p class="muted small mono result-output-path">Output: {{ row.output_path }}</p>
+                        {% endif %}
+                    </div>
                     {% else %}
-                    <div class="answer-grid">
-                        {% for col in results.columns %}
-                            {% if col not in ["file_id", "input_path", "output_path", "score"] %}
-                            {% set answer_value = row.responses.get(col, "") %}
-                            {% set is_erasure_risk = col.startswith("q") and answer_value|length > 1 %}
-                            <div class="answer-cell{% if is_erasure_risk %} answer-cell-risk{% endif %}">
-                                <span class="answer-key">{{ col }}</span>
-                                <strong>{{ answer_value or "—" }}</strong>
-                                {% if is_erasure_risk %}
-                                <span class="answer-risk" title="Multiple marks detected in CSV output. This can happen when an erased option remains dark enough to be read.">Erasure risk 85%</span>
+                    <div data-view-panel="answers">
+                        <div class="answer-grid">
+                            {% for col in results.columns %}
+                                {% if col not in ["file_id", "input_path", "output_path", "score"] %}
+                                {% set answer_value = row.responses.get(col, "") %}
+                                {% set is_erasure_risk = col.startswith("q") and answer_value|length > 1 %}
+                                <div class="answer-cell{% if is_erasure_risk %} answer-cell-risk{% endif %}">
+                                    <span class="answer-key">{{ col }}</span>
+                                    <strong>{{ answer_value or "—" }}</strong>
+                                    {% if is_erasure_risk %}
+                                    <span class="answer-risk" title="Multiple marks detected in CSV output. This can happen when an erased option remains dark enough to be read.">Erasure risk 85%</span>
+                                    {% endif %}
+                                </div>
+                                {% endif %}
+                            {% endfor %}
+                        </div>
+                        <p class="muted small result-risk-note">Erasure risk is a review heuristic from the CSV output. Multiple marks on one question can indicate a student erased one answer and selected another, but the residual mark still read as filled.</p>
+                        {% if row.output_path %}
+                        <p class="muted small mono result-output-path">Output: {{ row.output_path }}</p>
+                        {% endif %}
+                    </div>
+                    {% endif %}
+                    <div data-view-panel="review" hidden>
+                        <div class="review-split">
+                            <div class="review-pane">
+                                <p class="review-pane-label muted small">Input scan</p>
+                                {% if input_filename %}
+                                <a href="{{ input_url }}" target="_blank" rel="noopener" class="review-image-link">
+                                    <img src="{{ input_url }}" class="review-image" alt="Input scan for {{ row.file_id or '' }}" loading="lazy" />
+                                </a>
+                                {% else %}
+                                <p class="muted small">Input image not available.</p>
                                 {% endif %}
                             </div>
-                            {% endif %}
-                        {% endfor %}
+                            <div class="review-pane">
+                                <p class="review-pane-label muted small">OMR output <span class="muted" style="font-size:11px">(annotated by engine)</span></p>
+                                {% if input_filename %}
+                                <a href="{{ checked_url }}" target="_blank" rel="noopener" class="review-image-link">
+                                    <img src="{{ checked_url }}" class="review-image review-image-checked"
+                                         alt="OMR output for {{ row.file_id or '' }}"
+                                         loading="lazy"
+                                         onerror="this.closest('.review-pane').innerHTML='<p class=\'muted small\'>OMR output image not available yet. Run the batch first.</p>'" />
+                                </a>
+                                {% else %}
+                                <p class="muted small">OMR output not available.</p>
+                                {% endif %}
+                            </div>
+                        </div>
+                        {% if row.status != "failed" %}
+                        <div class="answer-grid review-answer-grid">
+                            {% for col in results.columns %}
+                                {% if col not in ["file_id", "input_path", "output_path", "score"] %}
+                                {% set answer_value = row.responses.get(col, "") %}
+                                {% set is_erasure_risk = col.startswith("q") and answer_value|length > 1 %}
+                                <div class="answer-cell{% if is_erasure_risk %} answer-cell-risk{% endif %}">
+                                    <span class="answer-key">{{ col }}</span>
+                                    <strong>{{ answer_value or "—" }}</strong>
+                                    {% if is_erasure_risk %}
+                                    <span class="answer-risk" title="Multiple marks detected in CSV output.">Erasure risk 85%</span>
+                                    {% endif %}
+                                </div>
+                                {% endif %}
+                            {% endfor %}
+                        </div>
+                        {% endif %}
                     </div>
-                    <p class="muted small result-risk-note">Erasure risk is a review heuristic from the CSV output. Multiple marks on one question can indicate a student erased one answer and selected another, but the residual mark still read as filled.</p>
-                    {% if row.output_path %}
-                    <p class="muted small mono result-output-path">Output: {{ row.output_path }}</p>
-                    {% endif %}
-                    {% endif %}
                 </article>
                 {% endfor %}
             </div>

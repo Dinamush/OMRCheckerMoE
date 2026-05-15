@@ -433,6 +433,36 @@ const getErasureRisk = (column, value) => {
     return Math.min(95, 65 + markedOptions.size * 10)
 }
 
+const getCheckedImageUrl = (row) => {
+    // Derive the plain filename from file_id or input_path
+    const rawName = row.file_id || (row.input_path ? row.input_path.split(/[\\/]/).pop() : null)
+    if (!rawName) return null
+    const filename = rawName.split(/[\\/]/).pop()
+    return apiUrl(`/results/${encodeURIComponent(filename)}/checked`)
+}
+
+const getInputImageUrl = (row) => {
+    const rawName = row.file_id || (row.input_path ? row.input_path.split(/[\\/]/).pop() : null)
+    if (!rawName) return null
+    const filename = rawName.split(/[\\/]/).pop()
+    return apiUrl(`/files/${encodeURIComponent(filename)}/preview`)
+}
+
+const buildAnswerGrid = (row, responseColumns) => {
+    const answers = responseColumns.map((col) => {
+        const value = getResultCell(row, col) || "—"
+        const erasureRisk = getErasureRisk(col, value)
+        return `
+            <div class="answer-cell${erasureRisk ? " answer-cell-risk" : ""}">
+                <span class="answer-key">${escapeHtml(col)}</span>
+                <strong>${escapeHtml(value)}</strong>
+                ${erasureRisk ? `<span class="answer-risk" title="Multiple marks detected in CSV output. This can happen when an erased option remains dark enough to be read.">Erasure risk ${erasureRisk}%</span>` : ""}
+            </div>
+        `
+    }).join("")
+    return answers
+}
+
 const renderResultCard = (row, responseColumns, index) => {
     const fileId = row.file_id || `File ${index + 1}`
     const qcFlags = Array.isArray(row.qc_flags) ? row.qc_flags : []
@@ -442,6 +472,41 @@ const renderResultCard = (row, responseColumns, index) => {
             return `<span class="pill status-cancelled">QC ${escapeHtml(flag)}${extra}</span>`
         }).join("")}</div>`
         : ""
+
+    const inputUrl = getInputImageUrl(row)
+    const checkedUrl = getCheckedImageUrl(row)
+
+    const reviewPane = `
+        <div class="review-split">
+            <div class="review-pane">
+                <p class="review-pane-label muted small">Input scan</p>
+                ${inputUrl
+                    ? `<a href="${escapeHtml(inputUrl)}" target="_blank" rel="noopener" class="review-image-link">
+                        <img src="${escapeHtml(inputUrl)}" class="review-image" alt="Input scan for ${escapeHtml(fileId)}" loading="lazy" />
+                       </a>`
+                    : `<p class="muted small">Input image not available.</p>`}
+            </div>
+            <div class="review-pane">
+                <p class="review-pane-label muted small">OMR output <span class="muted" style="font-size:11px">(annotated by engine)</span></p>
+                ${checkedUrl
+                    ? `<a href="${escapeHtml(checkedUrl)}" target="_blank" rel="noopener" class="review-image-link">
+                        <img src="${escapeHtml(checkedUrl)}" class="review-image review-image-checked"
+                             alt="OMR output for ${escapeHtml(fileId)}"
+                             loading="lazy"
+                             onerror="this.closest('.review-pane').innerHTML='<p class=\\'muted small\\'>OMR output image not available yet. Run the batch first.</p>'" />
+                       </a>`
+                    : `<p class="muted small">OMR output not available.</p>`}
+            </div>
+        </div>
+    `
+
+    const viewToggle = `
+        <div class="result-view-toggle" role="group" aria-label="Result view mode">
+            <button class="btn small active" type="button" data-view-toggle="answers">Answers</button>
+            <button class="btn small" type="button" data-view-toggle="review">Review</button>
+        </div>
+    `
+
     if (row.status === "failed") {
         return `
             <article class="result-card" data-result-card="${index}" ${index === 0 ? "" : "hidden"}>
@@ -454,33 +519,38 @@ const renderResultCard = (row, responseColumns, index) => {
                     </div>
                     <span class="pill status-failed">Failed</span>
                 </div>
-                ${row.output_path ? `<p class="muted small mono result-output-path">Output: ${escapeHtml(row.output_path)}</p>` : ""}
+                ${viewToggle}
+                <div data-view-panel="answers">
+                    ${row.output_path ? `<p class="muted small mono result-output-path">Output: ${escapeHtml(row.output_path)}</p>` : ""}
+                </div>
+                <div data-view-panel="review" hidden>
+                    ${reviewPane}
+                </div>
             </article>
         `
     }
-    const answers = responseColumns.map((col) => {
-        const value = getResultCell(row, col) || "—"
-        const erasureRisk = getErasureRisk(col, value)
-        return `
-            <div class="answer-cell${erasureRisk ? " answer-cell-risk" : ""}">
-                <span class="answer-key">${escapeHtml(col)}</span>
-                <strong>${escapeHtml(value)}</strong>
-                ${erasureRisk ? `<span class="answer-risk" title="Multiple marks detected in CSV output. This can happen when an erased option remains dark enough to be read.">Erasure risk ${erasureRisk}%</span>` : ""}
-            </div>
-        `
-    }).join("")
+
+    const answers = buildAnswerGrid(row, responseColumns)
     return `
         <article class="result-card" data-result-card="${index}" ${index === 0 ? "" : "hidden"}>
             <div class="flex-between result-card-head">
                 <div>
                     <h3>${escapeHtml(fileId)}</h3>
                     ${row.input_path ? `<p class="muted small mono">${escapeHtml(row.input_path)}</p>` : ""}
+                    ${qcPills}
                 </div>
                 ${row.score ? `<span class="pill status-done">Score ${escapeHtml(row.score)}</span>` : ""}
             </div>
-            <div class="answer-grid">${answers}</div>
-            <p class="muted small result-risk-note">Erasure risk is a review heuristic from the CSV output. Multiple marks on one question can indicate a student erased one answer and selected another, but the residual mark still read as filled.</p>
-            ${row.output_path ? `<p class="muted small mono result-output-path">Output: ${escapeHtml(row.output_path)}</p>` : ""}
+            ${viewToggle}
+            <div data-view-panel="answers">
+                <div class="answer-grid">${answers}</div>
+                <p class="muted small result-risk-note">Erasure risk is a review heuristic from the CSV output. Multiple marks on one question can indicate a student erased one answer and selected another, but the residual mark still read as filled.</p>
+                ${row.output_path ? `<p class="muted small mono result-output-path">Output: ${escapeHtml(row.output_path)}</p>` : ""}
+            </div>
+            <div data-view-panel="review" hidden>
+                ${reviewPane}
+                <div class="answer-grid review-answer-grid">${answers}</div>
+            </div>
         </article>
     `
 }
@@ -550,6 +620,20 @@ const handleResultSelect = (event) => {
     })
     container.querySelectorAll("[data-result-card]").forEach((card) => {
         card.hidden = card.dataset.resultCard !== selected
+    })
+}
+
+const handleViewToggle = (event) => {
+    const button = event.target.closest("[data-view-toggle]")
+    if (!button) return
+    const card = button.closest("[data-result-card]")
+    if (!card) return
+    const targetView = button.dataset.viewToggle
+    card.querySelectorAll("[data-view-toggle]").forEach((btn) => {
+        btn.classList.toggle("active", btn.dataset.viewToggle === targetView)
+    })
+    card.querySelectorAll("[data-view-panel]").forEach((panel) => {
+        panel.hidden = panel.dataset.viewPanel !== targetView
     })
 }
 
@@ -1636,6 +1720,7 @@ document.addEventListener("DOMContentLoaded", () => {
         handleDeleteFile(event)
         handleDeleteAsset(event)
         handleResultSelect(event)
+        handleViewToggle(event)
         handleEditorMode(event)
         handleSaveDoc(event)
         handleClearDoc(event)
