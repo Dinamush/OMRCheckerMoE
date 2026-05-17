@@ -583,6 +583,7 @@
                         stopBtn.textContent = 'Stopped';
                         clearInterval(progressInterval);
                         clearInterval(logInterval);
+                        if (typeof updateProgress === 'function') updateProgress();
                     } else {
                         stopBtn.textContent = 'Stop download';
                         stopBtn.disabled = false;

@@ -7,9 +7,11 @@ Owner full list: rest=hide — requires login as that user.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.cookiejar import MozillaCookieJar
 from pathlib import Path
@@ -24,6 +26,11 @@ from progress_tracker import get_tracker
 
 logger = logging.getLogger(__name__)
 
+
+class DownloadCancelled(Exception):
+    """User stopped the workflow (Stop download)."""
+
+
 PIXIV_HOME = "https://www.pixiv.net/"
 PIXIV_LOGIN = "https://accounts.pixiv.net/login"
 PIXIV_REFERER = "https://www.pixiv.net/"
@@ -34,6 +41,12 @@ DEFAULT_UA = (
 BOOKMARK_PAGE_LIMIT = 48
 _PIXIV_PARENT_DOMAIN = ".pixiv.net"
 _PIXIV_AUTH_NAMES = frozenset({"PHPSESSID", "__cf_bm", "cf_clearance"})
+
+PIXIV_LOGIN_PROGRESS_HINT = (
+    "Log in on accounts.pixiv.net, then in the **same Chrome window** open "
+    "https://www.pixiv.net/ and confirm you see your account. "
+    "Only then click **Continue after Chrome login** on this page."
+)
 
 
 def parse_user_id(value: str) -> Optional[str]:
@@ -67,22 +80,36 @@ def _parse_user_self(data: Dict[str, Any]) -> Tuple[Optional[str], str]:
     if data.get("error"):
         return None, str(data.get("message") or "Pixiv Ajax error")
 
-    # Guest bootstrap when /ajax/user/self is called without PHPSESSID
-    if "token" in data and "userData" in data and "body" not in data:
-        return (
-            None,
-            "Not logged in for Ajax — open www.pixiv.net in Chrome after accounts login, "
-            "then click Continue after Chrome login again.",
-        )
+    user_data = data.get("userData")
+    if isinstance(user_data, dict):
+        uid = user_data.get("userId") or user_data.get("id")
+        if uid:
+            return str(uid), ""
 
     body = data.get("body")
     if isinstance(body, dict):
         uid = body.get("userId") or body.get("id") or body.get("user_id")
         if uid:
             return str(uid), ""
+
+    # Guest bootstrap: site config only (userData null, no body)
+    if "token" in data and data.get("userData") is None and "body" not in data:
+        return (
+            None,
+            "Ajax session not authenticated (stale PHPSESSID?). Log out in Chrome, "
+            "log in again, visit www.pixiv.net, then click Continue.",
+        )
+
     if body is None or body == []:
         return None, "Session expired or invalid PHPSESSID — log in again."
     return None, "Session response missing user id."
+
+
+def _bookmarks_probe_ok(data: Dict[str, Any]) -> bool:
+    if data.get("error"):
+        return False
+    body = data.get("body")
+    return isinstance(body, dict) and ("works" in body or "total" in body)
 
 
 def _apply_session_headers(session: requests.Session, user_agent: str) -> None:
@@ -94,6 +121,121 @@ def _apply_session_headers(session: requests.Session, user_agent: str) -> None:
             "Referer": PIXIV_REFERER,
             "X-Requested-With": "XMLHttpRequest",
         }
+    )
+
+
+def _driver_phpsessid(driver) -> Optional[str]:
+    for cookie in driver.get_cookies():
+        if cookie.get("name") == "PHPSESSID" and cookie.get("value"):
+            return str(cookie["value"])
+    return None
+
+
+def ajax_get_json_via_driver(driver, ajax_path: str) -> Dict[str, Any]:
+    """Call Pixiv Ajax from inside Chrome so cookies match the visible login."""
+    path = ajax_path.lstrip("/")
+    url = f"{PIXIV_HOME}ajax/{path}" if not path.startswith("http") else path
+    raw = driver.execute_async_script(
+        """
+        const url = arguments[0];
+        const done = arguments[arguments.length - 1];
+        fetch(url, {
+            credentials: 'include',
+            headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }
+        })
+        .then(r => r.text())
+        .then(t => done(t))
+        .catch(e => done(JSON.stringify({error: true, message: String(e)})));
+        """,
+        url,
+    )
+    if not raw:
+        raise RuntimeError("Empty response from in-browser Pixiv Ajax.")
+    data = json.loads(raw)
+    if data.get("error") and not isinstance(data.get("body"), dict):
+        raise RuntimeError(data.get("message") or "Pixiv Ajax error (browser)")
+    return data
+
+
+def establish_www_session(
+    driver,
+    timeout: float = 60.0,
+    *,
+    target_user_id: Optional[str] = None,
+    bookmark_rest: str = "show",
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> str:
+    """
+    After accounts login, open www (or target bookmarks page) and verify Ajax works.
+
+    When *target_user_id* is set, bookmark Ajax for that user is enough (no /user/self).
+    Returns the user id to use for collection (target or logged-in self).
+    """
+    target_uid = parse_user_id(target_user_id or "")
+    landing = PIXIV_HOME
+    if target_uid:
+        landing = f"{PIXIV_HOME}en/users/{target_uid}/bookmarks/artworks"
+    driver.get(landing)
+    time.sleep(3)
+    deadline = time.time() + timeout
+    last_err = ""
+
+    while time.time() < deadline:
+        if cancel_check and cancel_check():
+            raise DownloadCancelled("Download cancelled by user.")
+        if not _driver_phpsessid(driver):
+            names = sorted({c.get("name", "") for c in driver.get_cookies()})
+            logging.debug("Waiting for PHPSESSID; have cookies: %s", names)
+            time.sleep(2.0)
+            driver.get(landing)
+            continue
+
+        if target_uid:
+            probe = (
+                f"user/{target_uid}/illusts/bookmarks"
+                f"?tag=&offset=0&limit=1&rest={bookmark_rest}"
+            )
+            try:
+                data = ajax_get_json_via_driver(driver, probe)
+                if _bookmarks_probe_ok(data):
+                    total = (data.get("body") or {}).get("total", "?")
+                    logging.info(
+                        "Pixiv bookmarks Ajax OK for user %s (total=%s, rest=%s)",
+                        target_uid,
+                        total,
+                        bookmark_rest,
+                    )
+                    return target_uid
+                last_err = data.get("message") or "Bookmarks Ajax returned no works"
+            except Exception as e:
+                last_err = str(e)
+                logging.debug("Pixiv bookmarks probe failed: %s", e)
+
+        try:
+            data = ajax_get_json_via_driver(driver, "user/self")
+            uid, err = _parse_user_self(data)
+            if uid:
+                logging.info("Pixiv www session ready (logged-in user %s)", uid)
+                return uid
+            last_err = err
+        except Exception as e:
+            last_err = str(e)
+            logging.debug("Pixiv /ajax/user/self probe failed: %s", e)
+
+        time.sleep(2.0)
+        driver.get(landing)
+
+    cookie_names = sorted({c.get("name", "") for c in driver.get_cookies()})
+    profile_hint = (
+        " If you keep seeing this, delete the folder "
+        "%LOCALAPPDATA%\\HamsterScraper\\browser_profiles\\pixiv and try again."
+    )
+    raise RuntimeError(
+        "Timed out waiting for Pixiv Ajax (PHPSESSID present but API still guest or blocked). "
+        f"Cookies in Chrome: {', '.join(cookie_names[:12])}. "
+        f"Last check: {last_err or 'unknown'}. "
+        "Log out in Chrome, log in fresh at accounts.pixiv.net, open www.pixiv.net, "
+        f"then click Continue.{profile_hint}"
     )
 
 
@@ -114,12 +256,10 @@ def session_from_driver(driver, proxy_url: str = "") -> requests.Session:
         if not name or value is None:
             continue
         domain = _normalize_cookie_domain(name, cookie.get("domain") or "")
-        session.cookies.set(
-            name,
-            value,
-            domain=domain.lstrip("."),
-            path=cookie.get("path") or "/",
-        )
+        d = domain.lstrip(".")
+        session.cookies.set(name, value, domain=d, path=cookie.get("path") or "/")
+        if name in _PIXIV_AUTH_NAMES:
+            session.cookies.set(name, value, domain="www.pixiv.net", path="/")
     return session
 
 
@@ -212,6 +352,24 @@ def _ajax_json(session: requests.Session, url: str, *, timeout: float = 30.0) ->
     if data.get("error"):
         raise RuntimeError(data.get("message") or "Pixiv Ajax error")
     return data
+
+
+def check_cookie_health_with_driver(driver) -> Tuple[bool, str]:
+    """Verify login using the browser's own cookie jar (most reliable)."""
+    try:
+        if not _driver_phpsessid(driver):
+            return (
+                False,
+                "Chrome has no PHPSESSID yet — open https://www.pixiv.net/ while logged in, "
+                "then click Continue after Chrome login.",
+            )
+        data = ajax_get_json_via_driver(driver, "user/self")
+        uid, err = _parse_user_self(data)
+        if uid:
+            return True, f"Cookies valid — logged in as user {uid}."
+        return False, err or "Session response missing user id."
+    except Exception as e:
+        return False, f"Cookie health check failed: {e}"
 
 
 def check_cookie_health_with_session(session: requests.Session) -> Tuple[bool, str]:
@@ -362,6 +520,7 @@ def download_image(
     dest: Path,
     *,
     skip_if_exists: bool = True,
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> bool:
     if skip_if_exists and dest.is_file() and dest.stat().st_size > 0:
         return True
@@ -371,6 +530,8 @@ def download_image(
     r.raise_for_status()
     with open(dest, "wb") as f:
         for chunk in r.iter_content(chunk_size=65536):
+            if cancel_check and cancel_check():
+                raise DownloadCancelled("Download cancelled by user.")
             if chunk:
                 f.write(chunk)
     return dest.is_file() and dest.stat().st_size > 0
@@ -385,9 +546,11 @@ def download_bookmark_works(
     max_workers: int = 4,
     skip_if_exists: bool = True,
     cancel_check: Optional[Callable[[], bool]] = None,
-) -> None:
+) -> bool:
+    """Download bookmarked works. Returns True if stopped early by user cancel."""
     tracker = get_tracker(session_id)
     root = Path(download_dir)
+    cancelled = False
 
     def _one(work: Dict[str, Any]) -> None:
         illust_id = str(work.get("id") or work.get("illustId") or "")
@@ -406,23 +569,50 @@ def download_bookmark_works(
                 return
             saved: List[Path] = []
             for i, img_url in enumerate(urls):
+                if cancel_check and cancel_check():
+                    raise DownloadCancelled("Download cancelled by user.")
                 ext = _ext_from_url(img_url)
                 dest = root / _safe_filename(title, illust_id, i, ext)
-                if download_image(session, img_url, dest, skip_if_exists=skip_if_exists):
+                if download_image(
+                    session,
+                    img_url,
+                    dest,
+                    skip_if_exists=skip_if_exists,
+                    cancel_check=cancel_check,
+                ):
                     saved.append(dest)
             if saved:
                 total_sz = sum(p.stat().st_size for p in saved)
                 tracker.complete_download(page_url, str(saved[0]), total_sz)
             else:
                 tracker.fail_download(page_url, "All pages failed or empty files")
+        except DownloadCancelled:
+            raise
         except Exception as e:
             logger.warning("Pixiv download failed for %s: %s", illust_id, e)
             tracker.fail_download(page_url, str(e))
 
-    with ThreadPoolExecutor(max_workers=max(1, max_workers)) as pool:
-        futures = [pool.submit(_one, w) for w in works]
+    executor = ThreadPoolExecutor(max_workers=max(1, max_workers))
+    futures = []
+    try:
+        for work in works:
+            if cancel_check and cancel_check():
+                cancelled = True
+                break
+            futures.append(executor.submit(_one, work))
+
         for fut in as_completed(futures):
+            if cancel_check and cancel_check():
+                cancelled = True
+                break
             try:
-                fut.result()
+                fut.result(timeout=3600)
+            except DownloadCancelled:
+                cancelled = True
+                break
             except Exception as e:
                 logger.error("Pixiv worker error: %s", e)
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+    return cancelled or bool(cancel_check and cancel_check())

@@ -11,14 +11,17 @@
   .history-table .num { text-align: right; font-variant-numeric: tabular-nums; }
   .badge-failed { color: #f87171; font-weight: 600; }
   .badge-ok { color: #4ade80; }
+  .badge-running { color: #60a5fa; font-weight: 600; }
+  .badge-cancelled { color: #fbbf24; }
   .empty-msg { padding: 2rem; text-align: center; opacity: 0.5; }
   .session-link { font-family: monospace; font-size: 0.8em; opacity: 0.65; }
-  .retry-btn {
+  .retry-btn, .view-btn {
     font-size: 0.78rem; padding: 0.2rem 0.55rem;
     background: transparent; border: 1px solid #ffd94a; color: #ffd94a;
-    border-radius: 4px; cursor: pointer;
+    border-radius: 4px; cursor: pointer; margin-right: 0.35rem;
   }
-  .retry-btn:hover { background: rgba(255,217,74,0.12); }
+  .retry-btn:hover, .view-btn:hover { background: rgba(255,217,74,0.12); }
+  .err-hint { font-size: 0.78rem; opacity: 0.55; max-width: 14rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>
 {% endblock %}
 
@@ -27,7 +30,7 @@
   <div class="layout-hero-copy">
     <p class="page-eyebrow page-eyebrow-left">SHUCK3R</p>
     <h1 id="history-title" class="page-title-left">Session history</h1>
-    <p class="subtitle subtitle-left">All completed download runs, most recent first.</p>
+    <p class="subtitle subtitle-left">Running, completed, failed, and cancelled download runs (most recent first).</p>
   </div>
 </section>
 
@@ -37,6 +40,7 @@
       <thead>
         <tr>
           <th>When</th>
+          <th>Status</th>
           <th>Site</th>
           <th class="num">Total</th>
           <th class="num">Downloaded</th>
@@ -57,41 +61,83 @@
 <script>
 (function () {
   function fmtDuration(s) {
+    s = s || 0;
     if (s < 60) return s + 's';
     const m = Math.floor(s / 60), r = s % 60;
     return m + 'm ' + r + 's';
   }
 
-  fetch('/api/history?limit=200')
-    .then(r => r.json())
-    .then(data => {
-      const body = document.getElementById('historyBody');
-      const table = document.getElementById('historyTable');
-      const empty = document.getElementById('emptyMsg');
-      if (!data.length) { empty.style.display = ''; return; }
-      const rows = [...data].reverse().map(s => {
-        const failedCls = s.failed > 0 ? ' badge-failed' : ' badge-ok';
-        const retryBtn = s.failed > 0 && (s.site === 'pornhub' || s.site === 'xhamster')
-          ? `<button class="retry-btn" onclick="retrySession('${s.session_id}','${s.site}')">Retry failed</button>`
-          : '';
-        return `<tr>
-          <td>${s.ts.replace('T', ' ')}</td>
-          <td>${s.site}</td>
-          <td class="num">${s.total}</td>
-          <td class="num badge-ok">${s.downloaded}</td>
-          <td class="num">${s.skipped}</td>
-          <td class="num${failedCls}">${s.failed}</td>
-          <td class="num">${fmtDuration(s.duration_s)}</td>
-          <td>${retryBtn}</td>
-        </tr>`;
-      });
-      body.innerHTML = rows.join('');
-      table.style.display = '';
-    })
-    .catch(() => {
-      document.getElementById('emptyMsg').textContent = 'Failed to load history.';
-      document.getElementById('emptyMsg').style.display = '';
+  function statusBadge(status) {
+    const s = (status || 'completed').toLowerCase();
+    const map = {
+      running: ['badge-running', 'Running'],
+      completed: ['badge-ok', 'Completed'],
+      failed: ['badge-failed', 'Failed'],
+      cancelled: ['badge-cancelled', 'Cancelled'],
+    };
+    const [cls, label] = map[s] || ['', s];
+    return `<span class="${cls}">${label}</span>`;
+  }
+
+  function progressUrl(s) {
+    const ts = s.timestamp || Math.floor(Date.parse(s.ts) / 1000) || 0;
+    return `/download/session/${encodeURIComponent(s.session_id)}?timestamp=${ts}&site=${encodeURIComponent(s.site)}`;
+  }
+
+  function renderTable(data) {
+    const body = document.getElementById('historyBody');
+    const table = document.getElementById('historyTable');
+    const empty = document.getElementById('emptyMsg');
+    if (!data.length) {
+      table.style.display = 'none';
+      empty.style.display = '';
+      return;
+    }
+    empty.style.display = 'none';
+    const rows = data.map(s => {
+      const st = (s.status || 'completed').toLowerCase();
+      const failedCls = s.failed > 0 ? ' badge-failed' : ' badge-ok';
+      const retryBtn = st === 'completed' && s.failed > 0 && (s.site === 'pornhub' || s.site === 'xhamster')
+        ? `<button class="retry-btn" onclick="retrySession('${s.session_id}','${s.site}')">Retry failed</button>`
+        : '';
+      const viewBtn = (st === 'running' || st === 'failed')
+        ? `<a class="view-btn" href="${progressUrl(s)}">View progress</a>`
+        : '';
+      const err = s.error_message
+        ? `<div class="err-hint" title="${String(s.error_message).replace(/"/g, '&quot;')}">${s.error_message}</div>`
+        : '';
+      const when = (s.updated_ts || s.ts || '').replace('T', ' ');
+      return `<tr>
+        <td>${when}</td>
+        <td>${statusBadge(s.status)}${err}</td>
+        <td>${s.site}</td>
+        <td class="num">${s.total ?? 0}</td>
+        <td class="num badge-ok">${s.downloaded ?? 0}</td>
+        <td class="num">${s.skipped ?? 0}</td>
+        <td class="num${failedCls}">${s.failed ?? 0}</td>
+        <td class="num">${fmtDuration(s.duration_s)}</td>
+        <td>${viewBtn}${retryBtn}</td>
+      </tr>`;
     });
+    body.innerHTML = rows.join('');
+    table.style.display = '';
+  }
+
+  function loadHistory() {
+    return fetch('/api/history?limit=200')
+      .then(r => r.json())
+      .then(renderTable)
+      .catch(() => {
+        document.getElementById('emptyMsg').textContent = 'Failed to load history.';
+        document.getElementById('emptyMsg').style.display = '';
+      });
+  }
+
+  loadHistory();
+  setInterval(() => {
+    const hasRunning = document.querySelector('.badge-running');
+    if (hasRunning) loadHistory();
+  }, 10000);
 
   window.retrySession = function (sessionId, site) {
     if (!confirm('Start a new download session retrying only the failed URLs from this session?')) return;

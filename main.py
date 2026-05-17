@@ -86,6 +86,7 @@ Path(DOWNLOAD_DIR).mkdir(parents=True, exist_ok=True)
 THUMBS_DIR = USER_DATA_DIR / "thumbs"
 THUMBS_DIR.mkdir(parents=True, exist_ok=True)
 SESSION_HISTORY_FILE = USER_DATA_DIR / "session_history.jsonl"
+SESSION_REGISTRY_FILE = USER_DATA_DIR / "session_registry.json"
 
 # --- Cancellation registry ---
 import threading as _threading
@@ -877,28 +878,177 @@ def download_videos_parallel(
 
 # ----------------------------- Site-Specific Workflows ----------------------------- #
 
-def _append_session_history(session_id: str, site: str, tracker) -> None:
-    """Append one JSONL record to SESSION_HISTORY_FILE at the end of a completed session."""
+def _session_meta_path(session_id: str) -> Path:
+    return Path(LOG_DIR) / f"session_meta_{session_id}.json"
+
+
+def _write_session_meta(session_id: str, site: str) -> None:
     try:
-        stats = tracker.stats
-        duration_s = 0
-        if stats.start_time:
-            end = stats.end_time or datetime.now()
-            duration_s = int((end - stats.start_time).total_seconds())
-        record = {
-            "ts": datetime.now().isoformat(timespec="seconds"),
+        _session_meta_path(session_id).write_text(
+            json.dumps(
+                {
+                    "session_id": session_id,
+                    "site": site,
+                    "started_ts": datetime.now().isoformat(timespec="seconds"),
+                }
+            ),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        logging.warning("Could not write session meta for %s: %s", session_id, e)
+
+
+def _load_session_registry() -> Dict[str, dict]:
+    if not SESSION_REGISTRY_FILE.is_file():
+        return {}
+    try:
+        raw = json.loads(SESSION_REGISTRY_FILE.read_text(encoding="utf-8"))
+        return raw if isinstance(raw, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_session_registry(registry: Dict[str, dict]) -> None:
+    SESSION_REGISTRY_FILE.write_text(
+        json.dumps(registry, indent=2), encoding="utf-8"
+    )
+
+
+def _stats_from_tracker(tracker) -> dict:
+    stats = tracker.stats
+    duration_s = 0
+    if stats.start_time:
+        end = stats.end_time or datetime.now()
+        duration_s = int((end - stats.start_time).total_seconds())
+    return {
+        "total": stats.total_urls,
+        "downloaded": stats.downloads_completed,
+        "skipped": stats.files_skipped,
+        "failed": stats.downloads_failed,
+        "duration_s": duration_s,
+    }
+
+
+def session_history_register(
+    session_id: str, site: str, *, timestamp: Optional[int] = None
+) -> None:
+    """Record a new run as soon as the user starts a download (before background work finishes)."""
+    try:
+        reg = _load_session_registry()
+        now = datetime.now().isoformat(timespec="seconds")
+        reg[session_id] = {
+            "ts": now,
+            "updated_ts": now,
+            "timestamp": timestamp or int(time.time()),
             "site": site,
             "session_id": session_id,
-            "total": stats.total_urls,
-            "downloaded": stats.downloads_completed,
-            "skipped": stats.files_skipped,
-            "failed": stats.downloads_failed,
-            "duration_s": duration_s,
+            "status": "running",
+            "total": 0,
+            "downloaded": 0,
+            "skipped": 0,
+            "failed": 0,
+            "duration_s": 0,
+            "error_message": None,
+        }
+        _save_session_registry(reg)
+        _write_session_meta(session_id, site)
+    except Exception as e:
+        logging.warning("Could not register session history: %s", e)
+
+
+def session_history_update(
+    session_id: str,
+    site: str,
+    *,
+    status: str,
+    tracker=None,
+    error_message: Optional[str] = None,
+) -> None:
+    """Update registry entry (running, completed, failed, cancelled)."""
+    try:
+        reg = _load_session_registry()
+        now = datetime.now().isoformat(timespec="seconds")
+        rec = dict(reg.get(session_id) or {})
+        rec.setdefault("ts", now)
+        rec["updated_ts"] = now
+        rec["site"] = site
+        rec["session_id"] = session_id
+        rec["status"] = status
+        if tracker is not None:
+            rec.update(_stats_from_tracker(tracker))
+        if error_message:
+            rec["error_message"] = error_message
+        reg[session_id] = rec
+        _save_session_registry(reg)
+    except Exception as e:
+        logging.warning("Could not update session history: %s", e)
+
+
+def _append_session_history(session_id: str, site: str, tracker) -> None:
+    """Finalize: registry + append JSONL line for completed sessions."""
+    session_history_update(session_id, site, status="completed", tracker=tracker)
+    try:
+        rec = _load_session_registry().get(session_id) or {}
+        line = {
+            "ts": rec.get("updated_ts") or datetime.now().isoformat(timespec="seconds"),
+            "site": site,
+            "session_id": session_id,
+            "status": "completed",
+            "total": rec.get("total", 0),
+            "downloaded": rec.get("downloaded", 0),
+            "skipped": rec.get("skipped", 0),
+            "failed": rec.get("failed", 0),
+            "duration_s": rec.get("duration_s", 0),
         }
         with open(SESSION_HISTORY_FILE, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record) + "\n")
+            fh.write(json.dumps(line) + "\n")
     except Exception as e:
-        logging.warning("Could not write session history: %s", e)
+        logging.warning("Could not append session history JSONL: %s", e)
+
+
+def _history_from_progress_files(registry: Dict[str, dict]) -> Dict[str, dict]:
+    """Merge in-progress sessions from progress_*.json on disk."""
+    out = dict(registry)
+    log_root = Path(LOG_DIR)
+    for prog_path in log_root.glob("progress_*.json"):
+        sid = prog_path.stem.replace("progress_", "", 1)
+        if not sid:
+            continue
+        existing = out.get(sid) or {}
+        if existing.get("status") == "completed":
+            continue
+        try:
+            data = json.loads(prog_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        stats = data.get("stats") or {}
+        site = existing.get("site")
+        meta_path = _session_meta_path(sid)
+        if meta_path.is_file():
+            try:
+                site = json.loads(meta_path.read_text(encoding="utf-8")).get("site") or site
+            except Exception:
+                pass
+        started = stats.get("start_time") or existing.get("ts")
+        rec = {
+            "ts": existing.get("ts") or started or datetime.now().isoformat(timespec="seconds"),
+            "updated_ts": data.get("timestamp") or existing.get("updated_ts"),
+            "site": site or "unknown",
+            "session_id": sid,
+            "status": existing.get("status") or "running",
+            "total": int(stats.get("total_urls") or 0),
+            "downloaded": int(stats.get("downloads_completed") or 0),
+            "skipped": int(stats.get("files_skipped") or 0),
+            "failed": int(stats.get("downloads_failed") or 0),
+            "duration_s": int(existing.get("duration_s") or 0),
+            "error_message": existing.get("error_message"),
+        }
+        tl = workflow_heuristics.get_timeline(sid)
+        if tl and tl.get("error_message"):
+            rec["status"] = "failed"
+            rec["error_message"] = tl["error_message"]
+        out[sid] = rec
+    return out
 
 
 def _read_progress_json(session_id: str) -> Optional[dict]:
@@ -1197,7 +1347,25 @@ def pornhub_workflow(
                 logging.error(f"Error cleaning up tracker: {e}")
             workflow_heuristics.complete_success(session_id)
             maybe_notify_complete("SHUCK3R", "PornHub download session finished.", cfg)
+        else:
+            _record_failed_session_history(session_id, "pornhub")
         _clear_cancel_event(session_id)
+
+
+def _record_failed_session_history(session_id: str, site: str) -> None:
+    tl = workflow_heuristics.get_timeline(session_id) or {}
+    err = tl.get("error_message")
+    status = "cancelled"
+    if not err or "cancel" not in err.lower():
+        status = "failed"
+    tracker = None
+    try:
+        tracker = get_tracker(session_id)
+    except Exception:
+        pass
+    session_history_update(
+        session_id, site, status=status, tracker=tracker, error_message=err
+    )
 
 
 def pixiv_workflow(
@@ -1248,33 +1416,62 @@ def pixiv_workflow(
             workflow_browser.apply_flaresolverr_preflight(
                 driver, pixiv_ph.PIXIV_HOME, cfg
             )
+            try:
+                driver.get(pixiv_ph.PIXIV_HOME)
+                time.sleep(1)
+                driver.delete_all_cookies()
+                logging.info(
+                    "Cleared Pixiv Chrome profile cookies (avoids stale PHPSESSID)."
+                )
+            except Exception as e:
+                logging.warning("Could not clear Pixiv profile cookies: %s", e)
             driver.get(pixiv_ph.PIXIV_LOGIN)
             logging.info("Please log in to Pixiv in the opened Chrome window.")
             workflow_heuristics.set_detail(
                 session_id,
-                chrome_login_confirm.chrome_login_progress_hint(),
+                pixiv_ph.PIXIV_LOGIN_PROGRESS_HINT,
             )
-            chrome_login_confirm.wait_for_chrome_login(session_id)
-            time.sleep(2)
-            driver.get(pixiv_ph.PIXIV_HOME)
-            time.sleep(4)
-            workflow_heuristics.advance(session_id, "save_cookies")
-            live_session = pixiv_ph.session_from_driver(driver, cfg.proxy_url)
-            healthy, health_msg = pixiv_ph.check_cookie_health_with_session(
-                live_session
-            )
-            if not healthy:
+            try:
+                chrome_login_confirm.wait_for_chrome_login(
+                    session_id, should_stop=_cancelled
+                )
+            except InterruptedError:
                 workflow_heuristics.mark_error(
-                    session_id, f"Pixiv login check failed — {health_msg}"
+                    session_id, "Download cancelled by user."
                 )
                 return
-            logging.info("Pixiv cookie health: %s", health_msg)
+            try:
+                pixiv_ph.establish_www_session(
+                    driver,
+                    timeout=120.0,
+                    target_user_id=target_user_id,
+                    bookmark_rest=rests[0] if rests else "show",
+                    cancel_check=_cancelled,
+                )
+            except pixiv_ph.DownloadCancelled:
+                workflow_heuristics.mark_error(
+                    session_id, "Download cancelled by user."
+                )
+                return
+            except RuntimeError as e:
+                workflow_heuristics.mark_error(
+                    session_id, f"Pixiv login check failed — {e}"
+                )
+                return
+            workflow_heuristics.advance(session_id, "save_cookies")
+            live_session = pixiv_ph.session_from_driver(driver, cfg.proxy_url)
+            ok_sess, sess_msg = pixiv_ph.check_cookie_health_with_session(live_session)
+            if not ok_sess:
+                logging.warning(
+                    "Requests session check failed (%s); using browser-verified cookies anyway",
+                    sess_msg,
+                )
             pixiv_ph.save_session_from_driver(driver, cookie_file)
             workflow_browser.quit_driver(driver)
             driver = None
             session = live_session
 
-        if cfg.challenge_solver == "flaresolverr":
+        if cfg.challenge_solver == "flaresolverr" and cookies_ok:
             try:
                 pixiv_ph.apply_flaresolverr_to_session(
                     session, base_url=cfg.flaresolverr_base_url
@@ -1296,7 +1493,9 @@ def pixiv_workflow(
             session, uid, rests, cancel_check=_cancelled
         )
         if _cancelled():
-            workflow_heuristics.mark_error(session_id, "Download cancelled by user.")
+            workflow_heuristics.mark_error(
+                session_id, "Download cancelled by user."
+            )
             return
         if not works:
             workflow_heuristics.mark_error(
@@ -1320,7 +1519,7 @@ def pixiv_workflow(
         workflow_heuristics.advance(session_id, "download")
         tracker = get_tracker(session_id)
         tracker.start_session(len(works))
-        pixiv_ph.download_bookmark_works(
+        stopped = pixiv_ph.download_bookmark_works(
             session,
             works,
             download_root,
@@ -1329,8 +1528,15 @@ def pixiv_workflow(
             skip_if_exists=cfg.skip_existing_in_download_dir,
             cancel_check=_cancelled,
         )
+        if stopped or _cancelled():
+            workflow_heuristics.mark_error(
+                session_id, "Download cancelled by user."
+            )
+            return
         ok = True
 
+    except pixiv_ph.DownloadCancelled:
+        workflow_heuristics.mark_error(session_id, "Download cancelled by user.")
     except Exception as e:
         logging.critical("Error in Pixiv workflow: %s", e)
         workflow_heuristics.mark_error(session_id, str(e))
@@ -1349,6 +1555,8 @@ def pixiv_workflow(
                 logging.error("Error cleaning up tracker: %s", e)
             workflow_heuristics.complete_success(session_id)
             maybe_notify_complete("SHUCK3R", "Pixiv download session finished.", cfg)
+        else:
+            _record_failed_session_history(session_id, "pixiv")
         _clear_cancel_event(session_id)
 
 
@@ -1810,6 +2018,8 @@ def xhamster_workflow(
                 logging.error(f"Error cleaning up tracker: {e}")
             workflow_heuristics.complete_success(session_id)
             maybe_notify_complete("SHUCK3R", "xHamster download session finished.", cfg)
+        else:
+            _record_failed_session_history(session_id, "xhamster")
         _clear_cancel_event(session_id)
 
 # ----------------------------- FastAPI Routes ----------------------------- #
@@ -2011,6 +2221,7 @@ def handle_form(
         and webview_login_bridge.embedded_login_env_enabled()
     )
     workflow_heuristics.register_session(session_id, site, embedded=embedded_login)
+    session_history_register(session_id, site, timestamp=timestamp)
     dest = f"/download/session/{session_id}?timestamp={timestamp}&site={site}"
     return RedirectResponse(url=dest, status_code=303)
 
@@ -2253,12 +2464,32 @@ def api_session_cancel(session_id: str):
     with _cancel_lock:
         ev = _cancel_events.get(session_id)
     if ev is None:
-        raise HTTPException(status_code=404, detail="No active session found with that ID.")
+        # Register so a workflow that has not started yet still sees cancel.
+        ev = _get_cancel_event(session_id)
+    if chrome_login_confirm.is_waiting(session_id):
+        logging.info(
+            "Cancel during Pixiv Chrome login wait (session %s)", session_id
+        )
     if ev.is_set():
         return {"ok": True, "message": "Cancel already requested."}
     ev.set()
     logging.info("Cancel requested for session %s", session_id)
     workflow_heuristics.mark_error(session_id, "Download cancelled by user.")
+    site = (_load_session_registry().get(session_id) or {}).get("site")
+    if not site and _session_meta_path(session_id).is_file():
+        try:
+            site = json.loads(
+                _session_meta_path(session_id).read_text(encoding="utf-8")
+            ).get("site")
+        except Exception:
+            site = None
+    if site:
+        session_history_update(
+            session_id,
+            site,
+            status="cancelled",
+            error_message="Download cancelled by user.",
+        )
     return {"ok": True, "message": "Cancel signal sent. The workflow will stop after the current item."}
 
 
@@ -2331,6 +2562,7 @@ def api_session_retry_failed(
         )
 
     workflow_heuristics.register_session(new_session_id, site_n, embedded=False)
+    session_history_register(new_session_id, site_n, timestamp=timestamp)
     return {
         "ok": True,
         "retry_session_id": new_session_id,
@@ -2386,6 +2618,7 @@ def api_queue_resume(snapshot_session_id: str, background_tasks: BackgroundTasks
         )
 
     workflow_heuristics.register_session(new_session_id, site, embedded=False)
+    session_history_register(new_session_id, site, timestamp=timestamp)
     return {
         "ok": True,
         "resume_session_id": new_session_id,
@@ -2512,15 +2745,42 @@ def history_page(request: Request):
 
 @app.get("/api/history")
 def api_history(limit: int = Query(100, ge=1, le=1000)):
-    """Return the last *limit* session history records (oldest first within the slice)."""
-    if not SESSION_HISTORY_FILE.is_file():
-        return []
+    """Return recent sessions: running, failed, cancelled, and completed (most recent first)."""
     try:
-        lines = SESSION_HISTORY_FILE.read_text(encoding="utf-8").splitlines()
-        records = [json.loads(ln) for ln in lines if ln.strip()]
-        return records[-limit:]
+        merged = _history_from_progress_files(_load_session_registry())
+        if SESSION_HISTORY_FILE.is_file():
+            for ln in SESSION_HISTORY_FILE.read_text(encoding="utf-8").splitlines():
+                if not ln.strip():
+                    continue
+                try:
+                    rec = json.loads(ln)
+                except json.JSONDecodeError:
+                    continue
+                sid = rec.get("session_id")
+                if sid and sid not in merged:
+                    rec.setdefault("status", "completed")
+                    rec.setdefault("updated_ts", rec.get("ts"))
+                    merged[sid] = rec
+        records = list(merged.values())
+        records.sort(
+            key=lambda r: r.get("updated_ts") or r.get("ts") or "",
+            reverse=True,
+        )
+        return records[:limit]
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/paths")
+def api_paths():
+    """Effective download and data directories for the running app."""
+    cfg = load_settings()
+    return {
+        "user_data_dir": str(USER_DATA_DIR),
+        "download_directory": str(effective_download_directory(cfg)),
+        "logs_directory": str(LOG_DIR),
+        "session_history_file": str(SESSION_HISTORY_FILE),
+    }
 
 
 if __name__ == "__main__":

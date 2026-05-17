@@ -9,7 +9,8 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from typing import Any, Dict
+import time
+from typing import Any, Callable, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,11 @@ def chrome_login_progress_hint() -> str:
     return CHROME_LOGIN_PROGRESS_HINT
 
 
-def wait_for_chrome_login(session_id: str) -> None:
+def wait_for_chrome_login(
+    session_id: str,
+    *,
+    should_stop: Optional[Callable[[], bool]] = None,
+) -> None:
     """Block until POST /api/selenium-login/confirm signals this session (up to 2 hours)."""
     ev = threading.Event()
     with _lock:
@@ -41,14 +46,19 @@ def wait_for_chrome_login(session_id: str) -> None:
         session_id,
     )
     try:
-        if not ev.wait(timeout=7200.0):
-            raise TimeoutError(
-                "Timed out after 2 hours waiting for “Continue after Chrome login” on the progress page."
-            )
-        logger.info(
-            "[chrome_login v%s] Progress-page confirm received (session %s).",
-            CHROME_LOGIN_WAIT_VERSION,
-            session_id,
+        deadline = time.time() + 7200.0
+        while time.time() < deadline:
+            if should_stop and should_stop():
+                raise InterruptedError("Download cancelled by user.")
+            if ev.wait(timeout=1.0):
+                logger.info(
+                    "[chrome_login v%s] Progress-page confirm received (session %s).",
+                    CHROME_LOGIN_WAIT_VERSION,
+                    session_id,
+                )
+                return
+        raise TimeoutError(
+            "Timed out after 2 hours waiting for “Continue after Chrome login” on the progress page."
         )
     finally:
         with _lock:
