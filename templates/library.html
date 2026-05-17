@@ -65,7 +65,7 @@
   <div class="layout-hero-copy">
     <p class="page-eyebrow page-eyebrow-left">SHUCK3R</p>
     <h1 id="library-title" class="page-title-left">Library</h1>
-    <p class="subtitle subtitle-left">Browse your downloaded videos as a thumbnail grid.</p>
+    <p class="subtitle subtitle-left">Browse your downloaded videos as a thumbnail grid (includes subfolders).</p>
   </div>
 </section>
 
@@ -79,21 +79,21 @@
 
   <div class="library-grid" id="libraryGrid">
     {% for v in videos %}
-    <div class="library-card" data-name="{{ v.filename | lower }}">
-      <a href="/downloaded/{{ v.filename }}" target="_blank" rel="noopener" class="library-thumb-wrap" id="thumb-wrap-{{ loop.index }}">
+    <div class="library-card" data-name="{{ v.rel_path | lower }}">
+      <a href="/downloaded/{{ v.rel_path | urlencode }}" target="_blank" rel="noopener" class="library-thumb-wrap" id="thumb-wrap-{{ loop.index }}">
         <img class="library-thumb"
-             src="/thumbs/{{ v.filename }}"
+             src="/thumbs/{{ v.rel_path | urlencode }}"
              alt="{{ v.filename }}"
              loading="lazy"
              onerror="this.style.display='none'; document.getElementById('ph-{{ loop.index }}').style.display=''">
         <span class="thumb-placeholder" id="ph-{{ loop.index }}" style="display:none" aria-hidden="true">🎬</span>
       </a>
       <div class="library-card-body">
-        <p class="library-card-name" title="{{ v.filename }}">{{ v.filename }}</p>
+        <p class="library-card-name" title="{{ v.rel_path }}">{{ v.rel_path }}</p>
         <p class="library-card-meta">{{ "%.1f"|format(v.size / 1048576) }} MB</p>
         <div class="library-card-actions">
-          <a class="lib-btn" href="/downloaded/{{ v.filename }}" download>↓ Download</a>
-          <a class="lib-btn" href="/downloaded/{{ v.filename }}" target="_blank" rel="noopener">▶ Play</a>
+          <a class="lib-btn" href="/downloaded/{{ v.rel_path | urlencode }}" download>↓ Download</a>
+          <a class="lib-btn" href="/downloaded/{{ v.rel_path | urlencode }}" target="_blank" rel="noopener">▶ Play</a>
         </div>
       </div>
     </div>
@@ -103,6 +103,7 @@
   {% else %}
   <div class="library-empty">
     <p>No video files found in your downloads folder.</p>
+    <p class="mono-path" style="font-size:0.85rem;margin:0.75rem 0">{{ downloads_dir }}</p>
     <p><a href="/">Start a download</a> to populate the library.</p>
   </div>
   {% endif %}

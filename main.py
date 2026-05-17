@@ -113,6 +113,29 @@ app.mount("/static", StaticFiles(directory=str(RESOURCE_ROOT / "static")), name=
 
 DOWNLOADS_ROOT_RESOLVED = str((USER_DATA_DIR / "downloads").resolve())
 
+_LIBRARY_VIDEO_EXTS = frozenset({
+    ".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v", ".wmv", ".flv",
+})
+
+
+def _resolve_under_downloads(relative: str) -> Path:
+    """Resolve a URL-relative path under the downloads root (blocks .. traversal)."""
+    rel = relative.replace("\\", "/").strip().lstrip("/")
+    if not rel or ".." in rel.split("/"):
+        raise HTTPException(status_code=400, detail="Invalid path.")
+    root = Path(DOWNLOAD_DIR).resolve()
+    candidate = (root / rel).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid path.")
+    return candidate
+
+
+def _thumb_cache_name(relative: str) -> str:
+    """Stable thumb filename for a video at *relative* path under downloads."""
+    return relative.replace("\\", "__").replace("/", "__")
+
 # Allowed suffixes for duplicate-checker inline video preview (same validation as path checks).
 DUPLICATE_PREVIEW_VIDEO_EXTENSIONS = frozenset({
     ".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v", ".wmv", ".flv", ".mpeg", ".mpg", ".3gp", ".ogv",
@@ -1452,17 +1475,18 @@ def get_log_tail(session_id: str, lines: int = Query(48, ge=8, le=200)):
     body = _read_log_tail_text(log_file, lines=lines)
     return body or "(log is empty so far)"
 
-@app.get("/downloaded/{filename}")
-def get_downloaded_file(filename: str):
-    """Serve downloaded video files."""
-    file_path = os.path.join(DOWNLOAD_DIR, filename)
-    resolved = Path(file_path).resolve()
-    if not str(resolved).startswith(str(Path(DOWNLOAD_DIR).resolve()) + os.sep):
-        raise HTTPException(status_code=400, detail="Invalid path.")
-    if resolved.exists():
-        return FileResponse(path=str(resolved), filename=resolved.name, media_type='video/mp4')
-    else:
-        return {"error": "File not found."}
+@app.get("/downloaded/{file_path:path}")
+def get_downloaded_file(file_path: str):
+    """Serve a downloaded video file (supports nested paths under the downloads folder)."""
+    resolved = _resolve_under_downloads(file_path)
+    if not resolved.is_file():
+        raise HTTPException(status_code=404, detail="File not found.")
+    media_type, _ = mimetypes.guess_type(str(resolved))
+    return FileResponse(
+        path=str(resolved),
+        filename=resolved.name,
+        media_type=media_type or "video/mp4",
+    )
 
 @app.get("/progress/{session_id}")
 def get_progress(session_id: str):
@@ -1715,28 +1739,34 @@ def api_integrity_scan(body: IntegrityScanBody):
 
 @app.get("/library")
 def library_page(request: Request):
-    """Thumbnail grid browser for all downloaded video files."""
-    video_exts = {".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v", ".wmv", ".flv"}
+    """Thumbnail grid browser for all downloaded video files (including subfolders)."""
     dl_root = Path(DOWNLOADS_ROOT_RESOLVED)
-    videos = []
+    videos: List[Dict[str, Any]] = []
     if dl_root.is_dir():
-        for f in sorted(dl_root.iterdir()):
-            if f.is_file() and f.suffix.lower() in video_exts:
-                videos.append({"filename": f.name, "size": f.stat().st_size})
-    return templates.TemplateResponse(request, "library.html", {"videos": videos})
+        for f in sorted(dl_root.rglob("*")):
+            if not f.is_file() or f.suffix.lower() not in _LIBRARY_VIDEO_EXTS:
+                continue
+            rel = f.relative_to(dl_root).as_posix()
+            videos.append({
+                "rel_path": rel,
+                "filename": f.name,
+                "size": f.stat().st_size,
+            })
+    return templates.TemplateResponse(
+        request,
+        "library.html",
+        {"videos": videos, "downloads_dir": DOWNLOADS_ROOT_RESOLVED},
+    )
 
 
-@app.get("/thumbs/{filename}")
-def get_thumb(filename: str):
+@app.get("/thumbs/{file_path:path}")
+def get_thumb(file_path: str):
     """Serve a thumbnail for a video file, generating it on demand via ffmpeg."""
-    if "/" in filename or "\\" in filename or ".." in filename:
-        raise HTTPException(status_code=400, detail="Invalid filename.")
-    stem = Path(filename).stem
-    thumb_path = THUMBS_DIR / f"{stem}.jpg"
+    video_path = _resolve_under_downloads(file_path)
+    if not video_path.is_file():
+        raise HTTPException(status_code=404, detail="Video not found.")
+    thumb_path = THUMBS_DIR / f"{_thumb_cache_name(file_path)}.jpg"
     if not thumb_path.is_file():
-        video_path = Path(DOWNLOADS_ROOT_RESOLVED) / filename
-        if not video_path.is_file():
-            raise HTTPException(status_code=404, detail="Video not found.")
         _generate_thumbnail(str(video_path), str(thumb_path))
     if thumb_path.is_file():
         return FileResponse(str(thumb_path), media_type="image/jpeg")
