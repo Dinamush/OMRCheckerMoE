@@ -38,6 +38,9 @@ from urllib.parse import parse_qs, urljoin, urlparse
 from webdriver_manager.chrome import ChromeDriverManager
 import yt_dlp
 import requests
+from contextlib import asynccontextmanager
+from dataclasses import asdict
+
 from paths import get_resource_root, get_user_data_dir
 from duplicate_finder import (
     resolve_scan_directory,
@@ -55,6 +58,17 @@ import webview_login_bridge
 import workflow_heuristics
 import pornhub_ph
 import selenium_login_wait
+from settings import (
+    AppSettings,
+    apply_delay,
+    effective_download_directory,
+    load_queue_snapshot,
+    load_settings,
+    maybe_notify_complete,
+    save_settings,
+    save_queue_snapshot,
+    yt_dlp_format_string,
+)
 
 # ----------------------------- Configuration ----------------------------- #
 
@@ -92,11 +106,43 @@ def _clear_cancel_event(session_id: str) -> None:
     with _cancel_lock:
         _cancel_events.pop(session_id, None)
 
+
+_watcher_shutdown = _threading.Event()
+
+
+def _watcher_main_loop() -> None:
+    """Heartbeat when favourites watcher is enabled (MVP: log-only reminders)."""
+    while True:
+        if _watcher_shutdown.is_set():
+            return
+        s = load_settings()
+        interval = max(60.0, float(s.watcher_interval_minutes) * 60.0)
+        if s.watcher_enabled:
+            logging.info(
+                "[favorites watcher] enabled — heartbeat (~%s min); run a download session when ready",
+                s.watcher_interval_minutes,
+            )
+        if _watcher_shutdown.wait(timeout=interval):
+            return
+
+
+@asynccontextmanager
+async def _app_lifespan(_app: FastAPI):
+    t = _threading.Thread(target=_watcher_main_loop, name="hamster-watcher", daemon=True)
+    t.start()
+    yield
+    _watcher_shutdown.set()
+    t.join(timeout=3.0)
+
 from progress_tracker import get_tracker, cleanup_tracker, set_default_log_dir
 
 set_default_log_dir(LOG_DIR)
 
-app = FastAPI(title="SHUCK3R", description="Download videos from PornHub and xHamster favorites")
+app = FastAPI(
+    title="SHUCK3R",
+    description="Download videos from PornHub and xHamster favorites",
+    lifespan=_app_lifespan,
+)
 
 
 def _desktop_session_progress_url(session_id: str, site: str) -> str:
@@ -111,7 +157,16 @@ def _desktop_session_progress_url(session_id: str, site: str) -> str:
 templates = Jinja2Templates(directory=str(RESOURCE_ROOT / "templates"))
 app.mount("/static", StaticFiles(directory=str(RESOURCE_ROOT / "static")), name="static")
 
-DOWNLOADS_ROOT_RESOLVED = str((USER_DATA_DIR / "downloads").resolve())
+
+def _workflow_cookie_file(site: str, session_id: str, cfg: AppSettings) -> str:
+    if cfg.persistent_cookies:
+        name = "pornhub_cookies.txt" if site == "pornhub" else "xhamster_cookies.txt"
+        return str((USER_DATA_DIR / name).resolve())
+    return os.path.join(LOG_DIR, f"{site}_cookies_{session_id}.txt")
+
+
+def _active_download_root() -> Path:
+    return effective_download_directory(load_settings())
 
 _LIBRARY_VIDEO_EXTS = frozenset({
     ".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v", ".wmv", ".flv",
@@ -123,7 +178,7 @@ def _resolve_under_downloads(relative: str) -> Path:
     rel = relative.replace("\\", "/").strip().lstrip("/")
     if not rel or ".." in rel.split("/"):
         raise HTTPException(status_code=400, detail="Invalid path.")
-    root = Path(DOWNLOAD_DIR).resolve()
+    root = _active_download_root().resolve()
     candidate = (root / rel).resolve()
     try:
         candidate.relative_to(root)
@@ -200,12 +255,15 @@ def _selenium_headless_after_embedded_login() -> bool:
     return True
 
 
-def setup_chrome_driver(headless: bool = False) -> webdriver.Chrome:
+def setup_chrome_driver(headless: bool = False, proxy_url: str = "") -> webdriver.Chrome:
     """Set up Chrome WebDriver with webdriver-manager."""
     options = Options()
     if headless:
         options.add_argument("--headless")
         options.add_argument("--disable-gpu")
+    pv = (proxy_url or "").strip()
+    if pv:
+        options.add_argument("--proxy-server=" + pv)
     options.add_argument("--window-size=1920,1080")
     options.add_argument("--log-level=3")
     options.add_argument("--disable-extensions")
@@ -565,54 +623,79 @@ def get_video_title(session: requests.Session, video_url: str) -> str:
     except Exception as e:
         logging.error(f"Error fetching title for {video_url}: {e}")
         return f"video_{int(time.time())}"
+def _ytdlp_file_exists_for_title(download_dir: str, title: str) -> bool:
+    base = Path(download_dir)
+    for ext in (".mp4", ".mkv", ".webm", ".avi", ".m4v"):
+        if (base / f"{title}{ext}").is_file():
+            return True
+    return False
 
-def download_video_ytdlp(video_url: str, title: str, cookie_file: str, download_dir: str, session_id: str) -> None:
+
+def download_video_ytdlp(
+    video_url: str,
+    title: str,
+    cookie_file: str,
+    download_dir: str,
+    session_id: str,
+    *,
+    settings_snapshot: Optional[AppSettings] = None,
+) -> None:
     """Download video using yt-dlp with progress tracking and authentication."""
+    cfg = settings_snapshot or load_settings()
+    retries = cfg.yt_dlp_retries if cfg.yt_dlp_retries >= 0 else 3
     tracker = get_tracker(session_id)
+    if cfg.skip_existing_in_download_dir and _ytdlp_file_exists_for_title(download_dir, title):
+        tracker.skip_download(video_url, "File already exists in download folder")
+        return
+
     tracker.start_download(video_url)
-    
+
     filepath = os.path.join(download_dir, f"{title}.%(ext)s")
-    ydl_opts = {
-        'cookiesfrombrowser': None,  # We'll use cookies file instead
-        'cookiefile': cookie_file,
-        'outtmpl': filepath,
-        'format': 'best[height<=720]',  # Limit to 720p for reasonable file sizes
-        'merge_output_format': 'mp4',   # Convert to MP4
-        'hls_prefer_native': True,      # Use native HLS support for better compatibility
-        'quiet': False,
-        'no_warnings': False,
-        'retries': 3,
-        'ignoreerrors': False,
-        'extractor_retries': 3,
-        'fragment_retries': 3,
-        'writeinfojson': False,
-        'writesubtitles': False,
-        'writeautomaticsub': False,
+    fmt = yt_dlp_format_string(cfg)
+    ydl_opts: Dict[str, Any] = {
+        "cookiesfrombrowser": None,  # We'll use cookies file instead
+        "cookiefile": cookie_file,
+        "outtmpl": filepath,
+        "format": fmt,
+        "merge_output_format": "mp4",
+        "hls_prefer_native": True,
+        "quiet": False,
+        "no_warnings": False,
+        "retries": retries,
+        "ignoreerrors": False,
+        "extractor_retries": retries,
+        "fragment_retries": retries,
+        "writeinfojson": False,
+        "writesubtitles": False,
+        "writeautomaticsub": False,
     }
-    
+    pv = (cfg.proxy_url or "").strip()
+    if pv:
+        ydl_opts["proxy"] = pv
+
     def progress_hook(d):
-        if d['status'] == 'downloading':
-            if 'total_bytes' in d and d['total_bytes']:
-                percent = (d['downloaded_bytes'] / d['total_bytes']) * 100
+        if d["status"] == "downloading":
+            if "total_bytes" in d and d["total_bytes"]:
+                percent = (d["downloaded_bytes"] / d["total_bytes"]) * 100
                 logging.info(f"Downloading {title}: {percent:.1f}%")
-        elif d['status'] == 'finished':
+        elif d["status"] == "finished":
             logging.info(f"Finished downloading {title}")
-    
-    ydl_opts['progress_hooks'] = [progress_hook]
-    
+
+    ydl_opts["progress_hooks"] = [progress_hook]
+
     try:
         logging.info(f"Downloading video with authentication: {video_url}")
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([video_url])
-            
+
         # Find the actual downloaded file
         actual_file = None
-        for ext in ['.mp4', '.mkv', '.webm', '.avi']:
+        for ext in [".mp4", ".mkv", ".webm", ".avi"]:
             potential_file = os.path.join(download_dir, f"{title}{ext}")
             if os.path.exists(potential_file):
                 actual_file = potential_file
                 break
-        
+
         if actual_file:
             file_size = os.path.getsize(actual_file)
             tracker.complete_download(video_url, actual_file, file_size)
@@ -620,56 +703,74 @@ def download_video_ytdlp(video_url: str, title: str, cookie_file: str, download_
         else:
             tracker.fail_download(video_url, "Downloaded file not found")
             logging.error(f"No file found for {title}")
-            
+
     except Exception as e:
         tracker.fail_download(video_url, str(e))
         logging.error(f"Exception downloading {video_url}: {e}")
 
-def download_video_direct(video_url: str, title: str, download_dir: str, session_id: str) -> None:
+
+def download_video_direct(
+    video_url: str,
+    title: str,
+    download_dir: str,
+    session_id: str,
+    *,
+    settings_snapshot: Optional[AppSettings] = None,
+) -> None:
     """Download video using yt-dlp without cookies with progress tracking."""
+    cfg = settings_snapshot or load_settings()
+    retries = cfg.yt_dlp_retries if cfg.yt_dlp_retries >= 0 else 3
     tracker = get_tracker(session_id)
+    if cfg.skip_existing_in_download_dir and _ytdlp_file_exists_for_title(download_dir, title):
+        tracker.skip_download(video_url, "File already exists in download folder")
+        return
+
     tracker.start_download(video_url)
-    
+
     filepath = os.path.join(download_dir, f"{title}.%(ext)s")
-    ydl_opts = {
-        'outtmpl': filepath,
-        'format': 'best[height<=720]',  # Limit to 720p for reasonable file sizes
-        'merge_output_format': 'mp4',   # Convert to MP4
-        'hls_prefer_native': True,      # Use native HLS support for better compatibility
-        'quiet': False,
-        'no_warnings': False,
-        'retries': 3,
-        'ignoreerrors': False,
-        'extractor_retries': 3,
-        'fragment_retries': 3,
-        'writeinfojson': False,
-        'writesubtitles': False,
-        'writeautomaticsub': False,
+    fmt = yt_dlp_format_string(cfg)
+    ydl_opts: Dict[str, Any] = {
+        "outtmpl": filepath,
+        "format": fmt,
+        "merge_output_format": "mp4",
+        "hls_prefer_native": True,
+        "quiet": False,
+        "no_warnings": False,
+        "retries": retries,
+        "ignoreerrors": False,
+        "extractor_retries": retries,
+        "fragment_retries": retries,
+        "writeinfojson": False,
+        "writesubtitles": False,
+        "writeautomaticsub": False,
     }
-    
+    pv = (cfg.proxy_url or "").strip()
+    if pv:
+        ydl_opts["proxy"] = pv
+
     def progress_hook(d):
-        if d['status'] == 'downloading':
-            if 'total_bytes' in d and d['total_bytes']:
-                percent = (d['downloaded_bytes'] / d['total_bytes']) * 100
+        if d["status"] == "downloading":
+            if "total_bytes" in d and d["total_bytes"]:
+                percent = (d["downloaded_bytes"] / d["total_bytes"]) * 100
                 logging.info(f"Downloading {title}: {percent:.1f}%")
-        elif d['status'] == 'finished':
+        elif d["status"] == "finished":
             logging.info(f"Finished downloading {title}")
-    
-    ydl_opts['progress_hooks'] = [progress_hook]
-    
+
+    ydl_opts["progress_hooks"] = [progress_hook]
+
     try:
         logging.info(f"Downloading xHamster video: {video_url}")
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([video_url])
-            
+
         # Find the actual downloaded file
         actual_file = None
-        for ext in ['.mp4', '.mkv', '.webm', '.avi']:
+        for ext in [".mp4", ".mkv", ".webm", ".avi"]:
             potential_file = os.path.join(download_dir, f"{title}{ext}")
             if os.path.exists(potential_file):
                 actual_file = potential_file
                 break
-        
+
         if actual_file:
             file_size = os.path.getsize(actual_file)
             tracker.complete_download(video_url, actual_file, file_size)
@@ -677,13 +778,21 @@ def download_video_direct(video_url: str, title: str, download_dir: str, session
         else:
             tracker.fail_download(video_url, "Downloaded file not found")
             logging.error(f"No file found for {title}")
-            
+
     except Exception as e:
         tracker.fail_download(video_url, str(e))
         logging.error(f"Exception downloading {video_url}: {e}")
 
-def download_videos_parallel(video_info_list: List[Tuple[str, str]], download_dir: str,
-                           max_workers: int = 4, cookie_file: str = None, session_id: str = None) -> None:
+
+def download_videos_parallel(
+    video_info_list: List[Tuple[str, str]],
+    download_dir: str,
+    max_workers: int = 4,
+    cookie_file: str = None,
+    session_id: str = None,
+    *,
+    settings_snapshot: Optional[AppSettings] = None,
+) -> None:
     """Download a batch of videos in parallel and track progress.
 
     Args:
@@ -711,16 +820,37 @@ def download_videos_parallel(video_info_list: List[Tuple[str, str]], download_di
             titles = [item[1] for item in video_info_list]
             tracker.add_urls(urls, titles)
         
+        cfg = settings_snapshot or load_settings()
         logging.info(f"Starting download of {len(video_info_list)} videos with {max_workers} workers")
 
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
         try:
             futures = []
             for video_url, title in video_info_list:
+                apply_delay(cfg.download_delay_seconds, cfg.delay_variance_seconds)
                 if cookie_file:
-                    futures.append(executor.submit(download_video_ytdlp, video_url, title, cookie_file, download_dir, session_id))
+                    futures.append(
+                        executor.submit(
+                            download_video_ytdlp,
+                            video_url,
+                            title,
+                            cookie_file,
+                            download_dir,
+                            session_id,
+                            settings_snapshot=cfg,
+                        )
+                    )
                 else:
-                    futures.append(executor.submit(download_video_direct, video_url, title, download_dir, session_id))
+                    futures.append(
+                        executor.submit(
+                            download_video_direct,
+                            video_url,
+                            title,
+                            download_dir,
+                            session_id,
+                            settings_snapshot=cfg,
+                        )
+                    )
 
             for future in concurrent.futures.as_completed(futures):
                 try:
@@ -838,9 +968,11 @@ def pornhub_workflow(
         session_id = str(int(time.time()))
 
     setup_logging(log_file)
-    ensure_download_dir(download_dir)
+    cfg = load_settings()
+    download_root = str(effective_download_directory(cfg))
+    ensure_download_dir(download_root)
 
-    cookie_file = os.path.join(LOG_DIR, f"pornhub_cookies_{session_id}.txt")
+    cookie_file = _workflow_cookie_file("pornhub", session_id, cfg)
     driver = None
     ok = False
 
@@ -856,7 +988,7 @@ def pornhub_workflow(
             time.sleep(1.0)
         else:
             workflow_heuristics.advance(session_id, "chrome_login")
-            driver = setup_chrome_driver(headless)
+            driver = setup_chrome_driver(headless, cfg.proxy_url)
             driver.get("https://www.pornhub.com")
             logging.info("Please log in to PornHub in the opened browser.")
             workflow_heuristics.set_detail(
@@ -870,7 +1002,7 @@ def pornhub_workflow(
             )
             time.sleep(5)
             save_cookies_netscape(driver, cookie_file)
-            healthy, health_msg = pornhub_ph.check_cookie_health(cookie_file)
+            healthy, health_msg = pornhub_ph.check_cookie_health(cookie_file, cfg.proxy_url)
             if not healthy:
                 logging.warning("PornHub cookie health check failed: %s", health_msg)
                 workflow_heuristics.mark_error(session_id, f"Login check failed — {health_msg}")
@@ -886,7 +1018,11 @@ def pornhub_workflow(
                 session_id,
                 "Collecting favourites (HTTP, paginated) — same approach as ph.py…",
             )
-            video_urls = pornhub_ph.collect_favorites_urls_requests(cookie_file, playlist_url)
+            video_urls = pornhub_ph.collect_favorites_urls_requests(
+                cookie_file,
+                playlist_url,
+                proxy_url=cfg.proxy_url,
+            )
         else:
             workflow_heuristics.set_detail(
                 session_id,
@@ -907,6 +1043,12 @@ def pornhub_workflow(
 
         workflow_heuristics.set_detail(session_id, f"Found {len(video_urls)} videos in favourites")
 
+        if cfg.persist_queue_snapshots:
+            try:
+                save_queue_snapshot(session_id, "pornhub", video_urls, USER_DATA_DIR)
+            except Exception as e:
+                logging.warning("Could not save queue snapshot: %s", e)
+
         workflow_heuristics.advance(session_id, "download")
 
         if library_dir:
@@ -922,7 +1064,7 @@ def pornhub_workflow(
             to_download: List[Tuple[str, str]] = []
             skipped_n = 0
             for i, url in enumerate(video_urls):
-                title = pornhub_ph.fetch_video_title_from_page(cookie_file, url)
+                title = pornhub_ph.fetch_video_title_from_page(cookie_file, url, proxy_url=cfg.proxy_url)
                 if matches_existing_library(title, norms):
                     tracker.add_urls([url], [title])
                     tracker.skip_download(url, "Already in library folder")
@@ -956,10 +1098,14 @@ def pornhub_workflow(
                 )
                 pornhub_ph.download_pornhub_videos_parallel(
                     [pair[0] for pair in to_download],
-                    download_dir,
+                    download_root,
                     cookie_file,
                     session_id,
+                    max_workers=max(1, cfg.max_parallel_downloads),
                     driver=driver,
+                    proxy_url=cfg.proxy_url,
+                    skip_if_exists=cfg.skip_existing_in_download_dir,
+                    yt_dlp_retries=cfg.yt_dlp_retries,
                 )
             else:
                 logging.info("All favorites matched files in the library folder; nothing to download.")
@@ -973,10 +1119,14 @@ def pornhub_workflow(
                 return
             pornhub_ph.download_pornhub_videos_parallel(
                 video_urls,
-                download_dir,
+                download_root,
                 cookie_file,
                 session_id,
+                max_workers=max(1, cfg.max_parallel_downloads),
                 driver=driver,
+                proxy_url=cfg.proxy_url,
+                skip_if_exists=cfg.skip_existing_in_download_dir,
+                yt_dlp_retries=cfg.yt_dlp_retries,
             )
 
         ok = True
@@ -992,7 +1142,7 @@ def pornhub_workflow(
             except Exception as e:
                 logging.error(f"Error closing Chrome WebDriver: {e}")
         try:
-            if os.path.exists(cookie_file):
+            if not cfg.persistent_cookies and os.path.exists(cookie_file):
                 os.unlink(cookie_file)
         except Exception as e:
             logging.warning(f"Could not delete cookie file {cookie_file}: {e}")
@@ -1003,24 +1153,37 @@ def pornhub_workflow(
             except Exception as e:
                 logging.error(f"Error cleaning up tracker: {e}")
             workflow_heuristics.complete_success(session_id)
+            maybe_notify_complete("SHUCK3R", "PornHub download session finished.", cfg)
         _clear_cancel_event(session_id)
 
-def extract_video_info_sequential(driver, video_urls: List[str]) -> List[Tuple[str, str, str]]:
+
+def _xh_watch_page_candidate(url: str) -> bool:
+    lu = url.lower()
+    return "xhamster." in lu and ("/videos/" in lu or "/movies/" in lu)
+
+
+def extract_video_info_sequential(
+    driver,
+    video_urls: List[str],
+    *,
+    delay_settings: Optional[AppSettings] = None,
+) -> List[Tuple[str, Optional[str], str]]:
     """Extract video info sequentially to avoid driver conflicts."""
     results = []
     for i, video_url in enumerate(video_urls):
         try:
-            logging.info(f"Extracting video {i+1}/{len(video_urls)}: {video_url}")
+            logging.info(f"Extracting video {i + 1}/{len(video_urls)}: {video_url}")
             direct_url, video_title = extract_direct_video_url(driver, video_url)
             results.append((video_url, direct_url, video_title))
-            
-            # Small delay between extractions to avoid overwhelming the site
+
             time.sleep(0.5)
-            
+            if delay_settings:
+                apply_delay(delay_settings.page_delay_seconds, delay_settings.delay_variance_seconds)
+
         except Exception as e:
             logging.error(f"Error extracting info for {video_url}: {e}")
             results.append((video_url, None, f"video_{int(time.time())}"))
-    
+
     return results
 
 def xhamster_workflow(
@@ -1033,15 +1196,20 @@ def xhamster_workflow(
     library_dir: Optional[str] = None,
     library_recursive: bool = False,
     cancel_event: Optional[_threading.Event] = None,
+    favorite_urls_override: Optional[List[str]] = None,
+    retry_pairs: Optional[List[Tuple[str, str]]] = None,
 ) -> None:
     """xHamster workflow using Chrome and yt-dlp with two-phase approach."""
     if not session_id:
         session_id = str(int(time.time()))
-        
+
+    cfg = load_settings()
+    download_root = str(effective_download_directory(cfg))
+
     setup_logging(log_file)
-    ensure_download_dir(download_dir)
-    
-    cookie_file = os.path.join(LOG_DIR, f"xhamster_cookies_{session_id}.txt")
+    ensure_download_dir(download_root)
+
+    cookie_file = _workflow_cookie_file("xhamster", session_id, cfg)
     driver = None
     ok = False
     try:
@@ -1063,11 +1231,11 @@ def xhamster_workflow(
             workflow_heuristics.advance(session_id, "save_cookies")
             workflow_heuristics.set_detail(session_id, None)
             workflow_heuristics.advance(session_id, "browser_start")
-            driver = setup_chrome_driver(scrape_headless)
+            driver = setup_chrome_driver(scrape_headless, cfg.proxy_url)
             load_netscape_cookies_into_driver(driver, cookie_file, "https://xhamster.com/")
         else:
             workflow_heuristics.advance(session_id, "chrome_login")
-            driver = setup_chrome_driver(headless)
+            driver = setup_chrome_driver(headless, cfg.proxy_url)
             wait_for_manual_login(driver, login_url, session_id)
             time.sleep(5)
             save_cookies_netscape(driver, cookie_file)
@@ -1075,200 +1243,302 @@ def xhamster_workflow(
             workflow_heuristics.advance(session_id, "browser_start")
 
         tracker = get_tracker(session_id)
-        workflow_heuristics.advance(session_id, "collect_urls")
-        workflow_heuristics.set_detail(session_id, "Loading your favorites pages…")
-
-        # PHASE 1: Collect all video URLs from all pages
-        logging.info("=== PHASE 1: Collecting all video URLs from all pages ===")
-        all_video_links: Set[str] = set()
-        page_number = 1
-        consecutive_empty_pages = 0
-        max_consecutive_empty = 3
-        
-        while True:
-            # Try different pagination approaches for xHamster
-            if page_number == 1:
-                current_page_url = favorites_url
-                html_content = fetch_html_selenium(driver, current_page_url)
-            else:
-                # xHamster uses /page_number format for pagination
-                if page_number == 2:
-                    current_page_url = f"{favorites_url}/2"
-                else:
-                    current_page_url = f"{favorites_url}/{page_number}"
-                
-                html_content = fetch_html_selenium(driver, current_page_url)
-                
-                # If URL pagination didn't work, try clicking next button
-                if not html_content:
-                    logging.info(f"URL pagination didn't work for page {page_number}, trying next button...")
-                    if try_click_next_button(driver):
-                        html_content = driver.page_source
-                        current_page_url = driver.current_url
-                    else:
-                        logging.info(f"No next button found, stopping pagination")
+        if retry_pairs is not None:
+            workflow_heuristics.advance(session_id, "collect_urls")
+            workflow_heuristics.set_detail(session_id, f"Retrying {len(retry_pairs)} failed URLs…")
+            workflow_heuristics.advance(session_id, "download")
+            tracker.start_session(len(retry_pairs))
+            workflow_heuristics.set_detail(
+                session_id,
+                f"{len(retry_pairs)} retries · fetching streams again",
+            )
+            library_norms_retry = None
+            if library_dir:
+                library_norms_retry = build_library_normalized_names(
+                    Path(library_dir), recursive=library_recursive
+                )
+            batch_sz_retry = 10
+            total_dn_retry = 0
+            for i_retry in range(0, len(retry_pairs), batch_sz_retry):
+                batch_pairs = retry_pairs[i_retry : i_retry + batch_sz_retry]
+                batch_num_r = i_retry // batch_sz_retry + 1
+                total_batches_r = (len(retry_pairs) + batch_sz_retry - 1) // batch_sz_retry
+                logging.info("Retry batch %s/%s (%s items)", batch_num_r, total_batches_r, len(batch_pairs))
+                video_rows: List[Tuple[str, Optional[str], str]] = []
+                for raw_u, title_hint in batch_pairs:
+                    if cancel_event and cancel_event.is_set():
                         break
-            
-            logging.info(f"Collecting URLs from page {page_number}: {current_page_url}")
-            
-            if not html_content:
-                logging.info(f"No content found on page {page_number}, stopping pagination")
-                break
-            
-            # Debug: Check if we're getting the same content
-            current_url = driver.current_url
-            logging.info(f"Current browser URL after navigation: {current_url}")
-            
-            # Check if we've been redirected to a different page (indicating end of pagination)
-            if "favorites/videos" not in current_url or "login" in current_url or "signin" in current_url:
-                logging.warning(f"Redirected away from favorites page: {current_url} - stopping pagination")
-                break
-            
-            # Check if we're on an error page (404, etc.) - stop pagination immediately
-            if "404" in driver.title or "error" in driver.title.lower() or "not found" in driver.title.lower():
-                logging.warning(f"Page {page_number} appears to be an error page: {driver.title} - stopping pagination")
-                break
-            
-            video_links = parse_video_links_xhamster(html_content, "https://xhamster.com")
-            if not video_links:
-                logging.info(f"No video links found on page {page_number}, stopping pagination")
-                break
-            
-            # Debug: Log some sample URLs to see if they're different
-            sample_urls = list(video_links)[:3] if video_links else []
-            logging.info(f"Sample video URLs from page {page_number}: {sample_urls}")
-            
-            # Check if we're getting the same sample URLs as previous pages (indicating end of pagination)
-            if page_number > 1 and sample_urls:
-                # Store sample URLs from previous page for comparison
-                if not hasattr(try_click_next_button, 'prev_sample_urls'):
-                    try_click_next_button.prev_sample_urls = []
-                
-                if sample_urls == try_click_next_button.prev_sample_urls:
-                    logging.warning(f"Page {page_number} returned identical sample URLs as previous page - likely end of pagination")
-                    consecutive_empty_pages += 1
-                
-                try_click_next_button.prev_sample_urls = sample_urls
-            
-            new_links = set(video_links) - all_video_links
-            if not new_links:
-                consecutive_empty_pages += 1
-                logging.info(f"No new videos found on page {page_number} (consecutive empty: {consecutive_empty_pages})")
-                
-                # Check if we're getting the exact same URLs (indicating pagination isn't working)
-                if video_links and len(video_links) == len(all_video_links) and set(video_links).issubset(all_video_links):
-                    logging.warning(f"Page {page_number} returned identical content to previous pages - pagination may not be working")
-                    consecutive_empty_pages += 1  # Count this as an empty page
-                
-                
-                if consecutive_empty_pages >= max_consecutive_empty:
-                    logging.info(f"Stopping pagination after {consecutive_empty_pages} consecutive pages with no new videos")
+                    if _xh_watch_page_candidate(raw_u):
+                        du, vt = extract_direct_video_url(driver, raw_u)
+                        video_rows.append((raw_u, du, vt or title_hint))
+                    else:
+                        video_rows.append((raw_u, raw_u, title_hint))
+                    apply_delay(cfg.page_delay_seconds, cfg.delay_variance_seconds)
+                vids_td: List[Tuple[str, str]] = []
+                for orig_u, du2, ttl2 in video_rows:
+                    if cancel_event and cancel_event.is_set():
+                        break
+                    if du2:
+                        if library_norms_retry and matches_existing_library(ttl2, library_norms_retry):
+                            tracker.add_urls([du2], [ttl2])
+                            tracker.skip_download(du2, "Already in library folder")
+                            logging.info("Skipping retry (library match): %s", ttl2)
+                            continue
+                        vids_td.append((du2, ttl2))
+                        tracker.add_urls([du2], [ttl2])
+                    else:
+                        fb_ttl = ttl2 or f"video_{total_dn_retry + len(vids_td)}"
+                        tracker.add_urls([orig_u], [fb_ttl])
+                        tracker.fail_download(orig_u, "Could not extract direct video URL (retry)")
+                if vids_td:
+                    download_videos_parallel(
+                        vids_td,
+                        download_root,
+                        max_workers=max(1, cfg.max_parallel_downloads),
+                        cookie_file=cookie_file,
+                        session_id=session_id,
+                        settings_snapshot=cfg,
+                    )
+                    total_dn_retry += len(vids_td)
+                time.sleep(2)
+                apply_delay(cfg.download_delay_seconds, cfg.delay_variance_seconds)
+                if cancel_event and cancel_event.is_set():
+                    logging.info(
+                        "Cancellation requested between xHamster retry batches — stopping."
+                    )
+                    workflow_heuristics.mark_error(session_id, "Download cancelled by user.")
                     break
-            else:
-                consecutive_empty_pages = 0  # Reset counter when we find new videos
-                logging.info(f"Found {len(new_links)} new videos on page {page_number}")
-            
-            all_video_links.update(video_links)  # Update with all links from this page
-            workflow_heuristics.set_detail(
-                session_id,
-                f"Favorites page {page_number} · {len(all_video_links)} links collected so far",
-            )
-            page_number += 1
-
-            if cancel_event and cancel_event.is_set():
-                logging.info("Cancellation requested during page collection - stopping.")
-                workflow_heuristics.mark_error(session_id, "Download cancelled by user.")
-                return
-
-            # Safety limit to prevent infinite loops
-            if page_number > 100:
-                logging.warning("Reached maximum page limit (100), stopping pagination")
-                break
-        
-        logging.info(f"=== PHASE 1 COMPLETE: Collected {len(all_video_links)} unique video URLs from {page_number-1} pages ===")
-
-        # PHASE 2: Download all videos
-        logging.info("=== PHASE 2: Downloading all videos ===")
-        all_video_links_list = list(all_video_links)
-        tracker.start_session(len(all_video_links_list))
-        workflow_heuristics.advance(session_id, "download")
-
-        library_norms = None
-        if library_dir:
-            library_norms = build_library_normalized_names(
-                Path(library_dir), recursive=library_recursive
-            )
             logging.info(
-                "Existing-library filter active: %s normalized video names under %s",
-                len(library_norms),
-                library_dir,
+                "=== RETRY PHASE COMPLETE: processed %s items (successful downloads counted per batch)",
+                len(retry_pairs),
             )
-            workflow_heuristics.set_detail(
-                session_id,
-                f"{len(all_video_links_list)} favorites · skipping names already in your library folder",
-            )
+
         else:
-            workflow_heuristics.set_detail(
-                session_id,
-                f"{len(all_video_links_list)} videos queued · processing in batches",
-            )
+            workflow_heuristics.advance(session_id, "collect_urls")
+            workflow_heuristics.set_detail(session_id, "Loading your favorites pages…")
+    
+            # PHASE 1: Collect all video URLs from all pages
+            logging.info("=== PHASE 1: Collecting all video URLs from all pages ===")
+            if favorite_urls_override is not None:
+                all_video_links: Set[str] = set(dict.fromkeys(favorite_urls_override))
+                logging.info(
+                    "=== PHASE 1 SKIPPED: using saved/injected favourites list (%s items) ===",
+                    len(all_video_links),
+                )
+                logging.info(
+                    "=== PHASE 1 COMPLETE (injected URL list): %s unique watch-page links ===",
+                    len(all_video_links),
+                )
+            else:
+                all_video_links = set()
+                page_number = 1
+                consecutive_empty_pages = 0
+                max_consecutive_empty = 3
 
-        batch_size = 10
-        total_downloaded = 0
+                while True:
+                    # Try different pagination approaches for xHamster
+                    if page_number == 1:
+                        current_page_url = favorites_url
+                        html_content = fetch_html_selenium(driver, current_page_url)
+                    else:
+                        # xHamster uses /page_number format for pagination
+                        if page_number == 2:
+                            current_page_url = f"{favorites_url}/2"
+                        else:
+                            current_page_url = f"{favorites_url}/{page_number}"
 
-        for i in range(0, len(all_video_links_list), batch_size):
-            batch = all_video_links_list[i:i + batch_size]
-            batch_num = i // batch_size + 1
-            total_batches = (len(all_video_links_list) + batch_size - 1) // batch_size
+                        html_content = fetch_html_selenium(driver, current_page_url)
 
-            logging.info(f"Processing batch {batch_num}/{total_batches} ({len(batch)} videos)")
-            workflow_heuristics.set_detail(
-                session_id,
-                f"Batch {batch_num} of {total_batches} · resolving streams and downloading",
-            )
-            
-            # Extract video info sequentially (to avoid driver conflicts)
-            video_info_results = extract_video_info_sequential(driver, batch)
-            
-            videos_to_download = []
-            for original_url, direct_url, video_title in video_info_results:
-                if direct_url:
-                    if library_norms and matches_existing_library(
-                        video_title, library_norms
-                    ):
+                        # If URL pagination didn't work, try clicking next button
+                        if not html_content:
+                            logging.info(f"URL pagination didn't work for page {page_number}, trying next button...")
+                            if try_click_next_button(driver):
+                                html_content = driver.page_source
+                                current_page_url = driver.current_url
+                            else:
+                                logging.info(f"No next button found, stopping pagination")
+                                break
+
+                    logging.info(f"Collecting URLs from page {page_number}: {current_page_url}")
+
+                    if not html_content:
+                        logging.info(f"No content found on page {page_number}, stopping pagination")
+                        break
+
+                    # Debug: Check if we're getting the same content
+                    current_url = driver.current_url
+                    logging.info(f"Current browser URL after navigation: {current_url}")
+
+                    # Check if we've been redirected to a different page (indicating end of pagination)
+                    if "favorites/videos" not in current_url or "login" in current_url or "signin" in current_url:
+                        logging.warning(f"Redirected away from favorites page: {current_url} - stopping pagination")
+                        break
+
+                    # Check if we're on an error page (404, etc.) - stop pagination immediately
+                    if "404" in driver.title or "error" in driver.title.lower() or "not found" in driver.title.lower():
+                        logging.warning(f"Page {page_number} appears to be an error page: {driver.title} - stopping pagination")
+                        break
+
+                    video_links = parse_video_links_xhamster(html_content, "https://xhamster.com")
+                    if not video_links:
+                        logging.info(f"No video links found on page {page_number}, stopping pagination")
+                        break
+
+                    # Debug: Log some sample URLs to see if they're different
+                    sample_urls = list(video_links)[:3] if video_links else []
+                    logging.info(f"Sample video URLs from page {page_number}: {sample_urls}")
+
+                    # Check if we're getting the same sample URLs as previous pages (indicating end of pagination)
+                    if page_number > 1 and sample_urls:
+                        # Store sample URLs from previous page for comparison
+                        if not hasattr(try_click_next_button, 'prev_sample_urls'):
+                            try_click_next_button.prev_sample_urls = []
+
+                        if sample_urls == try_click_next_button.prev_sample_urls:
+                            logging.warning(f"Page {page_number} returned identical sample URLs as previous page - likely end of pagination")
+                            consecutive_empty_pages += 1
+
+                        try_click_next_button.prev_sample_urls = sample_urls
+
+                    new_links = set(video_links) - all_video_links
+                    if not new_links:
+                        consecutive_empty_pages += 1
+                        logging.info(f"No new videos found on page {page_number} (consecutive empty: {consecutive_empty_pages})")
+
+                        # Check if we're getting the exact same URLs (indicating pagination isn't working)
+                        if video_links and len(video_links) == len(all_video_links) and set(video_links).issubset(all_video_links):
+                            logging.warning(f"Page {page_number} returned identical content to previous pages - pagination may not be working")
+                            consecutive_empty_pages += 1  # Count this as an empty page
+
+                        if consecutive_empty_pages >= max_consecutive_empty:
+                            logging.info(f"Stopping pagination after {consecutive_empty_pages} consecutive pages with no new videos")
+                            break
+                    else:
+                        consecutive_empty_pages = 0  # Reset counter when we find new videos
+                        logging.info(f"Found {len(new_links)} new videos on page {page_number}")
+
+                    all_video_links.update(video_links)  # Update with all links from this page
+                    workflow_heuristics.set_detail(
+                        session_id,
+                        f"Favorites page {page_number} · {len(all_video_links)} links collected so far",
+                    )
+                    page_number += 1
+
+                    if cancel_event and cancel_event.is_set():
+                        logging.info("Cancellation requested during page collection - stopping.")
+                        workflow_heuristics.mark_error(session_id, "Download cancelled by user.")
+                        return
+
+                    # Safety limit to prevent infinite loops
+                    if page_number > 100:
+                        logging.warning("Reached maximum page limit (100), stopping pagination")
+                        break
+
+                    apply_delay(cfg.page_delay_seconds, cfg.delay_variance_seconds)
+
+                logging.info(
+                    "=== PHASE 1 COMPLETE: Collected %s unique video URLs from %s favourites pages ===",
+                    len(all_video_links),
+                    max(0, page_number - 1),
+                )
+
+            if cfg.persist_queue_snapshots:
+                try:
+                    save_queue_snapshot(session_id, "xhamster", list(all_video_links), USER_DATA_DIR)
+                except Exception as e:
+                    logging.warning("Could not save queue snapshot: %s", e)
+            # PHASE 2: Download all videos
+            logging.info("=== PHASE 2: Downloading all videos ===")
+            all_video_links_list = list(all_video_links)
+            tracker.start_session(len(all_video_links_list))
+            workflow_heuristics.advance(session_id, "download")
+    
+            library_norms = None
+            if library_dir:
+                library_norms = build_library_normalized_names(
+                    Path(library_dir), recursive=library_recursive
+                )
+                logging.info(
+                    "Existing-library filter active: %s normalized video names under %s",
+                    len(library_norms),
+                    library_dir,
+                )
+                workflow_heuristics.set_detail(
+                    session_id,
+                    f"{len(all_video_links_list)} favorites · skipping names already in your library folder",
+                )
+            else:
+                workflow_heuristics.set_detail(
+                    session_id,
+                    f"{len(all_video_links_list)} videos queued · processing in batches",
+                )
+    
+            batch_size = 10
+            total_downloaded = 0
+    
+            for i in range(0, len(all_video_links_list), batch_size):
+                batch = all_video_links_list[i:i + batch_size]
+                batch_num = i // batch_size + 1
+                total_batches = (len(all_video_links_list) + batch_size - 1) // batch_size
+    
+                logging.info(f"Processing batch {batch_num}/{total_batches} ({len(batch)} videos)")
+                workflow_heuristics.set_detail(
+                    session_id,
+                    f"Batch {batch_num} of {total_batches} · resolving streams and downloading",
+                )
+                
+                # Extract video info sequentially (to avoid driver conflicts)
+                video_info_results = extract_video_info_sequential(
+                    driver, batch, delay_settings=cfg
+                )
+                
+                videos_to_download = []
+                for original_url, direct_url, video_title in video_info_results:
+                    if direct_url:
+                        if library_norms and matches_existing_library(
+                            video_title, library_norms
+                        ):
+                            tracker.add_urls([direct_url], [video_title])
+                            tracker.skip_download(
+                                direct_url, "Already in library folder"
+                            )
+                            logging.info(
+                                "Skipping download (library match): %s", video_title
+                            )
+                            continue
+                        videos_to_download.append((direct_url, video_title))
                         tracker.add_urls([direct_url], [video_title])
-                        tracker.skip_download(
-                            direct_url, "Already in library folder"
-                        )
-                        logging.info(
-                            "Skipping download (library match): %s", video_title
-                        )
-                        continue
-                    videos_to_download.append((direct_url, video_title))
-                    tracker.add_urls([direct_url], [video_title])
-                else:
-                    fallback_title = f"video_{total_downloaded + len(videos_to_download)}"
-                    tracker.add_urls([original_url], [fallback_title])
-                    tracker.fail_download(original_url, "Could not extract direct video URL")
-            
-            # Download videos in parallel
-            if videos_to_download:
-                logging.info(f"Downloading {len(videos_to_download)} videos from batch {batch_num}...")
-                download_videos_parallel(videos_to_download, download_dir, cookie_file=cookie_file, session_id=session_id)
-                total_downloaded += len(videos_to_download)
-            
-            # Small delay between batches
-            time.sleep(2)
+                    else:
+                        fallback_title = f"video_{total_downloaded + len(videos_to_download)}"
+                        tracker.add_urls([original_url], [fallback_title])
+                        tracker.fail_download(original_url, "Could not extract direct video URL")
+                
+                # Download videos in parallel
+                if videos_to_download:
+                    logging.info(f"Downloading {len(videos_to_download)} videos from batch {batch_num}...")
+                    download_videos_parallel(
+                        videos_to_download,
+                        download_root,
+                        max_workers=max(1, cfg.max_parallel_downloads),
+                        cookie_file=cookie_file,
+                        session_id=session_id,
+                        settings_snapshot=cfg,
+                    )
+                    total_downloaded += len(videos_to_download)
+                
+                # Small delay between batches
+                time.sleep(2)
+                apply_delay(cfg.download_delay_seconds, cfg.delay_variance_seconds)
 
-            if cancel_event and cancel_event.is_set():
-                logging.info("Cancellation requested between xHamster batches \u2014 stopping.")
-                workflow_heuristics.mark_error(session_id, "Download cancelled by user.")
-                break
-        
-        logging.info(f"=== PHASE 2 COMPLETE: Downloaded {total_downloaded} videos ===")
-        logging.info(f"xHamster workflow completed. Total videos processed: {total_downloaded}")
-
-        workflow_heuristics.set_detail(session_id, None)
+                if cancel_event and cancel_event.is_set():
+                    logging.info("Cancellation requested between xHamster batches \u2014 stopping.")
+                    workflow_heuristics.mark_error(session_id, "Download cancelled by user.")
+                    break
+            
+            logging.info(f"=== PHASE 2 COMPLETE: Downloaded {total_downloaded} videos ===")
+            logging.info(f"xHamster workflow completed. Total videos processed: {total_downloaded}")
+    
+            workflow_heuristics.set_detail(session_id, None)
         ok = True
 
     except Exception as e:
@@ -1282,7 +1552,7 @@ def xhamster_workflow(
             except Exception as e:
                 logging.error(f"Error closing Chrome WebDriver: {e}")
         try:
-            if os.path.exists(cookie_file):
+            if not cfg.persistent_cookies and os.path.exists(cookie_file):
                 os.unlink(cookie_file)
         except Exception as e:
             logging.warning(f"Could not delete cookie file {cookie_file}: {e}")
@@ -1293,6 +1563,7 @@ def xhamster_workflow(
             except Exception as e:
                 logging.error(f"Error cleaning up tracker: {e}")
             workflow_heuristics.complete_success(session_id)
+            maybe_notify_complete("SHUCK3R", "xHamster download session finished.", cfg)
         _clear_cancel_event(session_id)
 
 # ----------------------------- FastAPI Routes ----------------------------- #
@@ -1311,6 +1582,73 @@ def favicon_ico():
 def read_form(request: Request):
     """Display the main form."""
     return templates.TemplateResponse(request, "index.html", {"form_error": None})
+
+
+@app.get("/settings")
+def settings_page(request: Request, saved: int = Query(0)):
+    cfg = load_settings()
+    ctx = {
+        "settings": asdict(cfg),
+        "effective_download_dir": str(effective_download_directory(cfg)),
+        "saved": bool(saved),
+        "queue_snapshots_hint": USER_DATA_DIR / "queue_snapshots",
+    }
+    return templates.TemplateResponse(request, "settings.html", ctx)
+
+
+@app.post("/settings")
+async def settings_save(request: Request):
+    fd = await request.form()
+
+    def _combo_on(key: str) -> bool:
+        return "on" in {str(v).strip().lower() for v in fd.getlist(key)}
+
+    def _pf(key: str, default: float = 0.0) -> float:
+        raw = fd.get(key)
+        if raw is None or str(raw).strip() == "":
+            return default
+        try:
+            return float(str(raw).strip())
+        except Exception:
+            return default
+
+    def _pi(key: str, default: int = 0) -> int:
+        raw = fd.get(key)
+        if raw is None or str(raw).strip() == "":
+            return default
+        try:
+            return int(str(raw).strip())
+        except Exception:
+            return default
+
+    cfg = load_settings()
+
+    dq = fd.get("video_quality")
+    if dq is None:
+        vq = cfg.video_quality
+    else:
+        vq = str(dq).strip().lower()
+    if vq not in ("best", "720", "1080"):
+        vq = "720"
+
+    cfg.download_directory = str(fd.get("download_directory") or "").strip()
+    cfg.max_parallel_downloads = max(1, min(32, _pi("max_parallel_downloads", cfg.max_parallel_downloads)))
+    cfg.video_quality = vq  # type: ignore[assignment]
+    cfg.skip_existing_in_download_dir = _combo_on("skip_existing_in_download_dir")
+    cfg.persistent_cookies = _combo_on("persistent_cookies")
+    cfg.page_delay_seconds = max(0.0, _pf("page_delay_seconds", cfg.page_delay_seconds))
+    cfg.download_delay_seconds = max(0.0, _pf("download_delay_seconds", cfg.download_delay_seconds))
+    cfg.delay_variance_seconds = max(0.0, _pf("delay_variance_seconds", cfg.delay_variance_seconds))
+    cfg.proxy_url = str(fd.get("proxy_url") or "").strip()
+    cfg.yt_dlp_retries = max(0, min(50, _pi("yt_dlp_retries", cfg.yt_dlp_retries)))
+    cfg.persist_queue_snapshots = _combo_on("persist_queue_snapshots")
+    cfg.watcher_enabled = _combo_on("watcher_enabled")
+    cfg.watcher_interval_minutes = max(1, min(10_080, _pi("watcher_interval_minutes", cfg.watcher_interval_minutes)))
+    cfg.notify_on_complete = _combo_on("notify_on_complete")
+
+    save_settings(cfg)
+    return RedirectResponse("/settings?saved=1", status_code=303)
+
 
 @app.post("/download")
 def handle_form(
@@ -1538,9 +1876,9 @@ def duplicates_page(request: Request):
         request,
         "duplicates.html",
         context={
-            "default_scan_directory": DOWNLOADS_ROOT_RESOLVED,
+            "default_scan_directory": str(_active_download_root()),
             # Alias for older cached templates / mixed deploys
-            "allowed_downloads_root": DOWNLOADS_ROOT_RESOLVED,
+            "allowed_downloads_root": str(_active_download_root()),
         },
     )
 
@@ -1630,40 +1968,108 @@ def api_session_failed(session_id: str):
 def api_session_retry_failed(
     session_id: str,
     background_tasks: BackgroundTasks,
-    site: str = Query("pornhub"),
+    site: str = Query(..., description='"pornhub" or "xhamster"'),
     headless: bool = Query(False),
 ):
     """Start a new download session that retries only the failed URLs from a previous session."""
+    site_n = site.lower().strip()
+    if site_n not in ("pornhub", "xhamster"):
+        raise HTTPException(status_code=400, detail='site must be "pornhub" or "xhamster".')
+
     data = _read_progress_json(session_id)
     if data is None:
         raise HTTPException(status_code=404, detail="Source session not found.")
-    failed_urls = [
-        url for url, item in data.get("download_items", {}).items()
+    failed_items = [
+        (url, str(item.get("title", "") or ""))
+        for url, item in data.get("download_items", {}).items()
         if item.get("status") == "failed"
     ]
-    if not failed_urls:
+    if not failed_items:
         return {"ok": True, "message": "No failed downloads to retry.", "retry_session_id": None}
-    if site != "pornhub":
-        raise HTTPException(status_code=400, detail="Retry is currently supported for PornHub only.")
     new_session_id = str(uuid.uuid4())
     log_file = os.path.join(LOG_DIR, f"video_downloader_{new_session_id}.log")
     timestamp = int(time.time())
     cancel_ev = _get_cancel_event(new_session_id)
-    background_tasks.add_task(
-        pornhub_workflow,
-        "https://www.pornhub.com/my/favorites/videos",
-        DOWNLOAD_DIR,
-        headless,
-        log_file,
-        new_session_id,
-        url_override=failed_urls,
-        cancel_event=cancel_ev,
-    )
-    workflow_heuristics.register_session(new_session_id, site, embedded=False)
+    dl_arg = DOWNLOAD_DIR
+
+    if site_n == "pornhub":
+        background_tasks.add_task(
+            pornhub_workflow,
+            "https://www.pornhub.com/my/favorites/videos",
+            dl_arg,
+            headless,
+            log_file,
+            new_session_id,
+            url_override=[pair[0] for pair in failed_items],
+            cancel_event=cancel_ev,
+        )
+    else:
+        background_tasks.add_task(
+            xhamster_workflow,
+            "https://xhamster.com/my/favorites/videos",
+            dl_arg,
+            headless,
+            log_file,
+            new_session_id,
+            retry_pairs=failed_items,
+            cancel_event=cancel_ev,
+        )
+
+    workflow_heuristics.register_session(new_session_id, site_n, embedded=False)
     return {
         "ok": True,
         "retry_session_id": new_session_id,
-        "url_count": len(failed_urls),
+        "url_count": len(failed_items),
+        "progress_url": f"/download/session/{new_session_id}?timestamp={timestamp}&site={site_n}",
+    }
+
+
+@app.post("/api/queue/resume/{snapshot_session_id}")
+def api_queue_resume(snapshot_session_id: str, background_tasks: BackgroundTasks, headless: bool = Query(False)):
+    """Start a fresh session using a saved favourites URL list from a prior run (crash recovery)."""
+    snap = load_queue_snapshot(snapshot_session_id, USER_DATA_DIR)
+    if not snap:
+        raise HTTPException(status_code=404, detail="No queue snapshot for that session.")
+
+    site = str(snap.get("site") or "").lower().strip()
+    urls = snap.get("urls") or []
+    if site not in ("pornhub", "xhamster") or not isinstance(urls, list) or not urls:
+        raise HTTPException(status_code=400, detail="Snapshot is incomplete or malformed.")
+
+    new_session_id = str(uuid.uuid4())
+    log_file = os.path.join(LOG_DIR, f"video_downloader_{new_session_id}.log")
+    timestamp = int(time.time())
+    cancel_ev = _get_cancel_event(new_session_id)
+    dl_arg = DOWNLOAD_DIR
+
+    if site == "pornhub":
+        background_tasks.add_task(
+            pornhub_workflow,
+            "https://www.pornhub.com/my/favorites/videos",
+            dl_arg,
+            headless,
+            log_file,
+            new_session_id,
+            url_override=[str(u) for u in urls],
+            cancel_event=cancel_ev,
+        )
+    else:
+        background_tasks.add_task(
+            xhamster_workflow,
+            "https://xhamster.com/my/favorites/videos",
+            dl_arg,
+            headless,
+            log_file,
+            new_session_id,
+            favorite_urls_override=[str(u) for u in urls],
+            cancel_event=cancel_ev,
+        )
+
+    workflow_heuristics.register_session(new_session_id, site, embedded=False)
+    return {
+        "ok": True,
+        "resume_session_id": new_session_id,
+        "url_count": len(urls),
         "progress_url": f"/download/session/{new_session_id}?timestamp={timestamp}&site={site}",
     }
 
@@ -1704,7 +2110,7 @@ def integrity_page(request: Request):
     """File integrity scanner — flags truncated or corrupt video files."""
     return templates.TemplateResponse(
         request, "integrity.html",
-        {"default_scan_directory": DOWNLOADS_ROOT_RESOLVED},
+        {"default_scan_directory": str(_active_download_root())},
     )
 
 
@@ -1740,7 +2146,7 @@ def api_integrity_scan(body: IntegrityScanBody):
 @app.get("/library")
 def library_page(request: Request):
     """Thumbnail grid browser for all downloaded video files (including subfolders)."""
-    dl_root = Path(DOWNLOADS_ROOT_RESOLVED)
+    dl_root = _active_download_root()
     videos: List[Dict[str, Any]] = []
     if dl_root.is_dir():
         for f in sorted(dl_root.rglob("*")):
@@ -1755,7 +2161,7 @@ def library_page(request: Request):
     return templates.TemplateResponse(
         request,
         "library.html",
-        {"videos": videos, "downloads_dir": DOWNLOADS_ROOT_RESOLVED},
+        {"videos": videos, "downloads_dir": str(_active_download_root())},
     )
 
 

@@ -71,7 +71,7 @@
       if (!data.length) { empty.style.display = ''; return; }
       const rows = [...data].reverse().map(s => {
         const failedCls = s.failed > 0 ? ' badge-failed' : ' badge-ok';
-        const retryBtn = s.failed > 0 && s.site === 'pornhub'
+        const retryBtn = s.failed > 0 && (s.site === 'pornhub' || s.site === 'xhamster')
           ? `<button class="retry-btn" onclick="retrySession('${s.session_id}','${s.site}')">Retry failed</button>`
           : '';
         return `<tr>

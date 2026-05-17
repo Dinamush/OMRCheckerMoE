@@ -1,0 +1,145 @@
+{% extends "base.html" %}
+{% block title %}Settings · SHUCK3R{% endblock %}
+{% block main_class %}layout-shell layout-shell-home{% endblock %}
+{% block content %}
+        <section class="layout-hero layout-hero-home" aria-labelledby="settings-title">
+            <div class="layout-hero-copy">
+                <p class="page-eyebrow page-eyebrow-left">SHUCK3R</p>
+                <h1 id="settings-title" class="page-title-left">Settings</h1>
+                <p class="subtitle subtitle-left">
+                    Stored in your profile as <code>config.json</code>. Overrides hard-coded defaults without editing Python.
+                </p>
+                {% if saved %}
+                <div class="success-message" role="status">
+                    <p><strong>Saved.</strong> New downloads will use these values immediately.</p>
+                </div>
+                {% endif %}
+            </div>
+
+            <section class="layout-panel control-panel" aria-labelledby="settings-form-title">
+                <div class="panel-heading">
+                    <p class="panel-kicker panel-kicker-corn">⚙ Tune behaviour</p>
+                    <h2 id="settings-form-title">Operational defaults</h2>
+                </div>
+
+                <form action="/settings" method="post" id="settingsForm">
+                    <div class="form-group">
+                        <label for="download_directory">Download directory</label>
+                        <input type="text" id="download_directory" name="download_directory" value="{{ settings.download_directory | e }}" autocomplete="off"
+                               placeholder="(empty = default HamsterScraper/downloads under your profile)">
+                        <p class="help-text">
+                            Resolved path currently: <strong>{{ effective_download_dir | e }}</strong>
+                        </p>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="max_parallel_downloads">Parallel downloads (workers)</label>
+                        <input type="number" id="max_parallel_downloads" name="max_parallel_downloads" min="1" max="32" step="1" value="{{ settings.max_parallel_downloads }}">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="video_quality">Video quality preset (yt-dlp)</label>
+                        <select id="video_quality" name="video_quality">
+                            <option value="720" {% if settings.video_quality == '720' %}selected{% endif %}>≤ 720p (default)</option>
+                            <option value="1080" {% if settings.video_quality == '1080' %}selected{% endif %}>≤ 1080p</option>
+                            <option value="best" {% if settings.video_quality == 'best' %}selected{% endif %}>Best effort</option>
+                        </select>
+                        <p class="help-text">PornHub HLS yt-dlp path and xHamster downloads both honour this preset.</p>
+                    </div>
+
+                    <div class="form-group checkbox-group">
+                        <input type="hidden" name="skip_existing_in_download_dir" value="off">
+                        <input type="checkbox" id="skip_existing_in_download_dir" name="skip_existing_in_download_dir" value="on" {% if settings.skip_existing_in_download_dir %}checked{% endif %}>
+                        <label for="skip_existing_in_download_dir">Skip if same title/size already exists in the download folder</label>
+                    </div>
+
+                    <div class="form-group checkbox-group">
+                        <input type="hidden" name="persistent_cookies" value="off">
+                        <input type="checkbox" id="persistent_cookies" name="persistent_cookies" value="on" {% if settings.persistent_cookies %}checked{% endif %}>
+                        <label for="persistent_cookies">Keep cookie files between sessions (stable Netscape jars under profile)</label>
+                    </div>
+
+                    <fieldset class="form-group" style="margin: 1rem 0; padding: 0.75rem 1rem; border-radius: 6px;">
+                        <legend class="panel-kicker" style="padding: 0 0.25rem;">Delays</legend>
+                        <p class="help-text">Applied after Selenium navigation / between xHamster batches and parallel worker submissions.</p>
+                        <div class="form-group">
+                            <label for="page_delay_seconds">After-page delay (seconds)</label>
+                            <input type="text" inputmode="decimal" id="page_delay_seconds" name="page_delay_seconds" value="{{ settings.page_delay_seconds }}">
+                        </div>
+                        <div class="form-group">
+                            <label for="download_delay_seconds">Between-download stagger (seconds)</label>
+                            <input type="text" inputmode="decimal" id="download_delay_seconds" name="download_delay_seconds" value="{{ settings.download_delay_seconds }}">
+                        </div>
+                        <div class="form-group">
+                            <label for="delay_variance_seconds">Random variance ± (seconds)</label>
+                            <input type="text" inputmode="decimal" id="delay_variance_seconds" name="delay_variance_seconds" value="{{ settings.delay_variance_seconds }}">
+                        </div>
+                    </fieldset>
+
+                    <div class="form-group">
+                        <label for="proxy_url">HTTP/SOCKS proxy (optional)</label>
+                        <input type="text" id="proxy_url" name="proxy_url" value="{{ settings.proxy_url | e }}" placeholder="http://127.0.0.1:8080 or socks5://…">
+                        <p class="help-text">Forwarded to yt-dlp, authenticated PornHub requests, Chrome when supported.</p>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="yt_dlp_retries">yt-dlp retries per download</label>
+                        <input type="number" id="yt_dlp_retries" name="yt_dlp_retries" min="0" max="50" step="1" value="{{ settings.yt_dlp_retries }}">
+                    </div>
+
+                    <div class="form-group checkbox-group">
+                        <input type="hidden" name="persist_queue_snapshots" value="off">
+                        <input type="checkbox" id="persist_queue_snapshots" name="persist_queue_snapshots" value="on" {% if settings.persist_queue_snapshots %}checked{% endif %}>
+                        <label for="persist_queue_snapshots">
+                            Save favourites URL list snapshots for resume
+                            (<code>{{ queue_snapshots_hint }}</code>)
+                        </label>
+                        <p class="help-text mt-05">
+                            <strong>Resume API:</strong> <code class="site-footer-code">POST /api/queue/resume/{original_session_uuid}</code> starts a fresh run from the saved snapshot.
+                        </p>
+                    </div>
+
+                    <fieldset class="form-group" style="margin: 1rem 0; padding: 0.75rem 1rem; border-radius: 6px;">
+                        <legend class="panel-kicker" style="padding: 0 0.25rem;">Automation</legend>
+                        <div class="form-group checkbox-group">
+                            <input type="hidden" name="watcher_enabled" value="off">
+                            <input type="checkbox" id="watcher_enabled" name="watcher_enabled" value="on" {% if settings.watcher_enabled %}checked{% endif %}>
+                            <label for="watcher_enabled">Favourites watcher (log heartbeat only today)</label>
+                        </div>
+                        <div class="form-group">
+                            <label for="watcher_interval_minutes">Watcher interval (minutes)</label>
+                            <input type="number" id="watcher_interval_minutes" name="watcher_interval_minutes" min="1" max="10080" step="1" value="{{ settings.watcher_interval_minutes }}">
+                        </div>
+                        <div class="form-group checkbox-group">
+                            <input type="hidden" name="notify_on_complete" value="off">
+                            <input type="checkbox" id="notify_on_complete" name="notify_on_complete" value="on" {% if settings.notify_on_complete %}checked{% endif %}>
+                            <label for="notify_on_complete">Windows notification when a download session completes</label>
+                            <p class="help-text">Uses a threaded MessageBox fallback (friendly for frozen exe builds).</p>
+                        </div>
+                        <p class="help-text">Fully unattended scraping is best paired with OS Task Scheduler to launch SHUCK3R.</p>
+                    </fieldset>
+
+                    <button type="submit">Save settings</button>
+                </form>
+            </section>
+        </section>
+
+        <section class="layout-band layout-band-two-up" aria-label="Settings notes">
+            <div class="layout-panel detail-panel">
+                <div class="panel-heading">
+                    <p class="panel-kicker">Retries</p>
+                    <h2>Failed URLs</h2>
+                </div>
+                <p class="subtitle">History and the failed-URL APIs now support both PornHub and xHamster.</p>
+            </div>
+            <div class="layout-panel detail-panel detail-panel-info">
+                <div class="panel-heading">
+                    <p class="panel-kicker">Safety</p>
+                    <h2>Privacy</h2>
+                </div>
+                <div class="info-box info-box-compact">
+                    <p>Changing download folder exposes that path across Library, integrity, duplicates default root, and new downloads.</p>
+                </div>
+            </div>
+        </section>
+{% endblock %}
