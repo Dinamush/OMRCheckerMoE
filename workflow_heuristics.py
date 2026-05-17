@@ -93,8 +93,8 @@ _XH_LEGACY = _chain(
     (
         "chrome_login",
         "Log in in Chrome",
-        "A Chrome window should open — log in to xHamster there. When finished, press Enter in the terminal "
-        "or use **Continue after Chrome login** on the download progress page (web mode has no terminal).",
+        "A Chrome window should open — log in to xHamster there, then click **Continue after Chrome login** "
+        "on this progress page. Keep Chrome open until you confirm.",
     ),
     (
         "save_cookies",
@@ -172,8 +172,8 @@ _PH_LEGACY = _chain(
     (
         "chrome_login",
         "Log in in Chrome",
-        "Log in to Pornhub in the opened browser, then press Enter in the terminal **or** click "
-        "**Continue after Chrome login** on this progress page (required when the app runs without a terminal).",
+        "Log in to Pornhub in the opened browser, then click **Continue after Chrome login** on this "
+        "progress page. Keep Chrome open until you confirm.",
     ),
     (
         "extract_list",

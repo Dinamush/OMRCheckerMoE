@@ -29,6 +29,8 @@ a = Analysis(
         'starlette.routing',
         'jinja2',
         'yt_dlp',
+        'chrome_login_confirm',
+        'selenium_login_wait',
         'webview.platforms.winforms',
         'selenium.webdriver.chrome.webdriver',
     ]

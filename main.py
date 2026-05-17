@@ -57,7 +57,7 @@ from existing_library import (
 import webview_login_bridge
 import workflow_heuristics
 import pornhub_ph
-import selenium_login_wait
+import chrome_login_confirm
 from settings import (
     AppSettings,
     apply_delay,
@@ -128,6 +128,11 @@ def _watcher_main_loop() -> None:
 
 @asynccontextmanager
 async def _app_lifespan(_app: FastAPI):
+    logging.info(
+        "SHUCK3R chrome login wait v%s (%s)",
+        chrome_login_confirm.CHROME_LOGIN_WAIT_VERSION,
+        getattr(chrome_login_confirm, "__file__", "?"),
+    )
     t = _threading.Thread(target=_watcher_main_loop, name="hamster-watcher", daemon=True)
     t.start()
     yield
@@ -307,13 +312,9 @@ def wait_for_manual_login(driver, login_url: str, session_id: str) -> None:
         logging.info("Navigated to login page. Please log in manually in the browser window.")
         workflow_heuristics.set_detail(
             session_id,
-            "When Chrome shows you signed in, press Enter in the terminal **or** click "
-            "**Continue after Chrome login** on this progress page.",
+            chrome_login_confirm.chrome_login_progress_hint(),
         )
-        selenium_login_wait.wait_for_user_after_chrome_login(
-            session_id,
-            "After logging in, press Enter here to continue...",
-        )
+        chrome_login_confirm.wait_for_chrome_login(session_id)
         logging.info("User confirmed login.")
     except Exception as e:
         logging.error(f"Error during manual login: {e}")
@@ -993,13 +994,9 @@ def pornhub_workflow(
             logging.info("Please log in to PornHub in the opened browser.")
             workflow_heuristics.set_detail(
                 session_id,
-                "When you are signed in in Chrome, press Enter in the server terminal **or** click "
-                "**Continue after Chrome login** on this progress page.",
+                chrome_login_confirm.chrome_login_progress_hint(),
             )
-            selenium_login_wait.wait_for_user_after_chrome_login(
-                session_id,
-                "After logging in to PornHub in Chrome, press Enter here to continue...",
-            )
+            chrome_login_confirm.wait_for_chrome_login(session_id)
             time.sleep(5)
             save_cookies_netscape(driver, cookie_file)
             healthy, health_msg = pornhub_ph.check_cookie_health(cookie_file, cfg.proxy_url)
@@ -1569,6 +1566,15 @@ def xhamster_workflow(
 # ----------------------------- FastAPI Routes ----------------------------- #
 
 
+@app.get("/api/build-info", include_in_schema=False)
+def api_build_info():
+    """Quick check that the running server loaded the current chrome-login wait code."""
+    return {
+        "chrome_login_wait_version": chrome_login_confirm.CHROME_LOGIN_WAIT_VERSION,
+        "chrome_login_confirm_module": getattr(chrome_login_confirm, "__file__", None),
+    }
+
+
 @app.get("/favicon.ico", include_in_schema=False)
 def favicon_ico():
     """Browsers request /favicon.ico by default; serve SVG so logs stay clean."""
@@ -1763,8 +1769,8 @@ def api_embedded_login_confirm():
 def api_selenium_login_confirm(body: SeleniumLoginConfirmBody):
     """Unblocks legacy Chrome login when there is no interactive terminal (e.g. `python main.py`)."""
     sid = body.session_id.strip()
-    if selenium_login_wait.confirm_chrome_login_done(sid):
-        return {"ok": True}
+    if chrome_login_confirm.confirm_chrome_login(sid):
+        return {"ok": True, "chrome_login_wait_version": chrome_login_confirm.CHROME_LOGIN_WAIT_VERSION}
     raise HTTPException(
         status_code=400,
         detail=(
