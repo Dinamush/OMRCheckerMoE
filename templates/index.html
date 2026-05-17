@@ -23,7 +23,7 @@
                 </svg>
                 <p class="page-eyebrow page-eyebrow-left">SHUCK3R</p>
                 <h1 id="downloader-title" class="page-title-left">Downloader</h1>
-                <p class="subtitle subtitle-left">Queue favorites from PornHub or xHamster, keep authentication local to your machine, and skip titles already stored in your archive.</p>
+                <p class="subtitle subtitle-left">Queue favorites from PornHub, xHamster, or Pixiv bookmarks, keep authentication local to your machine, and skip titles already stored in your archive.</p>
                 <ul class="hero-signal-list" aria-label="Downloader highlights">
                     <li><span class="hero-signal-label">Input</span><span class="hero-signal-value">Favorites-based collection</span></li>
                     <li><span class="hero-signal-label">Runtime</span><span class="hero-signal-value">Manual site login, automated download flow</span></li>
@@ -55,7 +55,23 @@
                                 <input type="radio" id="xhamster" name="site" value="xhamster" required>
                                 <span class="radio-option-text">xHamster</span>
                             </label>
+                            <label class="radio-option" for="pixiv">
+                                <input type="radio" id="pixiv" name="site" value="pixiv" required>
+                                <span class="radio-option-text">Pixiv</span>
+                            </label>
                         </div>
+                    </div>
+
+                    <div id="pixiv-options" class="form-group" hidden>
+                        <label for="pixiv_user_id">Pixiv user ID or bookmarks URL</label>
+                        <input type="text" id="pixiv_user_id" name="pixiv_user_id" autocomplete="off" placeholder="33191689 or https://www.pixiv.net/en/users/33191689/bookmarks/artworks">
+                        <p class="help-text">Leave blank to use your logged-in account. Public bookmarks use rest=show; private/all (rest=hide) requires owning the account.</p>
+                        <label for="pixiv_bookmarks">Bookmark visibility</label>
+                        <select id="pixiv_bookmarks" name="pixiv_bookmarks">
+                            <option value="public">Public bookmarks (rest=show)</option>
+                            <option value="private">Private / all bookmarks (rest=hide)</option>
+                            <option value="both">Both public and private</option>
+                        </select>
                     </div>
 
                     <div class="form-group checkbox-group">
@@ -103,6 +119,7 @@
                     <ul>
                         <li><strong>PornHub:</strong> Downloads from your favorites playlist (requires login).</li>
                         <li><strong>xHamster:</strong> Downloads from your favorites page (requires login).</li>
+                        <li><strong>Pixiv:</strong> Downloads bookmarked illustrations via Ajax API (Chrome login; optional FlareSolverr in Settings).</li>
                         <li>Videos save under your user profile (Windows: <code>%LOCALAPPDATA%\HamsterScraper\downloads</code>; override with <code>HAMSTER_USER_DATA</code>).</li>
                         <li><strong>Library skip:</strong> PornHub resolves each title via yt-dlp. xHamster uses titles from the page. Very different filenames may still download.</li>
                     </ul>
@@ -110,4 +127,18 @@
                 <p class="layout-cta-copy">Need cleanup before a new run? <a href="/duplicates" class="link-accent">Open the duplicate checker</a>.</p>
             </div>
         </section>
+{% endblock %}
+{% block scripts %}
+<script>
+(function () {
+  const pixivOpts = document.getElementById("pixiv-options");
+  const radios = document.querySelectorAll('input[name="site"]');
+  function syncPixivPanel() {
+    const pixiv = document.getElementById("pixiv")?.checked;
+    if (pixivOpts) pixivOpts.hidden = !pixiv;
+  }
+  radios.forEach((r) => r.addEventListener("change", syncPixivPanel));
+  syncPixivPanel();
+})();
+</script>
 {% endblock %}

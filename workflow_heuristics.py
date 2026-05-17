@@ -14,9 +14,10 @@ from typing import Any, Dict, List, Literal, Optional, Tuple
 
 StepStatus = Literal["pending", "active", "done", "error"]
 
-SiteId = Literal["xhamster", "pornhub"]
+SiteId = Literal["xhamster", "pornhub", "pixiv"]
 SITE_XHAMSTER: SiteId = "xhamster"
 SITE_PORNHUB: SiteId = "pornhub"
+SITE_PIXIV: SiteId = "pixiv"
 
 
 @dataclass(frozen=True)
@@ -238,11 +239,63 @@ _PH_LEGACY = _chain(
 )
 
 
+# --- Pixiv: Ajax bookmarks (Chrome login only) ---
+_PI_LEGACY = _chain(
+    (
+        "boot",
+        "Session queued",
+        "Your Pixiv download job is running.",
+    ),
+    (
+        "cookie_reuse",
+        "Checking saved session",
+        "If cookies from a prior run are still valid, login is skipped.",
+    ),
+    (
+        "chrome_login",
+        "Log in to Pixiv",
+        "A Chrome window opens at Pixiv login — sign in, then click **Continue after Chrome login** on this page.",
+    ),
+    (
+        "save_cookies",
+        "Saving session",
+        "Cookies are saved for Pixiv Ajax API requests.",
+    ),
+    (
+        "challenge_wait",
+        "Cloudflare / captcha",
+        "Complete the site check in Chrome, then click **Continue after browser challenge** here.",
+    ),
+    (
+        "collect_urls",
+        "Collecting bookmarks",
+        "Walking bookmark pages via Pixiv Ajax (48 per page).",
+    ),
+    (
+        "download",
+        "Downloading images",
+        "Fetching full-resolution pages for each bookmarked work.",
+    ),
+    (
+        "wrap_up",
+        "Finishing",
+        "Cleaning up session state.",
+    ),
+    (
+        "complete",
+        "Session finished",
+        "This run is complete.",
+    ),
+)
+
+
 def _template(site: SiteId, embedded: bool) -> List[StepDefinition]:
     if site == SITE_XHAMSTER:
         return list(_XH_EMB if embedded else _XH_LEGACY)
     if site == SITE_PORNHUB:
         return list(_PH_EMB if embedded else _PH_LEGACY)
+    if site == SITE_PIXIV:
+        return list(_PI_LEGACY)
     raise ValueError(f"unknown site {site!r}")
 
 

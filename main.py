@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 SHUCK3R — FastAPI application
-Download favorites from PornHub and xHamster via a web UI.
+Download favorites from PornHub, xHamster, and Pixiv bookmarks via a web UI.
 """
 
 from __future__ import annotations
@@ -57,6 +57,7 @@ from existing_library import (
 import webview_login_bridge
 import workflow_heuristics
 import pornhub_ph
+import pixiv_ph
 import browser_antibot
 import browser_challenge_wait
 import chrome_login_confirm
@@ -169,9 +170,23 @@ app.mount("/static", StaticFiles(directory=str(RESOURCE_ROOT / "static")), name=
 
 def _workflow_cookie_file(site: str, session_id: str, cfg: AppSettings) -> str:
     if cfg.persistent_cookies:
-        name = "pornhub_cookies.txt" if site == "pornhub" else "xhamster_cookies.txt"
+        names = {
+            "pornhub": "pornhub_cookies.txt",
+            "xhamster": "xhamster_cookies.txt",
+            "pixiv": "pixiv_cookies.txt",
+        }
+        name = names.get(site, f"{site}_cookies.txt")
         return str((USER_DATA_DIR / name).resolve())
     return os.path.join(LOG_DIR, f"{site}_cookies_{session_id}.txt")
+
+
+def _pixiv_bookmark_rests(mode: str) -> List[str]:
+    m = (mode or "public").strip().lower()
+    if m in ("all", "both"):
+        return ["show", "hide"]
+    if m in ("private", "hide"):
+        return ["hide"]
+    return ["show"]
 
 
 def _active_download_root() -> Path:
@@ -1185,6 +1200,158 @@ def pornhub_workflow(
         _clear_cancel_event(session_id)
 
 
+def pixiv_workflow(
+    target_user_id: str,
+    bookmark_mode: str,
+    download_dir: str,
+    headless: bool,
+    log_file: str,
+    session_id: str,
+    *,
+    cancel_event: Optional[_threading.Event] = None,
+) -> None:
+    """Pixiv bookmark workflow: Chrome login → Ajax bookmark list → image download."""
+    if not session_id:
+        session_id = str(int(time.time()))
+
+    setup_logging(log_file)
+    cfg = load_settings()
+    download_root = str(effective_download_directory(cfg))
+    ensure_download_dir(download_root)
+
+    cookie_file = _workflow_cookie_file("pixiv", session_id, cfg)
+    driver = None
+    ok = False
+    rests = _pixiv_bookmark_rests(bookmark_mode)
+
+    def _cancelled() -> bool:
+        return bool(cancel_event and cancel_event.is_set())
+
+    try:
+        workflow_heuristics.advance(session_id, "cookie_reuse")
+        cookies_ok, cookie_msg = workflow_browser.cookies_valid_for_site(
+            "pixiv", cookie_file, cfg
+        )
+        workflow_heuristics.set_detail(session_id, cookie_msg)
+
+        if cookies_ok:
+            logging.info("Pixiv cookie reuse: %s", cookie_msg)
+            workflow_heuristics.set_detail(
+                session_id, "Using saved Pixiv session — skipping login…",
+            )
+            session = pixiv_ph.load_session(cookie_file, cfg.proxy_url)
+        else:
+            workflow_heuristics.advance(session_id, "chrome_login")
+            driver = workflow_browser.create_driver(
+                "pixiv", cfg, headless=False, purpose="auth"
+            )
+            workflow_browser.apply_flaresolverr_preflight(
+                driver, pixiv_ph.PIXIV_HOME, cfg
+            )
+            driver.get(pixiv_ph.PIXIV_LOGIN)
+            logging.info("Please log in to Pixiv in the opened Chrome window.")
+            workflow_heuristics.set_detail(
+                session_id,
+                chrome_login_confirm.chrome_login_progress_hint(),
+            )
+            chrome_login_confirm.wait_for_chrome_login(session_id)
+            time.sleep(2)
+            driver.get(pixiv_ph.PIXIV_HOME)
+            time.sleep(4)
+            workflow_heuristics.advance(session_id, "save_cookies")
+            live_session = pixiv_ph.session_from_driver(driver, cfg.proxy_url)
+            healthy, health_msg = pixiv_ph.check_cookie_health_with_session(
+                live_session
+            )
+            if not healthy:
+                workflow_heuristics.mark_error(
+                    session_id, f"Pixiv login check failed — {health_msg}"
+                )
+                return
+            logging.info("Pixiv cookie health: %s", health_msg)
+            pixiv_ph.save_session_from_driver(driver, cookie_file)
+            workflow_browser.quit_driver(driver)
+            driver = None
+            session = live_session
+
+        if cfg.challenge_solver == "flaresolverr":
+            try:
+                pixiv_ph.apply_flaresolverr_to_session(
+                    session, base_url=cfg.flaresolverr_base_url
+                )
+            except Exception as e:
+                logging.warning("FlareSolverr preflight for Pixiv failed: %s", e)
+
+        uid = pixiv_ph.parse_user_id(target_user_id) or pixiv_ph.get_logged_in_user_id(
+            session
+        )
+        logging.info("Pixiv target user id: %s (rests=%s)", uid, rests)
+
+        workflow_heuristics.advance(session_id, "collect_urls")
+        workflow_heuristics.set_detail(
+            session_id,
+            f"Collecting bookmarks for user {uid} ({', '.join(rests)})…",
+        )
+        works = pixiv_ph.collect_bookmark_works(
+            session, uid, rests, cancel_check=_cancelled
+        )
+        if _cancelled():
+            workflow_heuristics.mark_error(session_id, "Download cancelled by user.")
+            return
+        if not works:
+            workflow_heuristics.mark_error(
+                session_id,
+                "No bookmarks found (empty list, wrong user id, or login required).",
+            )
+            return
+
+        logging.info("Collected %s Pixiv bookmark works", len(works))
+        workflow_heuristics.set_detail(
+            session_id, f"Found {len(works)} bookmarked works — downloading…",
+        )
+
+        if cfg.persist_queue_snapshots:
+            try:
+                urls = [f"{pixiv_ph.PIXIV_HOME}artworks/{w.get('id')}" for w in works]
+                save_queue_snapshot(session_id, "pixiv", urls, USER_DATA_DIR)
+            except Exception as e:
+                logging.warning("Could not save queue snapshot: %s", e)
+
+        workflow_heuristics.advance(session_id, "download")
+        tracker = get_tracker(session_id)
+        tracker.start_session(len(works))
+        pixiv_ph.download_bookmark_works(
+            session,
+            works,
+            download_root,
+            session_id,
+            max_workers=max(1, cfg.max_parallel_downloads),
+            skip_if_exists=cfg.skip_existing_in_download_dir,
+            cancel_check=_cancelled,
+        )
+        ok = True
+
+    except Exception as e:
+        logging.critical("Error in Pixiv workflow: %s", e)
+        workflow_heuristics.mark_error(session_id, str(e))
+    finally:
+        workflow_browser.quit_driver(driver)
+        try:
+            if not cfg.persistent_cookies and os.path.exists(cookie_file):
+                os.unlink(cookie_file)
+        except Exception as e:
+            logging.warning("Could not delete cookie file %s: %s", cookie_file, e)
+        if ok:
+            try:
+                _append_session_history(session_id, "pixiv", get_tracker(session_id))
+                cleanup_tracker(session_id)
+            except Exception as e:
+                logging.error("Error cleaning up tracker: %s", e)
+            workflow_heuristics.complete_success(session_id)
+            maybe_notify_complete("SHUCK3R", "Pixiv download session finished.", cfg)
+        _clear_cancel_event(session_id)
+
+
 def _xh_watch_page_candidate(url: str) -> bool:
     lu = url.lower()
     return "xhamster." in lu and ("/videos/" in lu or "/movies/" in lu)
@@ -1759,13 +1926,16 @@ def handle_form(
     headless: str = Form("false"),
     existing_library_dir: str = Form(""),
     library_recursive: str = Form("false"),
+    pixiv_user_id: str = Form(""),
+    pixiv_bookmarks: str = Form("public"),
 ):
     """Handle form submission and start the appropriate workflow."""
+    site = (site or "").strip().lower()
     timestamp = int(time.time())
     session_id = str(uuid.uuid4())
     log_file = os.path.join(LOG_DIR, f"video_downloader_{session_id}.log")
 
-    headless_bool = headless.lower() == "true"
+    headless_bool = headless.lower() in ("true", "on", "1", "yes")
     library_recursive_bool = library_recursive.lower() == "true"
 
     try:
@@ -1810,10 +1980,36 @@ def handle_form(
             library_recursive=library_recursive_bool,
             cancel_event=cancel_ev,
         )
+    elif site == "pixiv":
+        cancel_ev = _get_cancel_event(session_id)
+        background_tasks.add_task(
+            pixiv_workflow,
+            pixiv_user_id,
+            pixiv_bookmarks,
+            DOWNLOAD_DIR,
+            headless_bool,
+            log_file,
+            session_id,
+            cancel_event=cancel_ev,
+        )
     else:
-        return {"error": "Invalid site selected"}
+        return templates.TemplateResponse(
+            request,
+            "index.html",
+            {
+                "form_error": (
+                    f'Unknown site "{site}". Choose PornHub, xHamster, or Pixiv. '
+                    "If Pixiv is missing from the form, restart the app from the latest code."
+                ),
+            },
+            status_code=400,
+        )
 
-    embedded_login = webview_login_bridge.is_active() and webview_login_bridge.embedded_login_env_enabled()
+    embedded_login = (
+        site != "pixiv"
+        and webview_login_bridge.is_active()
+        and webview_login_bridge.embedded_login_env_enabled()
+    )
     workflow_heuristics.register_session(session_id, site, embedded=embedded_login)
     dest = f"/download/session/{session_id}?timestamp={timestamp}&site={site}"
     return RedirectResponse(url=dest, status_code=303)
@@ -1827,7 +2023,7 @@ def download_session_progress(
     site: str = Query(...),
 ):
     """Bookmarkable progress page (GET) so the desktop WebView keeps the download UI after login."""
-    if site not in ("pornhub", "xhamster"):
+    if site not in ("pornhub", "xhamster", "pixiv"):
         raise HTTPException(status_code=400, detail="Invalid site")
 
     embedded_login = webview_login_bridge.is_active() and webview_login_bridge.embedded_login_env_enabled()
@@ -2089,8 +2285,11 @@ def api_session_retry_failed(
 ):
     """Start a new download session that retries only the failed URLs from a previous session."""
     site_n = site.lower().strip()
-    if site_n not in ("pornhub", "xhamster"):
-        raise HTTPException(status_code=400, detail='site must be "pornhub" or "xhamster".')
+    if site_n not in ("pornhub", "xhamster", "pixiv"):
+        raise HTTPException(
+            status_code=400,
+            detail='site must be "pornhub", "xhamster", or "pixiv".',
+        )
 
     data = _read_progress_json(session_id)
     if data is None:
@@ -2149,7 +2348,7 @@ def api_queue_resume(snapshot_session_id: str, background_tasks: BackgroundTasks
 
     site = str(snap.get("site") or "").lower().strip()
     urls = snap.get("urls") or []
-    if site not in ("pornhub", "xhamster") or not isinstance(urls, list) or not urls:
+    if site not in ("pornhub", "xhamster", "pixiv") or not isinstance(urls, list) or not urls:
         raise HTTPException(status_code=400, detail="Snapshot is incomplete or malformed.")
 
     new_session_id = str(uuid.uuid4())
@@ -2169,7 +2368,7 @@ def api_queue_resume(snapshot_session_id: str, background_tasks: BackgroundTasks
             url_override=[str(u) for u in urls],
             cancel_event=cancel_ev,
         )
-    else:
+    elif site == "xhamster":
         background_tasks.add_task(
             xhamster_workflow,
             "https://xhamster.com/my/favorites/videos",
@@ -2179,6 +2378,11 @@ def api_queue_resume(snapshot_session_id: str, background_tasks: BackgroundTasks
             new_session_id,
             favorite_urls_override=[str(u) for u in urls],
             cancel_event=cancel_ev,
+        )
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Queue resume for Pixiv is not supported yet; start a new download.",
         )
 
     workflow_heuristics.register_session(new_session_id, site, embedded=False)

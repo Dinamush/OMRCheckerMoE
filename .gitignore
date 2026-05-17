@@ -1,8 +1,20 @@
-# Ignore Python cache files
+# Python bytecode and caches
 __pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
 
 # Ignore specific files
 pornhub_cookies.txt
+*_cookies.txt
+*.ua
 video_downloader.log
 
 # Ignore all log files
@@ -25,3 +37,34 @@ release/SHUCK3RWebView.exe
 # graphify intermediate pipeline artifacts (keep GRAPH_REPORT.md, graph.json, graph.html)
 graphify-out/cache/
 graphify-out/.graphify_*
+
+# Browser "Save Page" dumps (allow curated ph-*.html + README to be tracked/added)
+website-code/*
+!website-code/README.md
+!website-code/ph-*.html
+
+# Chrome/Edge saved-page companion folders and renamed downloads (anywhere in repo)
+*_files/
+*.js.download
+
+# SHUCK3R / HamsterScraper per-user data if copied into repo (HAMSTER_USER_DATA override)
+HamsterScraper/
+browser_profiles/
+
+# VS Code — keep shared tasks.json; ignore machine-local settings
+.vscode/*
+!.vscode/tasks.json
+
+# Cursor / JetBrains / OS junk
+.cursor/
+.idea/
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Local secrets / env
+.env
+.env.*
+
+# Scratch scripts at repo root
+_tmp_*.py

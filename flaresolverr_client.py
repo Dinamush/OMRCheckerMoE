@@ -55,7 +55,10 @@ def inject_cookies_into_driver(driver, cookies: Dict[str, str], landing_url: str
     for name, value in cookies.items():
         spec: dict = {"name": name, "value": value, "path": "/"}
         if domain:
-            spec["domain"] = domain if domain.startswith(".") else f".{domain}"
+            if domain.endswith("pixiv.net"):
+                spec["domain"] = ".pixiv.net"
+            else:
+                spec["domain"] = domain if domain.startswith(".") else f".{domain}"
         try:
             driver.add_cookie(spec)
         except Exception as e:

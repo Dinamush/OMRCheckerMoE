@@ -9,6 +9,7 @@ from typing import Tuple
 import requests
 
 import pornhub_ph
+import pixiv_ph
 
 
 def check_pornhub_cookies(cookie_file: str, proxy_url: str = "") -> Tuple[bool, str]:
@@ -47,9 +48,15 @@ def check_xhamster_cookies(cookie_file: str, proxy_url: str = "") -> Tuple[bool,
         return False, f"Cookie health check failed: {e}"
 
 
+def check_pixiv_cookies(cookie_file: str, proxy_url: str = "") -> Tuple[bool, str]:
+    return pixiv_ph.check_cookie_health(cookie_file, proxy_url)
+
+
 def check_site_cookies(site: str, cookie_file: str, proxy_url: str = "") -> Tuple[bool, str]:
     if site == "pornhub":
         return check_pornhub_cookies(cookie_file, proxy_url)
     if site == "xhamster":
         return check_xhamster_cookies(cookie_file, proxy_url)
+    if site == "pixiv":
+        return check_pixiv_cookies(cookie_file, proxy_url)
     return False, f"Unknown site: {site}"

@@ -40,8 +40,11 @@ def detect_challenge(html: str, url: str, title: str = "") -> ChallengeKind:
     if any(m in low_html or m in low_title for m in _CF_MARKERS):
         return "cloudflare_iuam"
 
+    if "accounts.pixiv.net" in (urlparse(url or "").netloc or "").lower():
+        return "login"
+
     if any(seg in path for seg in _LOGIN_PATH):
-        if "favorites" not in path and "my/" not in path:
+        if "favorites" not in path and "my/" not in path and "/bookmarks/" not in path:
             return "login"
 
     if re.search(r"\b(log\s*in|sign\s*in)\b", low_title) and len(low_html) < 80_000:
