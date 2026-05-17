@@ -78,7 +78,7 @@ To get **every** favourite in an automated way, we can either:
 
 ### 3.2 main.py – PornHub workflow (current)
 
-- Uses **yt-dlp** for URL extraction: **`extract_video_urls_ytdlp(cookie_file, playlist_url)`** with `playlist_url` like `https://www.pornhub.com/my/favorites/videos` (or the user’s favorites URL). yt-dlp often returns **404** on that URL, so no URLs are returned; there is no Selenium-based collection or pagination for PornHub in main.py currently.
+- Uses **`pornhub_ph.collect_favorites_urls_with_driver`** (Selenium scroll + `#moreDataBtn`), same algorithm as ph.py’s `extract_video_urls_selenium`. Default playlist URL: `https://www.pornhub.com/my/favorites/videos`. Embedded WebView login still uses HTTP `?page=N` pagination when no Chrome driver is available.
 
 ### 3.3 main.py – xHamster workflow (for comparison)
 

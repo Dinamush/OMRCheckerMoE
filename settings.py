@@ -52,6 +52,9 @@ class AppSettings:
     challenge_solver: Literal["manual", "flaresolverr"] = "manual"
     flaresolverr_base_url: str = "http://127.0.0.1:8191/v1"
 
+    # PornHub: empty → resolve /users/<you>/videos/favorites after login (ph.py)
+    pornhub_username: str = ""
+
 
 DEFAULT_SETTINGS = AppSettings()
 

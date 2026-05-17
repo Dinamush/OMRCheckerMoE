@@ -15,7 +15,7 @@ from typing import Any, Callable, Dict, Optional
 logger = logging.getLogger(__name__)
 
 # Bump when login-wait behavior changes (logged at startup and on each wait).
-CHROME_LOGIN_WAIT_VERSION = 3
+CHROME_LOGIN_WAIT_VERSION = 4
 
 CHROME_LOGIN_PROGRESS_HINT = (
     "When Chrome shows you are signed in, click **Continue after Chrome login** on this "
