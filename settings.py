@@ -117,6 +117,24 @@ def effective_download_directory(settings: Optional[AppSettings] = None) -> Path
     return p
 
 
+# Per-site subfolder under the download root (e.g. downloads/ph/).
+SITE_DOWNLOAD_SUBDIRS: dict[str, str] = {
+    "pornhub": "ph",
+    "xhamster": "xh",
+    "pixiv": "pixiv",
+}
+
+
+def site_download_directory(
+    site: str, settings: Optional[AppSettings] = None
+) -> Path:
+    """Resolved path for one site's downloads: {download_root}/{ph|xh|pixiv|…}."""
+    base = effective_download_directory(settings)
+    key = (site or "").strip().lower()
+    sub = SITE_DOWNLOAD_SUBDIRS.get(key, key or "other")
+    return (base / sub).resolve()
+
+
 def yt_dlp_format_string(settings: Optional[AppSettings] = None) -> str:
     s = settings or load_settings()
     if s.video_quality == "best":

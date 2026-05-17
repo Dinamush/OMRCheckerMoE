@@ -26,9 +26,13 @@
                     <div class="form-group">
                         <label for="download_directory">Download directory</label>
                         <input type="text" id="download_directory" name="download_directory" value="{{ settings.download_directory | e }}" autocomplete="off"
-                               placeholder="(empty = default HamsterScraper/downloads under your profile)">
+                               placeholder="(empty = default …/downloads; files go in ph/, xh/, pixiv/ subfolders)">
                         <p class="help-text">
-                            Resolved path currently: <strong>{{ effective_download_dir | e }}</strong>
+                            Root: <strong>{{ effective_download_dir | e }}</strong>
+                            — each site uses a subfolder:
+                            {% for label, path in site_download_dirs.items() %}
+                            <br><span class="mono-path">{{ label }} → {{ path | e }}</span>
+                            {% endfor %}
                         </p>
                     </div>
 

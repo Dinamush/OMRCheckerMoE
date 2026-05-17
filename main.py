@@ -66,6 +66,7 @@ from settings import (
     AppSettings,
     apply_delay,
     effective_download_directory,
+    site_download_directory,
     load_queue_snapshot,
     load_settings,
     maybe_notify_complete,
@@ -1127,7 +1128,7 @@ def pornhub_workflow(
 
     setup_logging(log_file)
     cfg = load_settings()
-    download_root = str(effective_download_directory(cfg))
+    download_root = str(site_download_directory("pornhub", cfg))
     ensure_download_dir(download_root)
 
     cookie_file = _workflow_cookie_file("pornhub", session_id, cfg)
@@ -1384,7 +1385,7 @@ def pixiv_workflow(
 
     setup_logging(log_file)
     cfg = load_settings()
-    download_root = str(effective_download_directory(cfg))
+    download_root = str(site_download_directory("pixiv", cfg))
     ensure_download_dir(download_root)
 
     cookie_file = _workflow_cookie_file("pixiv", session_id, cfg)
@@ -1607,7 +1608,7 @@ def xhamster_workflow(
         session_id = str(int(time.time()))
 
     cfg = load_settings()
-    download_root = str(effective_download_directory(cfg))
+    download_root = str(site_download_directory("xhamster", cfg))
 
     setup_logging(log_file)
     ensure_download_dir(download_root)
@@ -2059,6 +2060,11 @@ def settings_page(request: Request, saved: int = Query(0)):
     ctx = {
         "settings": asdict(cfg),
         "effective_download_dir": str(effective_download_directory(cfg)),
+        "site_download_dirs": {
+            "PornHub": str(site_download_directory("pornhub", cfg)),
+            "xHamster": str(site_download_directory("xhamster", cfg)),
+            "Pixiv": str(site_download_directory("pixiv", cfg)),
+        },
         "saved": bool(saved),
         "queue_snapshots_hint": USER_DATA_DIR / "queue_snapshots",
     }
@@ -2775,9 +2781,14 @@ def api_history(limit: int = Query(100, ge=1, le=1000)):
 def api_paths():
     """Effective download and data directories for the running app."""
     cfg = load_settings()
+    base = effective_download_directory(cfg)
     return {
         "user_data_dir": str(USER_DATA_DIR),
-        "download_directory": str(effective_download_directory(cfg)),
+        "download_directory": str(base),
+        "site_download_directories": {
+            site: str(site_download_directory(site, cfg))
+            for site in ("pornhub", "xhamster", "pixiv")
+        },
         "logs_directory": str(LOG_DIR),
         "session_history_file": str(SESSION_HISTORY_FILE),
     }
