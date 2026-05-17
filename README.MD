@@ -52,7 +52,7 @@ A built-in **duplicate file checker** lets you scan any directory, review fuzzy-
 | **Favorites scraper** | Paginates through your full PornHub or xHamster favorites list |
 | **Smart skip** | Point at an existing folder — files whose titles match are skipped |
 | **Progress dashboard** | Live session view: workflow timeline, metrics, and recent log lines |
-| **Headless mode** | Login and scraping run without a visible browser window |
+| **Headless scraping** | After login (or saved cookies), favorites scraping can run without a visible Chrome window |
 | **Duplicate checker** | Fuzzy-match by name + size across any directory; keep one, delete the rest |
 | **Desktop launcher** | Embedded pywebview window — no separate browser tab needed |
 | **Portable exe** | Single-file `SHUCK3R.exe` via PyInstaller; data stays in your user profile |
@@ -169,13 +169,14 @@ Override the root with the `HAMSTER_USER_DATA` environment variable (absolute pa
 1. **Open the app** — go to `http://localhost:8001`.
 2. **Choose a site** — select **PornHub** or **xHamster**.
 3. **Optional: set an existing library folder** — paste the path to videos you already have. SHUCK3R skips favorites whose titles match files in that folder.
-4. **Optional: enable headless mode** — runs login and scraping without a visible browser window.
-5. **Click Start Download.**
-6. **Log in** in the browser (or popup) window that opens. SHUCK3R then:
+4. **Optional: headless scraping (after login)** — keeps login visible (site popup or Chrome); only the scrape phase may run headless. Enable **persistent cookies** in Settings to skip login when cookies are still valid.
+5. **Optional: Browser / anti-bot (Settings)** — per-site Chrome profiles, skip login when cookies are healthy, undetected-chromedriver for scraping, and optional **FlareSolverr** (`http://127.0.0.1:8191/v1`) for Cloudflare IUAM (often unreliable; visible browser + progress-page confirm is the fallback).
+6. **Click Start Download.**
+7. **Log in** in the browser (or popup) window when prompted, then click **Continue after Chrome login** on the progress page (Web UI). If a Cloudflare/captcha page appears during scraping, use **Continue after browser challenge**. SHUCK3R then:
    - Paginates through all your favorites to collect every video URL.
    - Downloads each video with progress tracking.
-7. **Monitor progress** on the live session dashboard — workflow timeline, counts, and recent log lines.
-8. From the dashboard you can **open the full log**, **export progress as JSON**, or **start a new download**.
+8. **Monitor progress** on the live session dashboard — workflow timeline, counts, and recent log lines.
+9. From the dashboard you can **open the full log**, **export progress as JSON**, or **start a new download**.
 
 ---
 

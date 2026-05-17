@@ -44,10 +44,19 @@ class AppSettings:
     watcher_interval_minutes: int = 60  # honoured by background watcher loop
     notify_on_complete: bool = False  # Windows informational MessageBox thread (frozen-friendly)
 
+    # Browser / anti-bot (HDoujin-inspired)
+    headless_scraping: bool = False  # scrape phase only; login is always interactive
+    browser_profile_per_site: bool = True
+    skip_login_if_cookies_valid: bool = True
+    use_undetected_chrome: bool = True
+    challenge_solver: Literal["manual", "flaresolverr"] = "manual"
+    flaresolverr_base_url: str = "http://127.0.0.1:8191/v1"
+
 
 DEFAULT_SETTINGS = AppSettings()
 
 _VALID_QUALITY = frozenset({"best", "720", "1080"})
+_VALID_CHALLENGE_SOLVER = frozenset({"manual", "flaresolverr"})
 
 
 def _config_path(user_data_dir: Optional[Path] = None) -> Path:
@@ -77,6 +86,8 @@ def load_settings(user_data_dir: Optional[Path] = None) -> AppSettings:
             data[k] = raw[k]
     if data.get("video_quality") not in _VALID_QUALITY:
         data["video_quality"] = "720"
+    if data.get("challenge_solver") not in _VALID_CHALLENGE_SOLVER:
+        data["challenge_solver"] = "manual"
     try:
         out = AppSettings(**data)  # type: ignore[arg-type]
     except TypeError:

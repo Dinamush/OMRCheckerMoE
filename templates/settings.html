@@ -100,6 +100,42 @@
                     </div>
 
                     <fieldset class="form-group" style="margin: 1rem 0; padding: 0.75rem 1rem; border-radius: 6px;">
+                        <legend class="panel-kicker" style="padding: 0 0.25rem;">Browser / anti-bot</legend>
+                        <p class="help-text">HDoujin-style: login stays visible; scraping may run headless. FlareSolverr is optional and often unreliable.</p>
+                        <div class="form-group checkbox-group">
+                            <input type="hidden" name="headless_scraping" value="off">
+                            <input type="checkbox" id="headless_scraping" name="headless_scraping" value="on" {% if settings.headless_scraping %}checked{% endif %}>
+                            <label for="headless_scraping">Default to headless scraping (also overridable per download on the home form)</label>
+                        </div>
+                        <div class="form-group checkbox-group">
+                            <input type="hidden" name="browser_profile_per_site" value="off">
+                            <input type="checkbox" id="browser_profile_per_site" name="browser_profile_per_site" value="on" {% if settings.browser_profile_per_site %}checked{% endif %}>
+                            <label for="browser_profile_per_site">Persistent Chrome profile per site (under your HamsterScraper data folder)</label>
+                        </div>
+                        <div class="form-group checkbox-group">
+                            <input type="hidden" name="skip_login_if_cookies_valid" value="off">
+                            <input type="checkbox" id="skip_login_if_cookies_valid" name="skip_login_if_cookies_valid" value="on" {% if settings.skip_login_if_cookies_valid %}checked{% endif %}>
+                            <label for="skip_login_if_cookies_valid">Skip login when saved cookies still work</label>
+                        </div>
+                        <div class="form-group checkbox-group">
+                            <input type="hidden" name="use_undetected_chrome" value="off">
+                            <input type="checkbox" id="use_undetected_chrome" name="use_undetected_chrome" value="on" {% if settings.use_undetected_chrome %}checked{% endif %}>
+                            <label for="use_undetected_chrome">Use undetected-chromedriver for scrape phase (when installed)</label>
+                        </div>
+                        <div class="form-group">
+                            <label for="challenge_solver">Cloudflare / IUAM solver</label>
+                            <select id="challenge_solver" name="challenge_solver">
+                                <option value="manual" {% if settings.challenge_solver == 'manual' %}selected{% endif %}>Manual visible browser (recommended)</option>
+                                <option value="flaresolverr" {% if settings.challenge_solver == 'flaresolverr' %}selected{% endif %}>FlareSolverr (local service)</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label for="flaresolverr_base_url">FlareSolverr API base URL</label>
+                            <input type="text" id="flaresolverr_base_url" name="flaresolverr_base_url" value="{{ settings.flaresolverr_base_url | e }}" placeholder="http://127.0.0.1:8191/v1">
+                        </div>
+                    </fieldset>
+
+                    <fieldset class="form-group" style="margin: 1rem 0; padding: 0.75rem 1rem; border-radius: 6px;">
                         <legend class="panel-kicker" style="padding: 0 0.25rem;">Automation</legend>
                         <div class="form-group checkbox-group">
                             <input type="hidden" name="watcher_enabled" value="off">

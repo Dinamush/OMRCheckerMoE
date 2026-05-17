@@ -57,7 +57,10 @@ from existing_library import (
 import webview_login_bridge
 import workflow_heuristics
 import pornhub_ph
+import browser_antibot
+import browser_challenge_wait
 import chrome_login_confirm
+import workflow_browser
 from settings import (
     AppSettings,
     apply_delay,
@@ -129,9 +132,10 @@ def _watcher_main_loop() -> None:
 @asynccontextmanager
 async def _app_lifespan(_app: FastAPI):
     logging.info(
-        "SHUCK3R chrome login wait v%s (%s)",
+        "SHUCK3R browser stack login_v%s antibot_v%s (%s)",
         chrome_login_confirm.CHROME_LOGIN_WAIT_VERSION,
-        getattr(chrome_login_confirm, "__file__", "?"),
+        browser_antibot.BROWSER_ANTIBOT_VERSION,
+        getattr(browser_antibot, "__file__", "?"),
     )
     t = _threading.Thread(target=_watcher_main_loop, name="hamster-watcher", daemon=True)
     t.start()
@@ -218,6 +222,12 @@ class SeleniumLoginConfirmBody(BaseModel):
     session_id: str = Field(..., min_length=1)
 
 
+class BrowserChallengeConfirmBody(BaseModel):
+    """Progress-page confirmation after solving Cloudflare/CAPTCHA in visible Chrome."""
+
+    session_id: str = Field(..., min_length=1)
+
+
 # ----------------------------- Helper Functions ----------------------------- #
 
 def setup_logging(log_file: str) -> None:
@@ -261,48 +271,15 @@ def _selenium_headless_after_embedded_login() -> bool:
 
 
 def setup_chrome_driver(headless: bool = False, proxy_url: str = "") -> webdriver.Chrome:
-    """Set up Chrome WebDriver with webdriver-manager."""
-    options = Options()
-    if headless:
-        options.add_argument("--headless")
-        options.add_argument("--disable-gpu")
-    pv = (proxy_url or "").strip()
-    if pv:
-        options.add_argument("--proxy-server=" + pv)
-    options.add_argument("--window-size=1920,1080")
-    options.add_argument("--log-level=3")
-    options.add_argument("--disable-extensions")
-    options.add_argument("--disable-popup-blocking")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--disable-web-security")
-    options.add_argument("--allow-running-insecure-content")
-    options.add_argument("--disable-features=VizDisplayCompositor")
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_experimental_option('useAutomationExtension', False)
-    
-    try:
-        # Use ChromeDriverManager with caching
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=options)
-        
-        # Page load cap; avoid implicit wait — it applies to find_elements too, so a missing
-        # <video> on xHamster would block ~implicit_wait seconds per video (felt as "10s stalls").
-        driver.set_page_load_timeout(30)
-        driver.implicitly_wait(0)
-        
-        # Execute script to remove webdriver property
-        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-        
-        logging.info("Chrome WebDriver initialized successfully.")
-        return driver
-    except WebDriverException as e:
-        logging.error(f"Chrome WebDriver initialization failed: {e}")
-        raise
-    except Exception as e:
-        logging.error(f"Unexpected error initializing Chrome WebDriver: {e}")
-        raise
+    """Backward-compatible wrapper — prefer ``workflow_browser.create_driver``."""
+    cfg = load_settings()
+    purpose = "scrape" if headless else "auth"
+    return workflow_browser.create_driver(
+        "xhamster",
+        cfg,
+        headless=headless,
+        purpose=purpose,  # type: ignore[arg-type]
+    )
 
 
 def wait_for_manual_login(driver, login_url: str, session_id: str) -> None:
@@ -385,11 +362,17 @@ def _pornhub_tracker_titles(video_urls: List[str]) -> List[str]:
     return out
 
 
-def fetch_html_selenium(driver, url: str) -> Optional[str]:
+def fetch_html_selenium(
+    driver,
+    url: str,
+    *,
+    session_id: Optional[str] = None,
+    site: str = "xhamster",
+    cfg: Optional[AppSettings] = None,
+) -> Tuple[Optional[str], Any]:
     """Fetch HTML via Selenium with a full scroll to trigger lazy-loaded content.
 
-    Returns None when the resulting page looks like a 404, generic error page, or a
-    login redirect — callers should treat None as "no usable content at this URL".
+    Returns ``(html_or_none, driver)`` — *driver* may be replaced after challenge escalation.
     """
     try:
         driver.get(url)
@@ -397,27 +380,36 @@ def fetch_html_selenium(driver, url: str) -> Optional[str]:
         
         # Wait for page to load
         time.sleep(2)
+
+        if session_id and cfg is not None:
+            replacement = workflow_browser.check_page_challenge(
+                driver, url, session_id=session_id, site=site, cfg=cfg
+            )
+            if replacement is not None:
+                driver = replacement
+                driver.get(url)
+                time.sleep(2)
         
         # Check if we're on a valid page (not 404 or error page)
         if "404" in driver.title or "error" in driver.title.lower() or "not found" in driver.title.lower():
             logging.warning(f"Page appears to be an error page: {driver.title}")
-            return None
+            return None, driver
         
         # Check if we're still on the favorites page (not redirected to login)
         current_url = driver.current_url
         if "login" in current_url or "signin" in current_url:
             logging.warning(f"Redirected to login page: {current_url}")
-            return None
+            return None, driver
         
         scroll_to_bottom(driver)
         
         # Additional wait after scrolling
         time.sleep(1)
         
-        return driver.page_source
+        return driver.page_source, driver
     except Exception as e:
         logging.error(f"Error fetching HTML from {url}: {e}")
-        return None
+        return None, driver
 
 def scroll_to_bottom(driver, pause_time: float = 2.0) -> None:
     """Scroll to the bottom of the page to load all content."""
@@ -988,25 +980,69 @@ def pornhub_workflow(
             )
             time.sleep(1.0)
         else:
-            workflow_heuristics.advance(session_id, "chrome_login")
-            driver = setup_chrome_driver(headless, cfg.proxy_url)
-            driver.get("https://www.pornhub.com")
-            logging.info("Please log in to PornHub in the opened browser.")
-            workflow_heuristics.set_detail(
-                session_id,
-                chrome_login_confirm.chrome_login_progress_hint(),
+            scrape_headless = workflow_browser.scrape_headless_enabled(headless, cfg)
+            workflow_heuristics.advance(session_id, "cookie_reuse")
+            cookies_ok, cookie_msg = workflow_browser.cookies_valid_for_site(
+                "pornhub", cookie_file, cfg
             )
-            chrome_login_confirm.wait_for_chrome_login(session_id)
-            time.sleep(5)
-            save_cookies_netscape(driver, cookie_file)
-            healthy, health_msg = pornhub_ph.check_cookie_health(cookie_file, cfg.proxy_url)
-            if not healthy:
-                logging.warning("PornHub cookie health check failed: %s", health_msg)
-                workflow_heuristics.mark_error(session_id, f"Login check failed — {health_msg}")
-                return
-            logging.info("PornHub cookie health check passed: %s", health_msg)
+            workflow_heuristics.set_detail(session_id, cookie_msg)
+            if cookies_ok:
+                logging.info("PornHub cookie reuse: %s", cookie_msg)
+                workflow_heuristics.set_detail(
+                    session_id, "Using saved session — skipping login…",
+                )
+                if scrape_headless:
+                    workflow_heuristics.advance(session_id, "headless_scrape")
+                workflow_heuristics.advance(session_id, "extract_list")
+                driver = workflow_browser.create_driver(
+                    "pornhub", cfg, headless=scrape_headless, purpose="scrape"
+                )
+                workflow_browser.apply_flaresolverr_preflight(
+                    driver, "https://www.pornhub.com/", cfg
+                )
+                load_netscape_cookies_into_driver(
+                    driver, cookie_file, "https://www.pornhub.com/"
+                )
+            else:
+                workflow_heuristics.advance(session_id, "chrome_login")
+                auth_driver = workflow_browser.create_driver(
+                    "pornhub", cfg, headless=False, purpose="auth"
+                )
+                auth_driver.get("https://www.pornhub.com")
+                logging.info("Please log in to PornHub in the opened browser.")
+                workflow_heuristics.set_detail(
+                    session_id,
+                    chrome_login_confirm.chrome_login_progress_hint(),
+                )
+                chrome_login_confirm.wait_for_chrome_login(session_id)
+                time.sleep(5)
+                save_cookies_netscape(auth_driver, cookie_file)
+                healthy, health_msg = pornhub_ph.check_cookie_health(
+                    cookie_file, cfg.proxy_url
+                )
+                if not healthy:
+                    logging.warning("PornHub cookie health check failed: %s", health_msg)
+                    workflow_heuristics.mark_error(
+                        session_id, f"Login check failed — {health_msg}"
+                    )
+                    workflow_browser.quit_driver(auth_driver)
+                    return
+                logging.info("PornHub cookie health check passed: %s", health_msg)
+                if scrape_headless:
+                    workflow_heuristics.advance(session_id, "headless_scrape")
+                    workflow_browser.quit_driver(auth_driver)
+                    driver = workflow_browser.create_driver(
+                        "pornhub", cfg, headless=True, purpose="scrape"
+                    )
+                    load_netscape_cookies_into_driver(
+                        driver, cookie_file, "https://www.pornhub.com/"
+                    )
+                else:
+                    driver = auth_driver
+                workflow_heuristics.advance(session_id, "extract_list")
 
-        workflow_heuristics.advance(session_id, "extract_list")
+        if use_embedded:
+            workflow_heuristics.advance(session_id, "extract_list")
         if url_override is not None:
             video_urls = url_override
             workflow_heuristics.set_detail(session_id, f"Retrying {len(url_override)} failed URLs…")
@@ -1132,12 +1168,7 @@ def pornhub_workflow(
         logging.critical(f"Error in PornHub workflow: {e}")
         workflow_heuristics.mark_error(session_id, str(e))
     finally:
-        if driver:
-            try:
-                driver.quit()
-                logging.info("Chrome WebDriver closed successfully.")
-            except Exception as e:
-                logging.error(f"Error closing Chrome WebDriver: {e}")
+        workflow_browser.quit_driver(driver)
         try:
             if not cfg.persistent_cookies and os.path.exists(cookie_file):
                 os.unlink(cookie_file)
@@ -1212,6 +1243,14 @@ def xhamster_workflow(
     try:
         login_url = "https://xhamster.com/login"
         use_embedded = webview_login_bridge.is_active() and webview_login_bridge.embedded_login_env_enabled()
+        scrape_headless = workflow_browser.scrape_headless_enabled(headless, cfg)
+        if not use_embedded:
+            workflow_heuristics.advance(session_id, "cookie_reuse")
+        cookies_ok, cookie_msg = workflow_browser.cookies_valid_for_site(
+            "xhamster", cookie_file, cfg
+        )
+        if not use_embedded:
+            workflow_heuristics.set_detail(session_id, cookie_msg)
         if use_embedded:
             workflow_heuristics.advance(session_id, "site_login")
             webview_login_bridge.begin_embedded_login(
@@ -1219,7 +1258,8 @@ def xhamster_workflow(
                 cookie_file,
                 progress_url=_desktop_session_progress_url(session_id, "xhamster"),
             )
-            scrape_headless = _selenium_headless_after_embedded_login()
+            if not scrape_headless:
+                scrape_headless = _selenium_headless_after_embedded_login()
             if scrape_headless:
                 logging.info(
                     "Selenium runs headless after in-app login so Chrome does not cover SHUCK3R "
@@ -1227,16 +1267,51 @@ def xhamster_workflow(
                 )
             workflow_heuristics.advance(session_id, "save_cookies")
             workflow_heuristics.set_detail(session_id, None)
+            if scrape_headless:
+                workflow_heuristics.advance(session_id, "headless_scrape")
             workflow_heuristics.advance(session_id, "browser_start")
-            driver = setup_chrome_driver(scrape_headless, cfg.proxy_url)
+            driver = workflow_browser.create_driver(
+                "xhamster", cfg, headless=scrape_headless, purpose="scrape"
+            )
+            workflow_browser.apply_flaresolverr_preflight(
+                driver, "https://xhamster.com/", cfg
+            )
+            load_netscape_cookies_into_driver(driver, cookie_file, "https://xhamster.com/")
+        elif cookies_ok:
+            logging.info("xHamster cookie reuse: %s", cookie_msg)
+            workflow_heuristics.set_detail(
+                session_id, "Using saved session — skipping login…",
+            )
+            if scrape_headless:
+                workflow_heuristics.advance(session_id, "headless_scrape")
+            workflow_heuristics.advance(session_id, "browser_start")
+            driver = workflow_browser.create_driver(
+                "xhamster", cfg, headless=scrape_headless, purpose="scrape"
+            )
+            workflow_browser.apply_flaresolverr_preflight(
+                driver, "https://xhamster.com/", cfg
+            )
             load_netscape_cookies_into_driver(driver, cookie_file, "https://xhamster.com/")
         else:
             workflow_heuristics.advance(session_id, "chrome_login")
-            driver = setup_chrome_driver(headless, cfg.proxy_url)
-            wait_for_manual_login(driver, login_url, session_id)
+            auth_driver = workflow_browser.create_driver(
+                "xhamster", cfg, headless=False, purpose="auth"
+            )
+            wait_for_manual_login(auth_driver, login_url, session_id)
             time.sleep(5)
-            save_cookies_netscape(driver, cookie_file)
+            save_cookies_netscape(auth_driver, cookie_file)
             workflow_heuristics.advance(session_id, "save_cookies")
+            if scrape_headless:
+                workflow_heuristics.advance(session_id, "headless_scrape")
+                workflow_browser.quit_driver(auth_driver)
+                driver = workflow_browser.create_driver(
+                    "xhamster", cfg, headless=True, purpose="scrape"
+                )
+                load_netscape_cookies_into_driver(
+                    driver, cookie_file, "https://xhamster.com/"
+                )
+            else:
+                driver = auth_driver
             workflow_heuristics.advance(session_id, "browser_start")
 
         tracker = get_tracker(session_id)
@@ -1336,7 +1411,13 @@ def xhamster_workflow(
                     # Try different pagination approaches for xHamster
                     if page_number == 1:
                         current_page_url = favorites_url
-                        html_content = fetch_html_selenium(driver, current_page_url)
+                        html_content, driver = fetch_html_selenium(
+                            driver,
+                            current_page_url,
+                            session_id=session_id,
+                            site="xhamster",
+                            cfg=cfg,
+                        )
                     else:
                         # xHamster uses /page_number format for pagination
                         if page_number == 2:
@@ -1344,7 +1425,13 @@ def xhamster_workflow(
                         else:
                             current_page_url = f"{favorites_url}/{page_number}"
 
-                        html_content = fetch_html_selenium(driver, current_page_url)
+                        html_content, driver = fetch_html_selenium(
+                            driver,
+                            current_page_url,
+                            session_id=session_id,
+                            site="xhamster",
+                            cfg=cfg,
+                        )
 
                         # If URL pagination didn't work, try clicking next button
                         if not html_content:
@@ -1542,12 +1629,7 @@ def xhamster_workflow(
         logging.critical(f"Error in xHamster workflow: {e}")
         workflow_heuristics.mark_error(session_id, str(e))
     finally:
-        if driver:
-            try:
-                driver.quit()
-                logging.info("Chrome WebDriver closed successfully.")
-            except Exception as e:
-                logging.error(f"Error closing Chrome WebDriver: {e}")
+        workflow_browser.quit_driver(driver)
         try:
             if not cfg.persistent_cookies and os.path.exists(cookie_file):
                 os.unlink(cookie_file)
@@ -1568,10 +1650,14 @@ def xhamster_workflow(
 
 @app.get("/api/build-info", include_in_schema=False)
 def api_build_info():
-    """Quick check that the running server loaded the current chrome-login wait code."""
+    """Quick check that the running server loaded the current browser automation code."""
     return {
         "chrome_login_wait_version": chrome_login_confirm.CHROME_LOGIN_WAIT_VERSION,
+        "browser_antibot_version": browser_antibot.BROWSER_ANTIBOT_VERSION,
+        "challenge_wait_version": browser_challenge_wait.CHALLENGE_WAIT_VERSION,
+        "undetected_chromedriver_available": browser_antibot.undetected_chromedriver_available(),
         "chrome_login_confirm_module": getattr(chrome_login_confirm, "__file__", None),
+        "browser_antibot_module": getattr(browser_antibot, "__file__", None),
     }
 
 
@@ -1651,6 +1737,15 @@ async def settings_save(request: Request):
     cfg.watcher_enabled = _combo_on("watcher_enabled")
     cfg.watcher_interval_minutes = max(1, min(10_080, _pi("watcher_interval_minutes", cfg.watcher_interval_minutes)))
     cfg.notify_on_complete = _combo_on("notify_on_complete")
+    cfg.headless_scraping = _combo_on("headless_scraping")
+    cfg.browser_profile_per_site = _combo_on("browser_profile_per_site")
+    cfg.skip_login_if_cookies_valid = _combo_on("skip_login_if_cookies_valid")
+    cfg.use_undetected_chrome = _combo_on("use_undetected_chrome")
+    solver = str(fd.get("challenge_solver") or cfg.challenge_solver).strip().lower()
+    cfg.challenge_solver = solver if solver in ("manual", "flaresolverr") else "manual"
+    cfg.flaresolverr_base_url = str(
+        fd.get("flaresolverr_base_url") or cfg.flaresolverr_base_url
+    ).strip() or "http://127.0.0.1:8191/v1"
 
     save_settings(cfg)
     return RedirectResponse("/settings?saved=1", status_code=303)
@@ -1776,6 +1871,21 @@ def api_selenium_login_confirm(body: SeleniumLoginConfirmBody):
         detail=(
             "No Chrome login step is waiting for that session. Open the matching download tab, "
             "wait until Chrome has appeared, sign in, then try again — or the job may have already continued."
+        ),
+    )
+
+
+@app.post("/api/browser-challenge/confirm")
+def api_browser_challenge_confirm(body: BrowserChallengeConfirmBody):
+    """Unblocks scrape after user solves Cloudflare/CAPTCHA in visible Chrome."""
+    sid = body.session_id.strip()
+    if browser_challenge_wait.confirm_challenge_cleared(sid):
+        return {"ok": True, "challenge_wait_version": browser_challenge_wait.CHALLENGE_WAIT_VERSION}
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "No browser challenge step is waiting for that session. "
+            "Complete the check in Chrome, then try again."
         ),
     )
 
