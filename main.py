@@ -42,6 +42,7 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict
 
 from paths import get_resource_root, get_user_data_dir
+from version import __version__
 from duplicate_finder import (
     resolve_scan_directory,
     resolve_deletable_file,
@@ -170,6 +171,7 @@ def _desktop_session_progress_url(session_id: str, site: str) -> str:
     return f"http://{host}:{port}/download/session/{session_id}?timestamp={timestamp}&site={site}"
 
 templates = Jinja2Templates(directory=str(RESOURCE_ROOT / "templates"))
+templates.env.globals["app_version"] = __version__
 app.mount("/static", StaticFiles(directory=str(RESOURCE_ROOT / "static")), name="static")
 
 
@@ -2228,6 +2230,7 @@ def xhamster_workflow(
 def api_build_info():
     """Quick check that the running server loaded the current browser automation code."""
     return {
+        "app_version": __version__,
         "chrome_login_wait_version": chrome_login_confirm.CHROME_LOGIN_WAIT_VERSION,
         "browser_antibot_version": browser_antibot.BROWSER_ANTIBOT_VERSION,
         "challenge_wait_version": browser_challenge_wait.CHALLENGE_WAIT_VERSION,

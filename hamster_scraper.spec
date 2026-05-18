@@ -36,6 +36,7 @@ a = Analysis(
         'chrome_login_confirm',
         'cookie_health',
         'flaresolverr_client',
+        'version',
         'pixiv_ph',
         'pixiv_titles',
         'deep_translator',
