@@ -50,6 +50,7 @@ PIXIV_ILLUST_TYPE_MANGA = 1
 PIXIV_ILLUST_TYPE_UGOIRA = 2
 _MAX_FILENAME_TOTAL = 200
 PixivUgoiraFormat = Literal["zip", "gif", "both"]
+PixivImageQuality = Literal["best", "original", "regular", "small"]
 _PIXIV_PARENT_DOMAIN = ".pixiv.net"
 _PIXIV_AUTH_NAMES = frozenset({"PHPSESSID", "__cf_bm", "cf_clearance"})
 
@@ -583,8 +584,36 @@ def fetch_ugoira_meta(session: requests.Session, illust_id: str) -> Dict[str, An
     return body
 
 
-def pick_ugoira_zip_url(meta_body: Dict[str, Any]) -> Optional[str]:
-    return meta_body.get("originalSrc") or meta_body.get("src")
+def pick_pixiv_image_url(
+    urls_obj: Any,
+    quality: PixivImageQuality = "original",
+) -> Optional[str]:
+    """Pick a CDN URL from Pixiv ``urls`` object for the requested quality preset."""
+    if not isinstance(urls_obj, dict):
+        return None
+    original = urls_obj.get("original")
+    regular = urls_obj.get("regular")
+    small = urls_obj.get("small") or urls_obj.get("thumb")
+    if quality == "best":
+        return original or regular or small
+    if quality == "original":
+        return original or regular or small
+    if quality == "regular":
+        return regular or small or original
+    return small or regular or original
+
+
+def pick_ugoira_zip_url(
+    meta_body: Dict[str, Any],
+    *,
+    quality: PixivImageQuality = "original",
+) -> Optional[str]:
+    """Ugoira ZIP: full frames (``originalSrc``) vs 600×600 preview (``src``)."""
+    original = meta_body.get("originalSrc")
+    preview = meta_body.get("src")
+    if quality in ("best", "original"):
+        return original or preview
+    return preview or original
 
 
 def fetch_illust_image_urls(
@@ -592,32 +621,23 @@ def fetch_illust_image_urls(
     illust_id: str,
     *,
     body: Optional[Dict[str, Any]] = None,
+    image_quality: PixivImageQuality = "original",
 ) -> List[str]:
-    """Resolve original (or regular) image URLs for all pages of a static illustration."""
+    """Resolve image URLs for all pages of a static illustration or manga."""
     if body is None:
         body = fetch_illust_body(session, illust_id)
     page_count = int(body.get("pageCount") or 1)
     urls: List[str] = []
 
-    def _pick_url(urls_obj: Any) -> Optional[str]:
-        if not isinstance(urls_obj, dict):
-            return None
-        return (
-            urls_obj.get("original")
-            or urls_obj.get("regular")
-            or urls_obj.get("small")
-            or urls_obj.get("thumb")
-        )
-
     if page_count <= 1:
-        u = _pick_url(body.get("urls"))
+        u = pick_pixiv_image_url(body.get("urls"), image_quality)
         if u:
             urls.append(u)
         return urls
 
     pages_data = _ajax_json(session, f"{PIXIV_HOME}ajax/illust/{illust_id}/pages")
     for page in pages_data.get("body") or []:
-        u = _pick_url((page or {}).get("urls"))
+        u = pick_pixiv_image_url((page or {}).get("urls"), image_quality)
         if u:
             urls.append(u)
     return urls
@@ -981,12 +1001,13 @@ def download_ugoira_for_illust(
     root: Path,
     *,
     ugoira_format: PixivUgoiraFormat = "gif",
+    image_quality: PixivImageQuality = "original",
     skip_if_exists: bool = True,
     cancel_check: Optional[Callable[[], bool]] = None,
 ) -> List[Path]:
     """Download ugoira ZIP and/or GIF for one illustration."""
     meta = fetch_ugoira_meta(session, illust_id)
-    zip_url = pick_ugoira_zip_url(meta)
+    zip_url = pick_ugoira_zip_url(meta, quality=image_quality)
     if not zip_url:
         raise RuntimeError("No ugoira ZIP URL in ugoira_meta (originalSrc/src missing)")
 
@@ -1051,11 +1072,14 @@ def download_manga_for_illust(
     root: Path,
     body: Dict[str, Any],
     *,
+    image_quality: PixivImageQuality = "original",
     skip_if_exists: bool = True,
     cancel_check: Optional[Callable[[], bool]] = None,
 ) -> List[Path]:
     """Download all manga pages into one ZIP (post title on the archive name)."""
-    urls = fetch_illust_image_urls(session, illust_id, body=body)
+    urls = fetch_illust_image_urls(
+        session, illust_id, body=body, image_quality=image_quality
+    )
     if not urls:
         raise RuntimeError("No image URLs for manga illust")
     zip_dest = root / _manga_zip_filename(file_title, illust_id)
@@ -1118,8 +1142,18 @@ def download_bookmark_works(
     ugoira_format: PixivUgoiraFormat = "gif",
     cancel_check: Optional[Callable[[], bool]] = None,
     settings: Optional[Any] = None,
+    image_quality: Optional[PixivImageQuality] = None,
 ) -> bool:
     """Download bookmarked works. Returns True if stopped early by user cancel."""
+    from settings import load_settings
+
+    cfg = settings or load_settings()
+    quality: PixivImageQuality = image_quality or getattr(
+        cfg, "pixiv_image_quality", "original"
+    )
+    if quality not in ("best", "original", "regular", "small"):
+        quality = "original"
+
     tracker = get_tracker(session_id)
     root = Path(download_dir)
     cancelled = False
@@ -1149,6 +1183,7 @@ def download_bookmark_works(
                     file_title,
                     root,
                     ugoira_format=ugoira_format,
+                    image_quality=quality,
                     skip_if_exists=skip_if_exists,
                     cancel_check=cancel_check,
                 )
@@ -1159,11 +1194,14 @@ def download_bookmark_works(
                     file_title,
                     root,
                     body,
+                    image_quality=quality,
                     skip_if_exists=skip_if_exists,
                     cancel_check=cancel_check,
                 )
             else:
-                urls = fetch_illust_image_urls(ws, illust_id, body=body)
+                urls = fetch_illust_image_urls(
+                    ws, illust_id, body=body, image_quality=quality
+                )
                 if not urls:
                     tracker.fail_download(page_url, "No image URLs in illust detail")
                     return

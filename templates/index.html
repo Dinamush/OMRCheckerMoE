@@ -2,6 +2,7 @@
 {% block title %}SHUCK3R · Downloader{% endblock %}
 {% block main_class %}layout-shell layout-shell-home{% endblock %}
 {% block content %}
+        {% set settings = settings|default(load_app_settings()) %}
         <section class="layout-hero layout-hero-home" aria-labelledby="downloader-title">
             <div class="layout-hero-copy">
                 <svg class="hero-corn-art" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 56 96" aria-hidden="true" focusable="false">
@@ -76,6 +77,12 @@
                             <option value="private">Private / all bookmarks (rest=hide)</option>
                             <option value="both">Both public and private</option>
                         </select>
+                        <p class="help-text" style="margin-top: 0.75rem;">
+                            <strong>Image quality:</strong>
+                            {{ settings.pixiv_image_quality|default('original') }}
+                            — set in <a href="/settings#pixiv-settings">Settings → Pixiv downloads</a>
+                            (not the video quality dropdown).
+                        </p>
                     </div>
 
                     <div class="form-group checkbox-group">
@@ -123,7 +130,7 @@
                     <ul>
                         <li><strong>PornHub:</strong> Chrome scrolls your favourites, then downloads each video via page flashvars (requires login).</li>
                         <li><strong>xHamster:</strong> Downloads from your favorites page (requires login).</li>
-                        <li><strong>Pixiv:</strong> Bookmarks or a single artwork URL; ugoira format (GIF/ZIP/both) in Settings — GIF uses Pillow (ffmpeg optional).</li>
+                        <li><strong>Pixiv:</strong> Bookmarks or artwork URL; image quality and ugoira format in Settings.</li>
                         <li>Files save under <code>downloads/ph</code>, <code>downloads/xh</code>, or <code>downloads/pixiv</code> in your profile (Windows: <code>%LOCALAPPDATA%\HamsterScraper\downloads\…</code>).</li>
                         <li><strong>Library skip:</strong> PornHub reads titles from each video page. xHamster uses titles from the page. Very different filenames may still download.</li>
                     </ul>

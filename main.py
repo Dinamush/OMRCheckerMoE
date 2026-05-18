@@ -172,6 +172,11 @@ def _desktop_session_progress_url(session_id: str, site: str) -> str:
 
 templates = Jinja2Templates(directory=str(RESOURCE_ROOT / "templates"))
 templates.env.globals["app_version"] = __version__
+templates.env.globals["load_app_settings"] = lambda: asdict(load_settings())
+
+
+def _index_template_ctx(*, form_error: Optional[str] = None) -> Dict[str, Any]:
+    return {"form_error": form_error, "settings": asdict(load_settings())}
 app.mount("/static", StaticFiles(directory=str(RESOURCE_ROOT / "static")), name="static")
 
 
@@ -1726,6 +1731,7 @@ def pixiv_workflow(
             max_workers=max(1, cfg.max_parallel_downloads),
             skip_if_exists=cfg.skip_existing_in_download_dir,
             ugoira_format=cfg.pixiv_ugoira_format,
+            image_quality=cfg.pixiv_image_quality,
             cancel_check=_cancelled,
             settings=cfg,
         )
@@ -2252,11 +2258,10 @@ def favicon_ico():
 @app.get("/")
 def read_form(request: Request):
     """Display the main form."""
-    cfg = load_settings()
     return templates.TemplateResponse(
         request,
         "index.html",
-        {"form_error": None, "settings": asdict(cfg)},
+        _index_template_ctx(),
     )
 
 
@@ -2319,6 +2324,10 @@ async def settings_save(request: Request):
     if uf == "webm":
         uf = "gif"
     cfg.pixiv_ugoira_format = uf if uf in ("zip", "gif", "both") else "gif"  # type: ignore[assignment]
+    pq = str(fd.get("pixiv_image_quality") or cfg.pixiv_image_quality).strip().lower()
+    cfg.pixiv_image_quality = (
+        pq if pq in ("best", "original", "regular", "small") else "original"
+    )  # type: ignore[assignment]
     cfg.pixiv_translate_titles = _combo_on("pixiv_translate_titles")
     cfg.pixiv_title_target_lang = (
         str(fd.get("pixiv_title_target_lang") or cfg.pixiv_title_target_lang).strip().lower()
@@ -2381,11 +2390,10 @@ def handle_form(
             existing_library_dir, USER_DATA_DIR
         )
     except ValueError as e:
-        cfg = load_settings()
         return templates.TemplateResponse(
             request,
             "index.html",
-            {"form_error": str(e), "settings": asdict(cfg)},
+            _index_template_ctx(form_error=str(e)),
             status_code=400,
         )
 
@@ -2434,17 +2442,15 @@ def handle_form(
             cancel_event=cancel_ev,
         )
     else:
-        cfg = load_settings()
         return templates.TemplateResponse(
             request,
             "index.html",
-            {
-                "form_error": (
+            _index_template_ctx(
+                form_error=(
                     f'Unknown site "{site}". Choose PornHub, xHamster, or Pixiv. '
                     "If Pixiv is missing from the form, restart the app from the latest code."
                 ),
-                "settings": asdict(cfg),
-            },
+            ),
             status_code=400,
         )
 

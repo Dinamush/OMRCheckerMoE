@@ -57,6 +57,21 @@
                         <label for="skip_existing_in_download_dir">Skip if same title/size already exists in the download folder</label>
                     </div>
 
+                    <fieldset class="form-group" id="pixiv-settings" style="margin: 1.25rem 0; padding: 0.75rem 1rem; border-radius: 6px; border: 1px solid rgba(255, 212, 74, 0.35);">
+                        <legend class="panel-kicker" style="padding: 0 0.25rem; font-size: 1rem;">Pixiv downloads</legend>
+                        <p class="help-text" style="margin-top: 0;">Not the <strong>Video quality</strong> preset above (PornHub / xHamster only).</p>
+
+                    <div class="form-group">
+                        <label for="pixiv_image_quality">Pixiv image quality</label>
+                        <select id="pixiv_image_quality" name="pixiv_image_quality">
+                            <option value="original" {% if settings.pixiv_image_quality == 'original' %}selected{% endif %}>Original (full resolution)</option>
+                            <option value="best" {% if settings.pixiv_image_quality == 'best' %}selected{% endif %}>Best available (original → regular → small)</option>
+                            <option value="regular" {% if settings.pixiv_image_quality == 'regular' %}selected{% endif %}>Regular (~1200px)</option>
+                            <option value="small" {% if settings.pixiv_image_quality == 'small' %}selected{% endif %}>Small / thumbnail</option>
+                        </select>
+                        <p class="help-text">Applies to static images, manga pages, and ugoira frame ZIPs. <strong>Original</strong> uses full-size files when Pixiv exposes them (login may be required for R-18).</p>
+                    </div>
+
                     <div class="form-group">
                         <label for="pixiv_ugoira_format">Pixiv ugoira (animated) format</label>
                         <select id="pixiv_ugoira_format" name="pixiv_ugoira_format">
@@ -87,6 +102,8 @@
                             <label for="pixiv_translate_delay_seconds">Delay between translation requests (seconds)</label>
                             <input type="text" inputmode="decimal" id="pixiv_translate_delay_seconds" name="pixiv_translate_delay_seconds" value="{{ settings.pixiv_translate_delay_seconds }}">
                         </div>
+                    </fieldset>
+
                     </fieldset>
 
                     <div class="form-group checkbox-group">

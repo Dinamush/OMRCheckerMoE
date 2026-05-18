@@ -29,6 +29,7 @@ class AppSettings:
     max_parallel_downloads: int = 4
     video_quality: Literal["best", "720", "1080"] = "720"
     pixiv_ugoira_format: Literal["zip", "gif", "both"] = "gif"
+    pixiv_image_quality: Literal["best", "original", "regular", "small"] = "original"
     pixiv_translate_titles: bool = True
     pixiv_title_target_lang: str = "en"
     pixiv_deepl_api_key: str = ""  # optional; else env DEEPL_AUTH_KEY
@@ -65,6 +66,7 @@ DEFAULT_SETTINGS = AppSettings()
 
 _VALID_QUALITY = frozenset({"best", "720", "1080"})
 _VALID_UGOIRA_FORMAT = frozenset({"zip", "gif", "both"})
+_VALID_PIXIV_IMAGE_QUALITY = frozenset({"best", "original", "regular", "small"})
 _VALID_CHALLENGE_SOLVER = frozenset({"manual", "flaresolverr"})
 
 
@@ -101,6 +103,10 @@ def load_settings(user_data_dir: Optional[Path] = None) -> AppSettings:
     if ugoira_fmt not in _VALID_UGOIRA_FORMAT:
         ugoira_fmt = "gif"
     data["pixiv_ugoira_format"] = ugoira_fmt
+    pixiv_q = str(data.get("pixiv_image_quality") or "original").strip().lower()
+    if pixiv_q not in _VALID_PIXIV_IMAGE_QUALITY:
+        pixiv_q = "original"
+    data["pixiv_image_quality"] = pixiv_q
     if data.get("challenge_solver") not in _VALID_CHALLENGE_SOLVER:
         data["challenge_solver"] = "manual"
     try:

@@ -11,6 +11,10 @@ Versioning follows [Semantic Versioning](https://semver.org/) — see [VERSIONIN
 
 ## [Unreleased]
 
+### Added
+
+- **Pixiv image quality** preset in Settings: original, best, regular, or small (static images, manga, ugoira ZIPs)
+
 ### Planned / known gaps
 
 - Pixiv queue resume API
