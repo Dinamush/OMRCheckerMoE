@@ -11,11 +11,15 @@ import json
 import logging
 import os
 import re
+import shutil
+import subprocess
+import tempfile
 import time
+import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.cookiejar import MozillaCookieJar
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 from urllib.parse import urlparse
 
 import requests
@@ -39,6 +43,8 @@ DEFAULT_UA = (
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
 BOOKMARK_PAGE_LIMIT = 48
+PIXIV_ILLUST_TYPE_UGOIRA = 2
+PixivUgoiraFormat = Literal["zip", "webm", "both"]
 _PIXIV_PARENT_DOMAIN = ".pixiv.net"
 _PIXIV_AUTH_NAMES = frozenset({"PHPSESSID", "__cf_bm", "cf_clearance"})
 
@@ -470,10 +476,60 @@ def collect_bookmark_works(
     return out
 
 
-def fetch_illust_image_urls(session: requests.Session, illust_id: str) -> List[str]:
-    """Resolve original (or regular) image URLs for all pages of an illustration."""
+def illust_artwork_referer(illust_id: str) -> str:
+    return f"{PIXIV_HOME}artworks/{illust_id}"
+
+
+def fetch_illust_body(session: requests.Session, illust_id: str) -> Dict[str, Any]:
+    """Fetch ``/ajax/illust/{id}`` body (type, urls, page count, …)."""
     detail = _ajax_json(session, f"{PIXIV_HOME}ajax/illust/{illust_id}")
-    body = detail.get("body") or {}
+    body = detail.get("body")
+    if not isinstance(body, dict):
+        raise RuntimeError(f"Illust {illust_id}: missing detail body")
+    return body
+
+
+def is_ugoira_body(body: Dict[str, Any]) -> bool:
+    return int(body.get("illustType") or 0) == PIXIV_ILLUST_TYPE_UGOIRA
+
+
+def fetch_ugoira_meta(session: requests.Session, illust_id: str) -> Dict[str, Any]:
+    """Ugoira ZIP URL and per-frame delays from ``/ajax/illust/{id}/ugoira_meta``."""
+    url = f"{PIXIV_HOME}ajax/illust/{illust_id}/ugoira_meta"
+    headers = {
+        **session.headers,
+        "Referer": illust_artwork_referer(illust_id),
+    }
+    r = session.get(url, headers=headers, timeout=30)
+    r.raise_for_status()
+    text = r.text or ""
+    if challenge_detect.detect_challenge(text, r.url, "") != "none":
+        raise RuntimeError(
+            f"Pixiv ugoira meta challenge for {illust_id}. "
+            "Log in in Chrome or enable FlareSolverr in Settings."
+        )
+    data = r.json()
+    if data.get("error"):
+        raise RuntimeError(data.get("message") or f"Pixiv ugoira meta error for {illust_id}")
+    body = data.get("body")
+    if not isinstance(body, dict):
+        raise RuntimeError(f"Illust {illust_id}: missing ugoira_meta body")
+    return body
+
+
+def pick_ugoira_zip_url(meta_body: Dict[str, Any]) -> Optional[str]:
+    return meta_body.get("originalSrc") or meta_body.get("src")
+
+
+def fetch_illust_image_urls(
+    session: requests.Session,
+    illust_id: str,
+    *,
+    body: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    """Resolve original (or regular) image URLs for all pages of a static illustration."""
+    if body is None:
+        body = fetch_illust_body(session, illust_id)
     page_count = int(body.get("pageCount") or 1)
     urls: List[str] = []
 
@@ -508,24 +564,25 @@ def _safe_filename(title: str, illust_id: str, page: int, ext: str) -> str:
 
 def _ext_from_url(url: str) -> str:
     path = urlparse(url).path.lower()
-    for ext in (".jpg", ".jpeg", ".png", ".gif", ".webp"):
+    for ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".zip"):
         if path.endswith(ext):
             return ext
     return ".jpg"
 
 
-def download_image(
+def download_binary(
     session: requests.Session,
     url: str,
     dest: Path,
     *,
+    referer: str = PIXIV_REFERER,
     skip_if_exists: bool = True,
     cancel_check: Optional[Callable[[], bool]] = None,
 ) -> bool:
     if skip_if_exists and dest.is_file() and dest.stat().st_size > 0:
         return True
     dest.parent.mkdir(parents=True, exist_ok=True)
-    headers = {**session.headers, "Referer": PIXIV_REFERER}
+    headers = {**session.headers, "Referer": referer}
     r = session.get(url, headers=headers, timeout=120, stream=True)
     r.raise_for_status()
     with open(dest, "wb") as f:
@@ -537,6 +594,163 @@ def download_image(
     return dest.is_file() and dest.stat().st_size > 0
 
 
+def download_image(
+    session: requests.Session,
+    url: str,
+    dest: Path,
+    *,
+    skip_if_exists: bool = True,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> bool:
+    return download_binary(
+        session,
+        url,
+        dest,
+        skip_if_exists=skip_if_exists,
+        cancel_check=cancel_check,
+    )
+
+
+def _write_ugoira_ffconcat(frames: List[Dict[str, Any]], path: Path) -> None:
+    """Write an FFmpeg concat demuxer file from Pixiv ``frames`` metadata."""
+    lines = ["ffconcat version 1.0", ""]
+    seq = list(frames)
+    if seq:
+        last = dict(seq[-1])
+        last["delay"] = 1
+        seq = seq + [last]
+    for frame in seq:
+        name = frame.get("file")
+        if not name:
+            continue
+        delay_ms = int(frame.get("delay") or 1)
+        duration = max(0.001, round(delay_ms / 1000.0, 4))
+        lines.append(f"file {name}")
+        lines.append(f"duration {duration}")
+        lines.append("")
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def ugoira_zip_to_webm(
+    zip_path: Path,
+    meta_body: Dict[str, Any],
+    dest: Path,
+) -> bool:
+    """Mux extracted ugoira frames to WebM via ffmpeg (returns False if ffmpeg missing)."""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        logger.warning("ffmpeg not on PATH — skipping ugoira WebM conversion for %s", zip_path)
+        return False
+    frames = meta_body.get("frames")
+    if not isinstance(frames, list) or not frames:
+        logger.warning("ugoira_meta has no frames — cannot convert %s", zip_path)
+        return False
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with tempfile.TemporaryDirectory(prefix="ugoira_") as tmp:
+            work = Path(tmp)
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                zf.extractall(work)
+            ffconcat = work / "ffconcat.txt"
+            _write_ugoira_ffconcat(frames, ffconcat)
+            cmd = [
+                ffmpeg,
+                "-hide_banner",
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(ffconcat),
+                "-c:v",
+                "libvpx",
+                "-crf",
+                "12",
+                "-b:v",
+                "2M",
+                "-an",
+                str(dest),
+            ]
+            subprocess.run(
+                cmd,
+                cwd=work,
+                check=True,
+                capture_output=True,
+                timeout=600,
+            )
+    except (subprocess.CalledProcessError, OSError, zipfile.BadZipFile) as e:
+        logger.warning("Ugoira WebM conversion failed for %s: %s", zip_path, e)
+        if dest.is_file():
+            try:
+                dest.unlink()
+            except OSError:
+                pass
+        return False
+    return dest.is_file() and dest.stat().st_size > 0
+
+
+def download_ugoira_for_illust(
+    session: requests.Session,
+    illust_id: str,
+    title: str,
+    root: Path,
+    *,
+    ugoira_format: PixivUgoiraFormat = "zip",
+    skip_if_exists: bool = True,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> List[Path]:
+    """Download ugoira ZIP and/or WebM for one illustration."""
+    meta = fetch_ugoira_meta(session, illust_id)
+    zip_url = pick_ugoira_zip_url(meta)
+    if not zip_url:
+        raise RuntimeError("No ugoira ZIP URL in ugoira_meta (originalSrc/src missing)")
+
+    referer = illust_artwork_referer(illust_id)
+    want_zip = ugoira_format in ("zip", "both")
+    want_webm = ugoira_format in ("webm", "both")
+    zip_dest = root / _safe_filename(title, illust_id, 0, ".zip")
+    webm_dest = root / _safe_filename(title, illust_id, 0, ".webm")
+    saved: List[Path] = []
+
+    zip_ready = (
+        skip_if_exists and want_zip and zip_dest.is_file() and zip_dest.stat().st_size > 0
+    )
+    if want_zip and not zip_ready:
+        if download_binary(
+            session,
+            zip_url,
+            zip_dest,
+            referer=referer,
+            skip_if_exists=skip_if_exists,
+            cancel_check=cancel_check,
+        ):
+            saved.append(zip_dest)
+    elif want_zip and zip_dest.is_file():
+        saved.append(zip_dest)
+
+    if want_webm:
+        webm_exists = (
+            skip_if_exists and webm_dest.is_file() and webm_dest.stat().st_size > 0
+        )
+        if webm_exists:
+            saved.append(webm_dest)
+        else:
+            if not zip_dest.is_file() or zip_dest.stat().st_size == 0:
+                download_binary(
+                    session,
+                    zip_url,
+                    zip_dest,
+                    referer=referer,
+                    skip_if_exists=False,
+                    cancel_check=cancel_check,
+                )
+            if ugoira_zip_to_webm(zip_dest, meta, webm_dest):
+                saved.append(webm_dest)
+
+    return saved
+
+
 def download_bookmark_works(
     session: requests.Session,
     works: List[Dict[str, Any]],
@@ -545,6 +759,7 @@ def download_bookmark_works(
     *,
     max_workers: int = 4,
     skip_if_exists: bool = True,
+    ugoira_format: PixivUgoiraFormat = "zip",
     cancel_check: Optional[Callable[[], bool]] = None,
 ) -> bool:
     """Download bookmarked works. Returns True if stopped early by user cancel."""
@@ -563,24 +778,36 @@ def download_bookmark_works(
         tracker.add_urls([page_url], [title])
         tracker.start_download(page_url)
         try:
-            urls = fetch_illust_image_urls(session, illust_id)
-            if not urls:
-                tracker.fail_download(page_url, "No image URLs in illust detail")
-                return
+            body = fetch_illust_body(session, illust_id)
             saved: List[Path] = []
-            for i, img_url in enumerate(urls):
-                if cancel_check and cancel_check():
-                    raise DownloadCancelled("Download cancelled by user.")
-                ext = _ext_from_url(img_url)
-                dest = root / _safe_filename(title, illust_id, i, ext)
-                if download_image(
+            if is_ugoira_body(body):
+                saved = download_ugoira_for_illust(
                     session,
-                    img_url,
-                    dest,
+                    illust_id,
+                    title,
+                    root,
+                    ugoira_format=ugoira_format,
                     skip_if_exists=skip_if_exists,
                     cancel_check=cancel_check,
-                ):
-                    saved.append(dest)
+                )
+            else:
+                urls = fetch_illust_image_urls(session, illust_id, body=body)
+                if not urls:
+                    tracker.fail_download(page_url, "No image URLs in illust detail")
+                    return
+                for i, img_url in enumerate(urls):
+                    if cancel_check and cancel_check():
+                        raise DownloadCancelled("Download cancelled by user.")
+                    ext = _ext_from_url(img_url)
+                    dest = root / _safe_filename(title, illust_id, i, ext)
+                    if download_image(
+                        session,
+                        img_url,
+                        dest,
+                        skip_if_exists=skip_if_exists,
+                        cancel_check=cancel_check,
+                    ):
+                        saved.append(dest)
             if saved:
                 total_sz = sum(p.stat().st_size for p in saved)
                 tracker.complete_download(page_url, str(saved[0]), total_sz)

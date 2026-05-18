@@ -50,9 +50,12 @@ from duplicate_finder import (
     build_groups_payload,
 )
 from existing_library import (
+    build_library_index,
     build_library_normalized_names,
     matches_existing_library,
+    matches_pornhub_in_library,
     resolve_optional_library_directory,
+    viewkey_from_pornhub_url,
 )
 import webview_login_bridge
 import workflow_heuristics
@@ -458,6 +461,26 @@ def _pornhub_open_chrome_driver(cfg: AppSettings):
         driver, "https://www.pornhub.com/", cfg
     )
     return driver
+
+
+def _library_scan_recursive(
+    library_dir: str, library_recursive: bool, cfg: AppSettings
+) -> bool:
+    """Include site subfolders (ph/, xh/) when scanning the downloads root."""
+    if library_recursive:
+        return True
+    try:
+        lib = Path(library_dir).resolve()
+        root = effective_download_directory(cfg).resolve()
+        if lib == root or lib in root.parents or root in lib.parents:
+            logging.info(
+                "Library scan: enabling subfolder scan for downloads layout (%s)",
+                root,
+            )
+            return True
+    except OSError:
+        pass
+    return False
 
 
 def _pornhub_tracker_titles(video_urls: List[str]) -> List[str]:
@@ -1356,20 +1379,36 @@ def pornhub_workflow(
         if library_dir:
             tracker = get_tracker(session_id)
             tracker.start_session(len(video_urls))
-            norms = build_library_normalized_names(
-                Path(library_dir), recursive=library_recursive
+            scan_recursive = _library_scan_recursive(
+                library_dir, library_recursive, cfg
+            )
+            lib_index = build_library_index(
+                Path(library_dir), recursive=scan_recursive
+            )
+            logging.info(
+                "Library index: %s title keys, %s PornHub viewkeys under %s",
+                len(lib_index.normalized_titles),
+                len(lib_index.viewkeys),
+                library_dir,
             )
             workflow_heuristics.set_detail(
                 session_id,
-                f"Resolving titles ({len(video_urls)} videos) · comparing to your library folder…",
+                f"Comparing {len(video_urls)} favourites to your library folder…",
             )
             to_download: List[Tuple[str, str]] = []
             skipped_n = 0
             for i, url in enumerate(video_urls):
+                vk = viewkey_from_pornhub_url(url)
+                if vk and vk.lower() in lib_index.viewkeys:
+                    title = vk
+                    tracker.add_urls([url], [title])
+                    tracker.skip_download(url, "Already in library folder")
+                    skipped_n += 1
+                    continue
                 title = pornhub_ph.fetch_video_title_from_page(
                     cookie_file, url, proxy_url=cfg.proxy_url, driver=driver
                 )
-                if matches_existing_library(title, norms):
+                if matches_pornhub_in_library(url, title, lib_index):
                     tracker.add_urls([url], [title])
                     tracker.skip_download(url, "Already in library folder")
                     skipped_n += 1
@@ -1632,6 +1671,7 @@ def pixiv_workflow(
             session_id,
             max_workers=max(1, cfg.max_parallel_downloads),
             skip_if_exists=cfg.skip_existing_in_download_dir,
+            ugoira_format=cfg.pixiv_ugoira_format,
             cancel_check=_cancelled,
         )
         if stopped or _cancelled():
@@ -2214,6 +2254,8 @@ async def settings_save(request: Request):
     cfg.download_directory = str(fd.get("download_directory") or "").strip()
     cfg.max_parallel_downloads = max(1, min(32, _pi("max_parallel_downloads", cfg.max_parallel_downloads)))
     cfg.video_quality = vq  # type: ignore[assignment]
+    uf = str(fd.get("pixiv_ugoira_format") or cfg.pixiv_ugoira_format).strip().lower()
+    cfg.pixiv_ugoira_format = uf if uf in ("zip", "webm", "both") else "zip"  # type: ignore[assignment]
     cfg.skip_existing_in_download_dir = _combo_on("skip_existing_in_download_dir")
     cfg.persistent_cookies = _combo_on("persistent_cookies")
     cfg.page_delay_seconds = max(0.0, _pf("page_delay_seconds", cfg.page_delay_seconds))

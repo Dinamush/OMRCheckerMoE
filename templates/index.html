@@ -83,12 +83,12 @@
                     <div class="form-group">
                         <label for="existing_library_dir">Only download what I don&apos;t have yet (optional)</label>
                         <input type="text" id="existing_library_dir" name="existing_library_dir" autocomplete="off" placeholder="Folder where your existing videos are stored">
-                        <p class="help-text">Leave blank to download everything from favorites. If you set a folder, SHUCK3R compares each favorite&apos;s title to video filenames there (mp4, mkv, webm, …) and <strong>skips</strong> matches so only new ones download.</p>
+                        <p class="help-text">Leave blank to download everything from favorites. If you set a folder (usually your <strong>downloads</strong> folder), SHUCK3R matches by title and PornHub <strong>viewkey</strong> in filenames like <code>Title_viewkey.mp4</code> under <code>ph/</code> and skips matches.</p>
                     </div>
 
                     <div class="form-group checkbox-group">
-                        <input type="checkbox" id="library_recursive" name="library_recursive" value="true">
-                        <label for="library_recursive">Include subfolders when scanning the library path above</label>
+                        <input type="checkbox" id="library_recursive" name="library_recursive" value="true" checked>
+                        <label for="library_recursive">Include subfolders when scanning the library path above (recommended — videos live in ph/, xh/, pixiv/)</label>
                     </div>
 
                     <button type="submit">Start Download</button>
@@ -119,7 +119,7 @@
                     <ul>
                         <li><strong>PornHub:</strong> Chrome scrolls your favourites, then downloads each video via page flashvars (requires login).</li>
                         <li><strong>xHamster:</strong> Downloads from your favorites page (requires login).</li>
-                        <li><strong>Pixiv:</strong> Downloads bookmarked illustrations via Ajax API (Chrome login; optional FlareSolverr in Settings).</li>
+                        <li><strong>Pixiv:</strong> Downloads bookmarked illustrations and ugoira (animated ZIP/WebM) via Ajax API (Chrome login; optional FlareSolverr in Settings).</li>
                         <li>Files save under <code>downloads/ph</code>, <code>downloads/xh</code>, or <code>downloads/pixiv</code> in your profile (Windows: <code>%LOCALAPPDATA%\HamsterScraper\downloads\…</code>).</li>
                         <li><strong>Library skip:</strong> PornHub reads titles from each video page. xHamster uses titles from the page. Very different filenames may still download.</li>
                     </ul>

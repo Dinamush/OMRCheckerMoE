@@ -57,6 +57,16 @@
                         <label for="skip_existing_in_download_dir">Skip if same title/size already exists in the download folder</label>
                     </div>
 
+                    <div class="form-group">
+                        <label for="pixiv_ugoira_format">Pixiv ugoira (animated) format</label>
+                        <select id="pixiv_ugoira_format" name="pixiv_ugoira_format">
+                            <option value="zip" {% if settings.pixiv_ugoira_format == 'zip' %}selected{% endif %}>ZIP only (default)</option>
+                            <option value="webm" {% if settings.pixiv_ugoira_format == 'webm' %}selected{% endif %}>WebM only (requires ffmpeg)</option>
+                            <option value="both" {% if settings.pixiv_ugoira_format == 'both' %}selected{% endif %}>ZIP + WebM</option>
+                        </select>
+                        <p class="help-text">Ugoira use <code>illustType=2</code> and Pixiv&apos;s <code>ugoira_meta</code> API. R-18 works need a logged-in session.</p>
+                    </div>
+
                     <div class="form-group checkbox-group">
                         <input type="hidden" name="persistent_cookies" value="off">
                         <input type="checkbox" id="persistent_cookies" name="persistent_cookies" value="on" {% if settings.persistent_cookies %}checked{% endif %}>

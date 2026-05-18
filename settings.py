@@ -28,6 +28,7 @@ class AppSettings:
     download_directory: str = ""  # empty → default %(USER_DATA)/downloads
     max_parallel_downloads: int = 4
     video_quality: Literal["best", "720", "1080"] = "720"
+    pixiv_ugoira_format: Literal["zip", "webm", "both"] = "zip"
     skip_existing_in_download_dir: bool = True
     persistent_cookies: bool = False
 
@@ -59,6 +60,7 @@ class AppSettings:
 DEFAULT_SETTINGS = AppSettings()
 
 _VALID_QUALITY = frozenset({"best", "720", "1080"})
+_VALID_UGOIRA_FORMAT = frozenset({"zip", "webm", "both"})
 _VALID_CHALLENGE_SOLVER = frozenset({"manual", "flaresolverr"})
 
 
@@ -89,6 +91,8 @@ def load_settings(user_data_dir: Optional[Path] = None) -> AppSettings:
             data[k] = raw[k]
     if data.get("video_quality") not in _VALID_QUALITY:
         data["video_quality"] = "720"
+    if data.get("pixiv_ugoira_format") not in _VALID_UGOIRA_FORMAT:
+        data["pixiv_ugoira_format"] = "zip"
     if data.get("challenge_solver") not in _VALID_CHALLENGE_SOLVER:
         data["challenge_solver"] = "manual"
     try:
