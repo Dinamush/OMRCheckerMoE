@@ -103,6 +103,15 @@ class TestClusterDuplicates(unittest.TestCase):
         groups = cluster_duplicates(files, threshold=0.72)
         self.assertEqual(groups, [])
 
+    def test_does_not_merge_transitive_bridge_across_episodes(self) -> None:
+        files = [
+            {"name": "series-1-720p-v1x.mp4", "size": 50_000_000},
+            {"name": "series-1-720p-v1x (2).mp4", "size": 50_000_000},
+            {"name": "series-2-720p-v1x.mp4", "size": 50_000_000},
+        ]
+        groups = cluster_duplicates(files, threshold=0.72)
+        self.assertEqual(groups, [[0, 1]])
+
 
 if __name__ == "__main__":
     unittest.main()

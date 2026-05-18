@@ -17,7 +17,7 @@ import sys
 import time
 import concurrent.futures
 from http.cookiejar import MozillaCookieJar
-from typing import List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
 import requests
@@ -28,6 +28,52 @@ from selenium.common.exceptions import NoSuchElementException
 logger = logging.getLogger(__name__)
 
 PH_BASE = "https://www.pornhub.com"
+# ph.py uses /users/<username>/videos/favorites (not /my/favorites/videos).
+PH_PLAYLIST_URL_PLACEHOLDER = f"{PH_BASE}/my/favorites/videos"
+
+
+def favorites_url_for_username(username: str) -> str:
+    """Canonical favourites URL (matches archive/ph.py and website-code fixture)."""
+    uname = re.sub(r"^/|/$", "", (username or "").strip())
+    if not uname:
+        return PH_PLAYLIST_URL_PLACEHOLDER
+    return f"{PH_BASE}/users/{uname}/videos/favorites"
+
+
+def _username_from_profile_html(html: str) -> str:
+    """Logged-in profile slug from favourites or header markup."""
+    if not html:
+        return ""
+    for pattern in (
+        r'href="/users/([^"/]+)/videos/favorites"',
+        r'class="username"\s+href="/users/([^"/]+)"',
+        r'href="/users/([^"/]+)"[^>]*class="username"',
+        r'topUserMenu[^>]+href="/users/([^"/]+)/videos/favorites"',
+    ):
+        m = re.search(pattern, html, re.I)
+        if m:
+            return m.group(1).strip()
+    return ""
+
+
+def _username_from_user_info_payload(data) -> str:
+    if not isinstance(data, dict):
+        return ""
+    for key in ("username", "user_name", "profile_username", "name", "display_name"):
+        val = data.get(key)
+        if isinstance(val, str) and re.fullmatch(r"[\w.-]+", val.strip()):
+            return val.strip()
+    user = data.get("user")
+    if isinstance(user, dict):
+        found = _username_from_user_info_payload(user)
+        if found:
+            return found
+    for val in data.values():
+        if isinstance(val, dict):
+            found = _username_from_user_info_payload(val)
+            if found:
+                return found
+    return ""
 
 
 def parse_video_links_pornhub(html: str, base_url: str = PH_BASE) -> List[str]:
@@ -47,19 +93,52 @@ def parse_video_links_pornhub(html: str, base_url: str = PH_BASE) -> List[str]:
     return video_links
 
 
-def _session_with_cookies(cookie_file: str) -> requests.Session:
+DEFAULT_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
+
+
+def _cookie_ua_path(cookie_file: str) -> str:
+    return f"{cookie_file}.ua"
+
+
+def _session_user_agent(cookie_file: str) -> str:
+    ua_path = _cookie_ua_path(cookie_file)
+    if os.path.isfile(ua_path):
+        try:
+            ua = open(ua_path, encoding="utf-8").read().strip()
+            if ua:
+                return ua
+        except OSError:
+            pass
+    return DEFAULT_UA
+
+
+def save_user_agent_sidecar(cookie_file: str, user_agent: str) -> None:
+    ua = (user_agent or "").strip()
+    if ua:
+        try:
+            with open(_cookie_ua_path(cookie_file), "w", encoding="utf-8") as fh:
+                fh.write(ua)
+        except OSError as e:
+            logger.warning("Could not save PornHub UA sidecar: %s", e)
+
+
+def _session_with_cookies(cookie_file: str, proxy_url: str = "") -> requests.Session:
     session = requests.Session()
     jar = MozillaCookieJar(cookie_file)
     jar.load(ignore_discard=True, ignore_expires=True)
     session.cookies = jar
+    pv = (proxy_url or "").strip()
+    if pv:
+        session.proxies.update({"http": pv, "https": pv})
     session.headers.update(
         {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            ),
+            "User-Agent": _session_user_agent(cookie_file),
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9",
+            "Referer": f"{PH_BASE}/",
         }
     )
     return session
@@ -84,12 +163,13 @@ def collect_favorites_urls_requests(
     *,
     max_pages: int = 500,
     request_timeout: float = 30.0,
+    proxy_url: str = "",
 ) -> List[str]:
     """
     Collect favourite video page URLs using authenticated GETs and ?page=1,2,...
     Used when there is no Selenium driver (e.g. embedded WebView login).
     """
-    session = _session_with_cookies(cookie_file)
+    session = _session_with_cookies(cookie_file, proxy_url)
     all_urls: set[str] = set()
     q0 = urlparse(playlist_url).query.lower()
     for page in range(1, max_pages + 1):
@@ -102,6 +182,13 @@ def collect_favorites_urls_requests(
             r.raise_for_status()
         except Exception as e:
             logger.warning("Favourites page %s failed: %s", page, e)
+            break
+        # PornHub returns HTTP 200 even for login redirects — detect and bail out.
+        final_url = (getattr(r, 'url', '') or '').lower()
+        if 'login' in final_url or 'name="username"' in r.text:
+            logger.error(
+                "PornHub session expired — got login page on page %s (URL: %s)", page, r.url
+            )
             break
         new_links = parse_video_links_pornhub(r.text, PH_BASE)
         before = len(all_urls)
@@ -131,6 +218,121 @@ def scroll_to_bottom_pornhub(driver, pause_time: float = 2.0, max_scrolls: int =
         logger.error("PornHub scroll_to_bottom: %s", e)
 
 
+def resolve_favorites_playlist_url(driver, fallback: str = "") -> str:
+    """
+    Resolve /users/<username>/videos/favorites (ph.py). Never leaves /my/favorites/videos
+    when the logged-in username can be determined.
+    """
+    fb = (fallback or PH_PLAYLIST_URL_PLACEHOLDER).strip()
+    if "/users/" in fb and "/videos/favorites" in fb:
+        return fb
+
+    try:
+        html = driver.page_source or ""
+        uname = _username_from_profile_html(html)
+        if uname:
+            resolved = favorites_url_for_username(uname)
+            logger.info("PornHub favourites URL from page HTML: %s", resolved)
+            return resolved
+    except Exception as e:
+        logger.debug("PornHub username from HTML failed: %s", e)
+
+    try:
+        payload = driver.execute_async_script(
+            """
+            const done = arguments[arguments.length - 1];
+            fetch('https://www.pornhub.com/user/get_user_info', {
+              credentials: 'include',
+              headers: { 'Accept': 'application/json' }
+            })
+              .then(r => r.json())
+              .then(d => done(d || {}))
+              .catch(e => done({error: String(e)}));
+            """
+        )
+        if isinstance(payload, dict):
+            uname = _username_from_user_info_payload(payload)
+            if uname:
+                resolved = favorites_url_for_username(uname)
+                logger.info("PornHub favourites URL from get_user_info: %s", resolved)
+                return resolved
+    except Exception as e:
+        logger.debug("Could not resolve PornHub username via API: %s", e)
+
+    cur = driver.current_url or ""
+    m = re.search(r"/users/([^/]+)/videos/favorites", cur, re.I)
+    if m:
+        return favorites_url_for_username(m.group(1))
+
+    # /my/favorites/videos redirects to /users/<you>/videos/favorites when logged in.
+    if "my/favorites" in fb.lower() or not fb:
+        try:
+            driver.get(PH_PLAYLIST_URL_PLACEHOLDER)
+            time.sleep(2.5)
+            m = re.search(r"/users/([^/]+)/videos/favorites", driver.current_url or "", re.I)
+            if m:
+                resolved = favorites_url_for_username(m.group(1))
+                logger.info("PornHub favourites URL from redirect: %s", resolved)
+                return resolved
+            uname = _username_from_profile_html(driver.page_source or "")
+            if uname:
+                resolved = favorites_url_for_username(uname)
+                logger.info("PornHub favourites URL after /my/favorites redirect: %s", resolved)
+                return resolved
+        except Exception as e:
+            logger.debug("PornHub /my/favorites redirect probe failed: %s", e)
+
+    return fb
+
+
+def navigate_to_favorites_page(
+    driver,
+    playlist_url: str,
+    *,
+    wait_seconds: float = 20.0,
+) -> Tuple[bool, str, str]:
+    """
+    ph.py extract_video_urls_selenium step 1: open favourites and wait for the list.
+    Returns (ok, message, effective_url).
+    """
+    url = (playlist_url or PH_PLAYLIST_URL_PLACEHOLDER).strip()
+    if not url.startswith("http"):
+        url = urljoin(PH_BASE, url)
+    logger.info("Navigating to PornHub favourites page: %s", url)
+    try:
+        driver.get(url)
+    except Exception as e:
+        return False, f"Could not open favourites page: {e}", url
+
+    deadline = time.time() + max(5.0, wait_seconds)
+    while time.time() < deadline:
+        time.sleep(1.0)
+        cur = (driver.current_url or "").lower()
+        if "login" in cur and "view_video" not in cur:
+            return (
+                False,
+                "Redirected to login — sign in, open your favourites, then continue.",
+                driver.current_url or url,
+            )
+        html = driver.page_source or ""
+        if 'id="moreData"' in html or "view_video.php" in html:
+            effective = driver.current_url or url
+            if "/videos/favorites" in effective.lower() or "my/favorites" in effective.lower():
+                logger.info("Favourites page loaded: %s", effective)
+                return True, "Favourites page ready.", effective
+        # Redirect may land on canonical /users/.../videos/favorites after /my/favorites/videos
+        if "/videos/favorites" in cur and "login" not in cur:
+            time.sleep(1.5)
+            effective = driver.current_url or url
+            return True, "Favourites page ready.", effective
+
+    return (
+        False,
+        "Favourites page did not show a video list — open your favourites in Chrome, then retry.",
+        driver.current_url or url,
+    )
+
+
 def try_click_load_more(driver) -> bool:
     try:
         btn = driver.find_element(By.ID, "moreDataBtn")
@@ -150,18 +352,25 @@ def collect_favorites_urls_with_driver(
     *,
     base_url: str = PH_BASE,
     max_load_more: int = 200,
+    already_on_favorites: bool = False,
 ) -> List[str]:
     """
-    Load favourites in the logged-in browser: scroll, parse, click #moreDataBtn until exhausted.
-    Mirrors archive/ph.py extract_video_urls_selenium.
+    Scroll favourites, parse links, click #moreDataBtn until exhausted.
+    Caller must navigate first (navigate_to_favorites_page) unless already_on_favorites.
+    Mirrors archive/ph.py extract_video_urls_selenium (after driver.get(playlist_url)).
     """
-    logger.info("Loading PornHub favourites (Selenium): %s", playlist_url)
-    driver.get(playlist_url)
-    time.sleep(2)
+    if not already_on_favorites:
+        ok, msg, playlist_url = navigate_to_favorites_page(driver, playlist_url)
+        if not ok:
+            logger.warning("Favourites navigation before scrape: %s", msg)
+    else:
+        logger.info("Scraping PornHub favourites (already on page): %s", driver.current_url or playlist_url)
+    time.sleep(1.0)
 
     all_urls: set[str] = set()
     load_more_attempts = 0
     clicked_load_more = False
+    blank_after_click = 0  # consecutive zero-new-URL iterations after a Load More click
 
     while load_more_attempts < max_load_more:
         scroll_to_bottom_pornhub(driver, pause_time=2.0)
@@ -175,13 +384,30 @@ def collect_favorites_urls_with_driver(
         logger.info("PornHub favourites scrape: total %s URLs (+%s this pass)", len(all_urls), added)
 
         if clicked_load_more and added == 0:
-            logger.info("No new videos after last Load More; finished.")
-            break
+            # BUG 4 fix: allow one extra iteration in case the AJAX response was still
+            # loading when we read page_source (slow network / CDN lag after click).
+            blank_after_click += 1
+            if blank_after_click >= 2:
+                logger.info("No new videos after Load More (2 checks); finished.")
+                break
+            logger.info("No new URLs yet after Load More click — waiting one more cycle…")
+            time.sleep(3)
+            continue
+        else:
+            blank_after_click = 0
 
         clicked_load_more = try_click_load_more(driver)
         if not clicked_load_more:
-            logger.info("No Load More button; finished collecting favourites.")
-            break
+            # BUG 1 fix: on the very first iteration the #moreDataBtn may not have
+            # rendered yet (lazy-loaded JS section). Give it a brief extra wait and
+            # retry once before concluding there are no more pages.
+            if load_more_attempts == 0:
+                logger.info("No Load More button on first check — retrying after short wait…")
+                time.sleep(2.5)
+                clicked_load_more = try_click_load_more(driver)
+            if not clicked_load_more:
+                logger.info("No Load More button; finished collecting favourites.")
+                break
         load_more_attempts += 1
         logger.info("Clicked Load More (%s/%s), waiting…", load_more_attempts, max_load_more)
         time.sleep(3)
@@ -301,19 +527,49 @@ def _sanitize_filename(s: str, max_len: int = 100) -> str:
     return s[:max_len] if len(s) > max_len else s
 
 
-def fetch_video_title_from_page(cookie_file: str, video_page_url: str, timeout: float = 30.0) -> str:
-    """Resolve title from flashvars (for library dedupe)."""
-    session = _session_with_cookies(cookie_file)
-    try:
-        r = session.get(video_page_url, timeout=timeout)
-        r.raise_for_status()
-        extracted = extract_media_from_page(r.text, video_page_url)
+def fetch_video_title_from_page(
+    cookie_file: str,
+    video_page_url: str,
+    timeout: float = 30.0,
+    proxy_url: str = "",
+    *,
+    driver=None,
+) -> str:
+    """Resolve title from flashvars (for library dedupe). Uses browser when driver given (ph.py)."""
+    html = _get_video_page_html(
+        video_page_url, cookie_file, driver=driver, timeout=timeout, proxy_url=proxy_url
+    )
+    if html:
+        extracted = extract_media_from_page(html, video_page_url)
         if extracted:
             _, _, title, _vk = extracted
             return _sanitize_filename(title)
-    except Exception as e:
-        logger.warning("Could not read PornHub title for %s: %s", video_page_url, e)
     return f"video_{abs(hash(video_page_url)) % 10_000_000}"
+
+
+def fetch_video_page_data(
+    cookie_file: str,
+    video_page_url: str,
+    *,
+    driver=None,
+    timeout: float = 30.0,
+    proxy_url: str = "",
+) -> Tuple[str, Optional[Tuple]]:
+    """Fetch a video page and return ``(title, extracted_tuple_or_None)``.
+
+    Returns the full ``(media_url, fmt, title, viewkey)`` tuple alongside the
+    title so callers can pass it to ``download_pornhub_video_page`` via
+    ``pre_extracted``, avoiding a second browser navigation for the same page.
+    """
+    html = _get_video_page_html(
+        video_page_url, cookie_file, driver=driver, timeout=timeout, proxy_url=proxy_url
+    )
+    if html:
+        extracted = extract_media_from_page(html, video_page_url)
+        if extracted:
+            _, _, title, _vk = extracted
+            return _sanitize_filename(title), extracted
+    return f"video_{abs(hash(video_page_url)) % 10_000_000}", None
 
 
 def _get_video_page_html(
@@ -322,6 +578,7 @@ def _get_video_page_html(
     *,
     driver=None,
     timeout: float = 30.0,
+    proxy_url: str = "",
 ) -> Optional[str]:
     """Fetch a PornHub video page HTML.
 
@@ -331,12 +588,12 @@ def _get_video_page_html(
     if driver is not None:
         try:
             driver.get(video_url)
-            time.sleep(2.5)  # wait for inline JS (flashvars_*) to be present in page_source
+            time.sleep(2.5)  # ph.py: wait for flashvars_* in page_source
             return driver.page_source
         except Exception as e:
             logger.error("Error loading PornHub video page in browser %s: %s", video_url, e)
             return None
-    session = _session_with_cookies(cookie_file)
+    session = _session_with_cookies(cookie_file, proxy_url)
     try:
         r = session.get(video_url, timeout=timeout)
         r.raise_for_status()
@@ -351,11 +608,20 @@ def _download_from_media_url(
     fmt: str,
     output_path: str,
     cookie_file: str,
+    *,
+    proxy_url: str = "",
+    yt_dlp_retries: int = 3,
+    referer: str = "",
+    yt_dlp_format: str = "",
 ) -> bool:
+    pv = (proxy_url or "").strip()
     if fmt == "mp4" or "get_media" in media_url:
-        session = _session_with_cookies(cookie_file)
+        session = _session_with_cookies(cookie_file, proxy_url=pv)
+        stream_headers = {"Referer": referer or f"{PH_BASE}/"}
         try:
-            r = session.get(media_url, stream=True, timeout=120)
+            r = session.get(
+                media_url, stream=True, timeout=120, headers=stream_headers
+            )
             r.raise_for_status()
             with open(output_path, "wb") as f:
                 for chunk in r.iter_content(chunk_size=1 << 20):
@@ -366,23 +632,27 @@ def _download_from_media_url(
             logger.error("PornHub MP4 download failed: %s", e)
             return False
 
-    cmd = [
-        sys.executable,
-        "-m",
-        "yt_dlp",
-        "--cookies",
-        cookie_file,
-        "-o",
-        output_path,
-        "--merge-output-format",
-        "mp4",
-        "--no-warnings",
-        "--retries",
-        "3",
-        "--fragment-retries",
-        "3",
-        media_url,
-    ]
+    retries_s = str(max(0, yt_dlp_retries))
+    cmd = [sys.executable, "-m", "yt_dlp", "--cookies", cookie_file]
+    if pv:
+        cmd.extend(["--proxy", pv])
+    format_sel = (yt_dlp_format or "").strip() or "best"
+    cmd.extend(
+        [
+            "-f",
+            format_sel,
+            "-o",
+            output_path,
+            "--merge-output-format",
+            "mp4",
+            "--no-warnings",
+            "--retries",
+            retries_s,
+            "--fragment-retries",
+            retries_s,
+            media_url,
+        ]
+    )
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
         if r.returncode != 0:
@@ -400,38 +670,59 @@ def download_pornhub_video_page(
     session_id: str,
     *,
     driver=None,
+    proxy_url: str = "",
+    skip_if_exists: bool = True,
+    yt_dlp_retries: int = 3,
+    yt_dlp_format: str = "",
+    pre_extracted: Optional[Tuple] = None,
 ) -> None:
     """
     Download one PornHub video: page URL → mediaDefinitions → file on disk.
     Integrates with progress_tracker using video_page_url as the item key.
     When driver is provided, the video page is opened in the authenticated browser
     (same approach as ph.py) so flashvars_* is always present.
+    Pass ``pre_extracted`` (from ``fetch_video_page_data``) to skip re-fetching the
+    page when it was already loaded during a prior library-compare phase.
     """
     from progress_tracker import get_tracker
 
     tracker = get_tracker(session_id)
 
-    html = _get_video_page_html(video_page_url, cookie_file, driver=driver)
-    if not html:
-        tracker.fail_download(video_page_url, "Could not load video page")
-        return
+    if pre_extracted is not None:
+        extracted = pre_extracted
+        logger.info("Using pre-fetched page data for download: %s", video_page_url)
+    else:
+        logger.info("Opening PornHub video page for download: %s", video_page_url)
+        html = _get_video_page_html(video_page_url, cookie_file, driver=driver, proxy_url=proxy_url)
+        if not html:
+            tracker.fail_download(video_page_url, "Could not load video page")
+            return
 
-    extracted = extract_media_from_page(html, video_page_url)
-    if not extracted:
-        tracker.fail_download(video_page_url, "No flashvars / mediaDefinitions on page")
-        return
+        extracted = extract_media_from_page(html, video_page_url)
+        if not extracted:
+            tracker.fail_download(video_page_url, "No flashvars / mediaDefinitions on page")
+            return
 
     media_url, fmt, title, viewkey = extracted
     safe_title = _sanitize_filename(title)
     output_path = os.path.join(download_dir, f"{safe_title}_{viewkey}.mp4")
 
-    if os.path.exists(output_path):
+    if skip_if_exists and os.path.exists(output_path):
         tracker.skip_download(video_page_url, "File already exists")
         return
 
     tracker.start_download(video_page_url)
 
-    ok = _download_from_media_url(media_url, fmt, output_path, cookie_file)
+    ok = _download_from_media_url(
+        media_url,
+        fmt,
+        output_path,
+        cookie_file,
+        proxy_url=proxy_url,
+        yt_dlp_retries=yt_dlp_retries,
+        referer=video_page_url,
+        yt_dlp_format=yt_dlp_format,
+    )
     if ok and os.path.exists(output_path):
         sz = os.path.getsize(output_path)
         tracker.complete_download(video_page_url, output_path, sz)
@@ -448,6 +739,12 @@ def download_pornhub_videos_parallel(
     *,
     max_workers: int = 4,
     driver=None,
+    proxy_url: str = "",
+    skip_if_exists: bool = True,
+    yt_dlp_retries: int = 3,
+    yt_dlp_format: str = "",
+    cancel_check: Optional[Callable[[], bool]] = None,
+    pre_extracted_map: Optional[Dict[str, Tuple]] = None,
 ) -> None:
     """Download PornHub videos from their page URLs.
 
@@ -457,42 +754,156 @@ def download_pornhub_videos_parallel(
 
     When driver is None (embedded-login mode), falls back to parallel
     requests with the Netscape cookie file.
+
+    Pass ``pre_extracted_map`` (a dict mapping URL → extracted tuple from
+    ``fetch_video_page_data``) to reuse already-fetched page data and avoid
+    navigating the browser to each page a second time.
     """
     if not video_page_urls:
         return
+    from progress_tracker import get_tracker
+
+    tracker = get_tracker(session_id)
     if driver is not None:
         logger.info(
             "Starting %s PornHub downloads (browser mode, sequential — ph.py style)",
             len(video_page_urls),
         )
         for url in video_page_urls:
-            download_pornhub_video_page(url, cookie_file, download_dir, session_id, driver=driver)
-        logger.info("PornHub browser-mode download batch finished.")
-        return
-    logger.info("Starting %s PornHub downloads (%s workers, requests mode)", len(video_page_urls), max_workers)
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
-    try:
-        futures = [
-            executor.submit(
-                download_pornhub_video_page,
+            if cancel_check and cancel_check():
+                tracker.fail_nonterminal("Download cancelled by user.")
+                logger.info("PornHub download batch cancelled by user.")
+                return
+            download_pornhub_video_page(
                 url,
                 cookie_file,
                 download_dir,
                 session_id,
+                driver=driver,
+                proxy_url=proxy_url,
+                skip_if_exists=skip_if_exists,
+                yt_dlp_retries=yt_dlp_retries,
+                yt_dlp_format=yt_dlp_format,
+                pre_extracted=(pre_extracted_map or {}).get(url),
             )
-            for url in video_page_urls
-        ]
+        logger.info("PornHub browser-mode download batch finished.")
+        return
+    logger.info("Starting %s PornHub downloads (%s workers, requests mode)", len(video_page_urls), max_workers)
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+    cancelled = False
+    try:
+        futures = []
+        for url in video_page_urls:
+            if cancel_check and cancel_check():
+                cancelled = True
+                break
+            futures.append(
+                executor.submit(
+                    download_pornhub_video_page,
+                    url,
+                    cookie_file,
+                    download_dir,
+                    session_id,
+                    proxy_url=proxy_url,
+                    skip_if_exists=skip_if_exists,
+                    yt_dlp_retries=yt_dlp_retries,
+                    yt_dlp_format=yt_dlp_format,
+                )
+            )
         for fut in concurrent.futures.as_completed(futures):
+            if cancel_check and cancel_check():
+                cancelled = True
+                break
             try:
                 fut.result(timeout=7200)
             except Exception as e:
                 logger.error("PornHub parallel worker error: %s", e)
     finally:
-        executor.shutdown(wait=False, cancel_futures=True)
+        if cancelled:
+            tracker.fail_nonterminal("Download cancelled by user.")
+        executor.shutdown(wait=cancelled, cancel_futures=cancelled)
     logger.info("PornHub parallel download batch finished.")
 
 
-def check_cookie_health(cookie_file: str) -> Tuple[bool, str]:
+def _page_looks_logged_in(html: str, current_url: str = "") -> bool:
+    cur = (current_url or "").lower()
+    if "login" in cur and "view_video" not in cur:
+        return False
+    markers = (
+        '"isLoggedIn":true',
+        '"loggedin":1',
+        'class="usernameBadge"',
+        'data-loggedin="1"',
+        'id="profileMenu"',
+        'class="profileMenu"',
+        "/users/",
+        "logout",
+        "Log out",
+        "Sign Out",
+        "my-favorites",
+        "view_video.php",
+    )
+    return any(m in html for m in markers)
+
+
+def check_cookie_health_with_driver(
+    driver,
+    *,
+    probe_url: str = "",
+) -> Tuple[bool, str]:
+    """Verify login inside Chrome (reliable right after manual sign-in)."""
+    landing = (probe_url or f"{PH_BASE}/users/likes/videos").strip()
+    try:
+        driver.get(landing)
+        time.sleep(2.5)
+    except Exception as e:
+        return False, f"Could not open PornHub in Chrome: {e}"
+
+    current_url = driver.current_url or ""
+    if "login" in current_url.lower() and "view_video" not in current_url.lower():
+        return (
+            False,
+            "Chrome was sent to the login page — sign in on pornhub.com, then click Continue.",
+        )
+
+    try:
+        payload = driver.execute_async_script(
+            """
+            const done = arguments[arguments.length - 1];
+            fetch('https://www.pornhub.com/user/get_user_info', {
+              credentials: 'include',
+              headers: { 'Accept': 'application/json' }
+            })
+              .then(r => r.json())
+              .then(d => done({
+                ok: d.loggedin == 1 || d.loggedin === true || d.loggedin === '1',
+                d: d
+              }))
+              .catch(e => done({ok: false, error: String(e)}));
+            """
+        )
+        if isinstance(payload, dict) and payload.get("ok"):
+            return True, "Browser session authenticated on PornHub."
+        if isinstance(payload, dict) and payload.get("error"):
+            logger.debug("PornHub get_user_info in browser: %s", payload.get("error"))
+    except Exception as e:
+        logger.debug("PornHub in-browser get_user_info failed: %s", e)
+
+    try:
+        html = driver.page_source or ""
+        if _page_looks_logged_in(html, current_url):
+            return True, "Browser session authenticated on PornHub."
+    except Exception as e:
+        return False, f"Cookie health check failed: {e}"
+
+    return (
+        False,
+        "Chrome does not look logged in — open https://www.pornhub.com/, sign in, "
+        "visit your favourites, then click Continue after Chrome login.",
+    )
+
+
+def check_cookie_health(cookie_file: str, proxy_url: str = "") -> Tuple[bool, str]:
     """Quick sanity-check that the saved Netscape cookie file still authenticates on PornHub.
 
     Returns ``(True, message)`` when the session appears valid, or ``(False, reason)``
@@ -500,9 +911,9 @@ def check_cookie_health(cookie_file: str) -> Tuple[bool, str]:
     """
     if not os.path.isfile(cookie_file):
         return False, "Cookie file not found."
-    session = _session_with_cookies(cookie_file)
+    session = _session_with_cookies(cookie_file, proxy_url)
     try:
-        r = session.get("https://www.pornhub.com/user/get_user_info", timeout=15)
+        r = session.get(f"{PH_BASE}/user/get_user_info", timeout=15)
         if r.status_code == 200:
             try:
                 data = r.json()
@@ -510,15 +921,18 @@ def check_cookie_health(cookie_file: str) -> Tuple[bool, str]:
                     return True, "Cookies valid — PornHub user is authenticated."
             except Exception:
                 pass
-        # Fallback: homepage embeds an isLoggedIn flag in the page JSON when authenticated
-        r2 = session.get("https://www.pornhub.com/", timeout=15)
-        html = r2.text
-        if (
-            '"isLoggedIn":true' in html
-            or '"loggedin":1' in html
-            or 'class="usernameBadge"' in html
+        # Fallback: favourites page or homepage login markers
+        for probe in (
+            f"{PH_BASE}/users/likes/videos",
+            f"{PH_BASE}/",
         ):
-            return True, "Cookies valid — PornHub user is authenticated."
+            r2 = session.get(probe, timeout=20)
+            html = r2.text or ""
+            final = (r2.url or "").lower()
+            if "login" in final and "view_video" not in final:
+                continue
+            if _page_looks_logged_in(html, final):
+                return True, "Cookies valid — PornHub user is authenticated."
         return False, "Cookies appear invalid or session expired — please sign in again."
     except Exception as e:
         return False, f"Cookie health check request failed: {e}"

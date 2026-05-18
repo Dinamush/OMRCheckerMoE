@@ -14,9 +14,10 @@ from typing import Any, Dict, List, Literal, Optional, Tuple
 
 StepStatus = Literal["pending", "active", "done", "error"]
 
-SiteId = Literal["xhamster", "pornhub"]
+SiteId = Literal["xhamster", "pornhub", "pixiv"]
 SITE_XHAMSTER: SiteId = "xhamster"
 SITE_PORNHUB: SiteId = "pornhub"
+SITE_PIXIV: SiteId = "pixiv"
 
 
 @dataclass(frozen=True)
@@ -57,9 +58,19 @@ _XH_EMB = _chain(
         "Cookies are being written for yt-dlp and the automation browser. The login window may close — that is normal.",
     ),
     (
+        "headless_scrape",
+        "Headless scraping",
+        "Favorites scraping may run in a hidden Chrome window so it does not cover SHUCK3R. Login always uses a visible window.",
+    ),
+    (
         "browser_start",
         "Starting automation browser",
         "Chrome is launching to read your favorites (hidden by default on xHamster so it does not cover SHUCK3R).",
+    ),
+    (
+        "challenge_wait",
+        "Cloudflare / captcha",
+        "A visible Chrome window opened because the site blocked headless access. Complete the check, then click **Continue after browser challenge** on this page.",
     ),
     (
         "collect_urls",
@@ -91,10 +102,15 @@ _XH_LEGACY = _chain(
         "Your download job is running. This screen updates automatically.",
     ),
     (
+        "cookie_reuse",
+        "Checking saved session",
+        "If cookies from a prior run are still valid, login is skipped.",
+    ),
+    (
         "chrome_login",
         "Log in in Chrome",
-        "A Chrome window should open — log in to xHamster there. When finished, press Enter in the terminal "
-        "or use **Continue after Chrome login** on the download progress page (web mode has no terminal).",
+        "A Chrome window should open — log in to xHamster there, then click **Continue after Chrome login** "
+        "on this progress page. Keep Chrome open until you confirm.",
     ),
     (
         "save_cookies",
@@ -102,9 +118,19 @@ _XH_LEGACY = _chain(
         "Session cookies are saved from Chrome for downloads.",
     ),
     (
+        "headless_scrape",
+        "Headless scraping",
+        "Switching to a hidden Chrome window for favorites (login always used a visible window).",
+    ),
+    (
         "browser_start",
         "Browser ready",
         "Automation is ready to read your favorites.",
+    ),
+    (
+        "challenge_wait",
+        "Cloudflare / captcha",
+        "Complete the site check in Chrome, then click **Continue after browser challenge** here.",
     ),
     (
         "collect_urls",
@@ -170,10 +196,25 @@ _PH_LEGACY = _chain(
         "Your download job is running.",
     ),
     (
+        "cookie_reuse",
+        "Checking saved session",
+        "If cookies from a prior run are still valid, login is skipped.",
+    ),
+    (
         "chrome_login",
         "Log in in Chrome",
-        "Log in to Pornhub in the opened browser, then press Enter in the terminal **or** click "
-        "**Continue after Chrome login** on this progress page (required when the app runs without a terminal).",
+        "Log in to Pornhub in the opened browser, then click **Continue after Chrome login** on this "
+        "progress page. Keep Chrome open until you confirm.",
+    ),
+    (
+        "headless_scrape",
+        "Headless scraping",
+        "Favorites collection may run in a hidden Chrome window after login.",
+    ),
+    (
+        "challenge_wait",
+        "Cloudflare / captcha",
+        "Complete the site check in Chrome, then click **Continue after browser challenge** here.",
     ),
     (
         "extract_list",
@@ -198,11 +239,63 @@ _PH_LEGACY = _chain(
 )
 
 
+# --- Pixiv: Ajax bookmarks (Chrome login only) ---
+_PI_LEGACY = _chain(
+    (
+        "boot",
+        "Session queued",
+        "Your Pixiv download job is running.",
+    ),
+    (
+        "cookie_reuse",
+        "Checking saved session",
+        "If cookies from a prior run are still valid, login is skipped.",
+    ),
+    (
+        "chrome_login",
+        "Log in to Pixiv",
+        "A Chrome window opens at Pixiv login — sign in, then click **Continue after Chrome login** on this page.",
+    ),
+    (
+        "save_cookies",
+        "Saving session",
+        "Cookies are saved for Pixiv Ajax API requests.",
+    ),
+    (
+        "challenge_wait",
+        "Cloudflare / captcha",
+        "Complete the site check in Chrome, then click **Continue after browser challenge** here.",
+    ),
+    (
+        "collect_urls",
+        "Collecting bookmarks",
+        "Walking bookmark pages via Pixiv Ajax (48 per page).",
+    ),
+    (
+        "download",
+        "Downloading images",
+        "Fetching full-resolution pages for each bookmarked work.",
+    ),
+    (
+        "wrap_up",
+        "Finishing",
+        "Cleaning up session state.",
+    ),
+    (
+        "complete",
+        "Session finished",
+        "This run is complete.",
+    ),
+)
+
+
 def _template(site: SiteId, embedded: bool) -> List[StepDefinition]:
     if site == SITE_XHAMSTER:
         return list(_XH_EMB if embedded else _XH_LEGACY)
     if site == SITE_PORNHUB:
         return list(_PH_EMB if embedded else _PH_LEGACY)
+    if site == SITE_PIXIV:
+        return list(_PI_LEGACY)
     raise ValueError(f"unknown site {site!r}")
 
 

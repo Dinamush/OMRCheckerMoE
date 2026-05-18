@@ -78,23 +78,19 @@ To get **every** favourite in an automated way, we can either:
 
 ### 3.2 main.py – PornHub workflow (current)
 
-- Uses **yt-dlp** for URL extraction: **`extract_video_urls_ytdlp(cookie_file, playlist_url)`** with `playlist_url` like `https://www.pornhub.com/my/favorites/videos` (or the user’s favorites URL). yt-dlp often returns **404** on that URL, so no URLs are returned; there is no Selenium-based collection or pagination for PornHub in main.py currently.
+- Uses **`pornhub_ph.collect_favorites_urls_with_driver`** (Selenium scroll + `#moreDataBtn`), same algorithm as ph.py’s `extract_video_urls_selenium`. Default playlist URL: `https://www.pornhub.com/my/favorites/videos`. Embedded WebView login still uses HTTP `?page=N` pagination when no Chrome driver is available.
 
-### 3.3 main.py – xHamster workflow (for comparison)
+### 3.3 main.py – xHamster workflow
 
-- **Full pagination** is implemented for xHamster:
-  - **URL pagination:** Page 1 = `favorites_url`, page 2 = `favorites_url/2` or `favorites_url/2`, page N = `favorites_url/{page_number}`.
-  - **`fetch_html_selenium`** is used per page; it calls **`scroll_to_bottom(driver)`** so that lazy-loaded content on **that** page is included in **`driver.page_source`**.
-  - **Next page:** Either by navigating to the next URL or by **`try_click_next_button(driver)`** (e.g. “Next” link/button).
-  - Stops when: redirect away from favorites, error page, no new video links, or same content as previous page (consecutive empty detection), or after a max page limit (e.g. 100).
+- **Full pagination** follows the site’s **Next** link (same idea as `archive/xh.py`):
+  - Page 1 loads `favorites_url`; each page is fetched with **`fetch_html_selenium`** (includes **`scroll_to_bottom`**).
+  - The next page URL comes from **`find_xhamster_next_page_url`** (`LINK_TEXT` “Next”); if that fails, **`try_click_next_button`** is used and **`driver.current_url`** is followed.
+  - Stops when there is no Next link, the URL does not change, redirect/login/error pages appear, no new watch links are found (consecutive empty pages), or a safety cap (100 pages).
 
-So for **xHamster** we combine **scroll on each page** + **multi-page** to get every favourite; for **PornHub** we do **neither** in the current code.
+### 3.4 Embedded login and cookie reuse
 
-### 3.4 How it “worked in the past” (inference)
-
-- **ph.py:** Has only ever loaded a **single** favorites URL; there is no past version in this repo that did multi-page or “Load more” for PornHub.
-- **main.py:** When PornHub used Selenium + HTML parsing (reverted), it used **`fetch_html_selenium`**, which **does** call **`scroll_to_bottom`**. So we would have gotten **everything that appears on the first page after scrolling** (lazy-loaded items included), but still **only the first page** – no `?page=2` or “Load more” clicks.
-- **Conclusion:** In this codebase, we have **never** implemented full PornHub favourites pagination (multiple pages or repeated “Load more”). We only ever collected the first page (with or without scroll).
+- **Desktop (pywebview):** When **Skip login when saved cookies still work** is enabled in Settings, PornHub and xHamster workflows **skip** `begin_embedded_login` if the Netscape cookie file is still valid; Chrome loads favourites directly.
+- **PornHub without a driver** (embedded-only collection): HTTP `?page=N` pagination via **`collect_favorites_urls_requests`**.
 
 ---
 
@@ -123,12 +119,10 @@ Option A is usually easier and more robust (same URL pattern as the user’s des
 
 | Aspect | Website behaviour | ph.py (current) | main.py PornHub (current) |
 |--------|-------------------|------------------|---------------------------|
-| **First page URL** | `.../favorites` or `.../favorites?` | Loads that URL only | yt-dlp on playlist URL (404-prone) |
-| **Next pages URL** | `.../favorites?page=2`, etc. | Not used | Not used |
-| **“Load more”** | AJAX append + scroll | Not used | Not used |
-| **Scroll** | Lazy load + after “Load more” | No scroll | No Selenium for PH |
-| **Videos per page** | Many (grid in `#moreData`) | First page only | — |
-| **Get every favourite** | Yes (user can page / load more) | No (first page only) | No |
+| **First page URL** | `.../favorites` or `.../favorites?` | Scroll + Load more | Chrome: scroll + `#moreDataBtn`; embedded: `?page=1` HTTP |
+| **Next pages** | `?page=2` or Load more | Load more loop | Chrome: Load more; embedded: `?page=N` |
+| **Scroll** | Lazy load + after “Load more” | Yes | Yes (Selenium path) |
+| **Get every favourite** | Yes | Yes (ph.py algorithm) | Yes (driver or HTTP pagination) |
 
 ---
 

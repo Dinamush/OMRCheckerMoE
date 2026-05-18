@@ -690,6 +690,7 @@ label {
 input[type="url"],
 input[type="text"],
 input[type="password"],
+input[type="number"],
 select {
     width: 100%;
     min-height: 44px;
@@ -705,10 +706,12 @@ select {
 input[type="url"]:hover,
 input[type="text"]:hover,
 input[type="password"]:hover,
+input[type="number"]:hover,
 select:hover { border-color: #2a4a66; }
 input[type="url"]:focus,
 input[type="text"]:focus,
 input[type="password"]:focus,
+input[type="number"]:focus,
 select:focus {
     border-color: var(--color-primary);
     outline: none;
@@ -767,9 +770,14 @@ select:focus {
     cursor: pointer;
     accent-color: var(--color-primary);
 }
-.radio-option input[type="radio"]:checked + label {
+.radio-option input[type="radio"]:checked + .radio-option-text {
     font-weight: 700;
     color: var(--color-primary);
+}
+.radio-option-text {
+    flex: 1;
+    cursor: pointer;
+    user-select: none;
 }
 .radio-option:has(input[type="radio"]:checked) {
     background-color: var(--color-primary-muted);
@@ -1522,6 +1530,11 @@ video.dup-thumb {
     .site-brand:hover { animation: none; }
     .hero-corn-art { transition: none; }
     .layout-shell-home button[type="submit"]:active { animation: none; }
+    .library-card,
+    .layout-hero-copy,
+    .layout-panel.control-panel,
+    .session-dashboard,
+    .stagger-child { animation: none !important; }
 }
 
 /* ─── Corn Protocol — harvest accent layer ──────────────────────────────────── */
@@ -1633,4 +1646,222 @@ video.dup-thumb {
 }
 .layout-shell-home button[type="submit"]:active:not(:disabled) {
     animation: kernel-pop 0.20s ease;
+}
+
+/* ─── Textarea ───────────────────────────────────────────────────────────────── */
+textarea {
+    width: 100%;
+    min-height: 96px;
+    padding: 10px 14px;
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+    font-family: var(--font-mono);
+    background: var(--color-muted);
+    color: var(--color-foreground);
+    resize: vertical;
+    transition: var(--transition);
+    line-height: 1.55;
+    box-sizing: border-box;
+}
+textarea:hover { border-color: #2a4a66; }
+textarea:focus {
+    border-color: var(--color-primary);
+    outline: none;
+    box-shadow: 0 0 0 2px rgba(0, 255, 136, 0.16), var(--glow-primary-sm);
+    background: var(--color-surface-alt);
+}
+
+/* ─── Placeholder ────────────────────────────────────────────────────────────── */
+input::placeholder,
+textarea::placeholder {
+    color: var(--color-text-muted);
+    opacity: 1;
+    font-family: var(--font-mono);
+}
+
+/* ─── Disabled states ────────────────────────────────────────────────────────── */
+input[type="url"]:disabled,
+input[type="text"]:disabled,
+input[type="password"]:disabled,
+input[type="number"]:disabled,
+select:disabled,
+textarea:disabled {
+    opacity: 0.42;
+    cursor: not-allowed;
+    background: var(--color-background);
+    border-color: var(--color-border);
+    color: var(--color-text-muted);
+}
+
+/* ─── Field-level error state ───────────────────────────────────────────────── */
+.form-group.has-error input,
+.form-group.has-error select,
+.form-group.has-error textarea,
+input.input-error,
+select.input-error,
+textarea.input-error {
+    border-color: var(--color-danger);
+    box-shadow: 0 0 0 2px rgba(255, 59, 82, 0.14), var(--glow-danger);
+}
+.field-error-text {
+    display: block;
+    margin-top: 5px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: #ff8090;
+    letter-spacing: 0.03em;
+}
+
+/* ─── Button active (tactile press) ─────────────────────────────────────────── */
+.btn-primary:active:not(:disabled),
+button[type="submit"]:active:not(:disabled),
+.action-buttons .btn-primary:active:not(:disabled) {
+    transform: scale(0.97);
+}
+.btn-danger:active:not(:disabled),
+.action-buttons .btn-danger:active:not(:disabled) {
+    transform: scale(0.97);
+    box-shadow: var(--glow-danger);
+}
+.btn-secondary:active:not(:disabled),
+.action-buttons .btn-secondary:active:not(:disabled),
+.action-buttons .btn-info:active:not(:disabled),
+.action-buttons .btn-success:active:not(:disabled) {
+    transform: scale(0.97);
+}
+
+/* ─── Custom scrollbar ───────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 7px; height: 7px; }
+::-webkit-scrollbar-track {
+    background: var(--color-background);
+    border-left: 1px solid var(--color-border);
+}
+::-webkit-scrollbar-thumb {
+    background: var(--color-border-strong);
+    border-radius: 0;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: rgba(0, 255, 136, 0.40);
+}
+
+/* ─── Page entry animations ──────────────────────────────────────────────────── */
+@keyframes fade-up {
+    from { opacity: 0; transform: translateY(14px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes fade-in {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+}
+
+/* Stagger children: set style="--stagger-i: N" on each child */
+.stagger-child {
+    animation: fade-up 0.38s ease both;
+    animation-delay: calc(var(--stagger-i, 0) * 50ms);
+}
+
+.layout-hero-copy   { animation: fade-up 0.40s ease both; }
+.layout-panel.control-panel { animation: fade-up 0.40s ease 0.08s both; }
+.session-dashboard  { animation: fade-in 0.35s ease 0.10s both; }
+
+/* ─── Ghost Protocol — elevated visual drama ─────────────────────────────────── */
+
+/* CRT scanline overlay — fixed, pointer-events none, 9999 z */
+body::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 9998;
+    background: repeating-linear-gradient(
+        0deg,
+        transparent 0px,
+        transparent 2px,
+        rgba(0, 0, 0, 0.038) 2px,
+        rgba(0, 0, 0, 0.038) 3px
+    );
+    background-size: 100% 3px;
+}
+
+/* Bottom-right accent on layout panels */
+.layout-panel {
+    overflow: hidden;
+}
+
+/* Library card stagger entrance */
+.library-card {
+    animation: fade-up 0.34s ease both;
+    animation-delay: calc(var(--stagger-i, 0) * 38ms);
+    transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+}
+.library-card:hover {
+    transform: translateY(-2px);
+}
+
+/* Fieldset design-system treatment */
+fieldset {
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-xl);
+    padding: 16px 18px;
+    margin: 18px 0;
+    background: transparent;
+}
+fieldset legend.panel-kicker {
+    padding: 0 6px;
+    font-size: 10px;
+    background: var(--color-surface);
+}
+
+/* ─── Forced-colors / High Contrast ─────────────────────────────────────────── */
+@media (forced-colors: active) {
+    button[type="submit"]:focus-visible,
+    .btn-primary:focus-visible,
+    .btn-danger:focus-visible,
+    .action-buttons .btn:focus-visible,
+    .site-nav-link:focus-visible,
+    .link-accent:focus-visible,
+    .site-brand:focus-visible {
+        outline: 3px solid ButtonText !important;
+        box-shadow: none !important;
+    }
+    input:focus,
+    select:focus,
+    textarea:focus {
+        outline: 2px solid Highlight !important;
+        box-shadow: none !important;
+    }
+    .dashboard-live-dot,
+    .workflow-step-pulse { forced-color-adjust: none; }
+    body::after { display: none; }
+}
+
+/* ─── Print ───────────────────────────────────────────────────────────────────── */
+@media print {
+    *, *::before, *::after {
+        background: #fff !important;
+        color: #000 !important;
+        box-shadow: none !important;
+        text-shadow: none !important;
+        animation: none !important;
+        transition: none !important;
+    }
+    body {
+        background-image: none !important;
+        font-size: 12pt;
+    }
+    .site-header,
+    .site-footer,
+    .skip-link,
+    .action-buttons,
+    body::after { display: none !important; }
+    .container,
+    .layout-panel,
+    .dashboard-log-pre,
+    .dashboard-json-pre {
+        border: 1px solid #ccc !important;
+        max-height: none !important;
+        overflow: visible !important;
+    }
+    a[href]::after { content: " (" attr(href) ")"; font-size: 9pt; }
 }

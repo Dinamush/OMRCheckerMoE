@@ -6,7 +6,7 @@ This document describes **precisely** how PornHub videos are handled in the repo
 
 ## 1. Where PornHub Is Used
 
-- **`main.py`** – Web app (FastAPI) uses PornHub for the “PornHub” workflow: Chrome, login, then **yt-dlp** to extract playlist URLs and download.
+- **`main.py`** – Web app (FastAPI) uses PornHub for the “PornHub” workflow: Chrome (or embedded WebView login + HTTP pagination), favourites via **`pornhub_ph`** (scroll + Load more, or `?page=N`), then per-video **`mediaDefinitions`** download (requests / yt-dlp HLS).
 - **`archive/ph.py`** – Standalone script: **Firefox**, login, Netscape cookies, **Selenium + HTML parsing** for video URL extraction from the favorites page, then **yt-dlp** for per-video download (because yt-dlp returns 404 on the favorites playlist URL).
 
 Both rely on **yt-dlp** with a **Netscape cookie file** for the actual video downloads.
@@ -71,18 +71,17 @@ Both rely on **yt-dlp** with a **Netscape cookie file** for the actual video dow
 ## 4. How `main.py` Handles PornHub (Precise)
 
 1. **Browser**
-   - **Chrome** via Selenium (webdriver-manager), headless optional.
+   - **Chrome** via Selenium (webdriver-manager). **Visible Chrome only** for PornHub: one session stays open for favourites and every video page (same as ph.py). The “Headless scraping” checkbox applies to other sites, not PornHub.
 
 2. **Login and cookies**
-   - Same idea as ph.py: open PornHub, user logs in, Enter, wait, then **`save_cookies_netscape(driver, cookie_file)`** producing a Netscape cookie file.
+   - Chrome login on the progress page → **`save_cookies_netscape(driver, cookie_file)`** (Netscape format for yt-dlp/HLS).
+   - Login is verified **in the browser** (`pornhub_ph.check_cookie_health_with_driver`); a requests-only cookie-file check is logged but does not abort the run.
 
 3. **URL extraction**
-   - **`extract_video_urls_ytdlp(cookie_file, playlist_url)`**  
-   - Same as ph.py: `python -m yt_dlp --cookies <cookie_file> --flat-playlist --print url <playlist_url>`.  
-   - Same 404 risk on favorites playlist URL.
+   - **`pornhub_ph.collect_favorites_urls_with_driver(driver, playlist_url)`** — load favourites (`/my/favorites/videos` by default), scroll, click **`#moreDataBtn`** until done, parse `view_video.php?viewkey=...` links. **Not** yt-dlp `--flat-playlist` on the playlist URL.
 
 4. **Download**
-   - **`download_videos_parallel(...)`** (in main.py) uses the same cookie file and per-URL yt-dlp style (format selection and output path are defined in main.py’s download path).
+   - **`pornhub_ph.download_pornhub_videos_parallel(..., driver=driver)`** — same Chrome session opens each video page, parses **`flashvars_*.mediaDefinitions`**, prefers **get_media** MP4 (requests), else HLS (yt-dlp with cookies). Sequential when a driver is present (ph.py style).
 
 ---
 
@@ -104,12 +103,12 @@ Both rely on **yt-dlp** with a **Netscape cookie file** for the actual video dow
 
 | Step              | main.py (PornHub)     | archive/ph.py           |
 |-------------------|-----------------------|--------------------------|
-| Browser           | Chrome                | Firefox                  |
+| Browser           | Chrome (always visible for PH) | Firefox          |
 | Cookie file       | Netscape (Selenium)   | Netscape (Selenium)      |
-| URL extraction    | yt-dlp --flat-playlist on playlist URL (404-prone) | Selenium + HTML parse (view_video/viewkey links) |
+| URL extraction    | Selenium scroll + `#moreDataBtn` + HTML parse | Same |
 | Video URL shape   | view_video.php?viewkey=... | Same                |
-| Download          | yt-dlp + cookies      | Fetch each video page → parse mediaDefinitions → download get_media (requests) or HLS (yt-dlp) with cookies |
-| Fix for playlist 404 | Use Selenium + HTML parse of favorites page → list of view_video URLs → existing yt-dlp download | Implemented in ph.py |
+| Download          | Same Chrome → mediaDefinitions → get_media / HLS | Same |
+| Playlist 404 fix  | Implemented via Selenium favourites scrape | Implemented in ph.py |
 
 This document reflects the code as of the last update; any change in main.py or ph.py should be reflected here when modifying PornHub handling.
 

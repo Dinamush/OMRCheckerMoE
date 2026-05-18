@@ -9,8 +9,12 @@ from __future__ import annotations
 
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
+
+from duplicate_finder import _is_system_path
 from typing import FrozenSet, Optional, Set
+from urllib.parse import parse_qs, urlparse
 
 from duplicate_finder import normalize_name
 
@@ -30,6 +34,17 @@ VIDEO_EXTENSIONS = frozenset(
 )
 
 MIN_SUBSTRING_LEN = 15
+
+# PornHub saves as {title}_{viewkey}.mp4 (archive/ph.py)
+_PH_VIEWKEY_SUFFIX = re.compile(r"_(ph[0-9a-f]{8,}|[0-9a-f]{10,})$", re.I)
+
+
+@dataclass(frozen=True)
+class LibraryIndex:
+    """Normalized title keys plus PornHub viewkeys found in on-disk filenames."""
+
+    normalized_titles: FrozenSet[str]
+    viewkeys: FrozenSet[str]
 
 
 def _collapse_for_compare(s: str) -> str:
@@ -85,37 +100,85 @@ def resolve_optional_library_directory(
     if not candidate.is_dir():
         raise ValueError("Existing-library path is not a directory or does not exist.")
 
+    if _is_system_path(candidate):
+        raise ValueError("System directories cannot be used as an existing-library folder.")
+
     return candidate
 
 
-def build_library_normalized_names(root: Path, *, recursive: bool) -> FrozenSet[str]:
-    """Normalized stems for video-like files under root."""
-    found: Set[str] = set()
-
-    def consider_file(fp: Path) -> None:
-        try:
-            if not fp.is_file():
-                return
-            if fp.suffix.lower() not in VIDEO_EXTENSIONS:
-                return
-            key = normalize_compare_key_from_filename(fp.name)
-            if key:
-                found.add(key)
-        except OSError:
+def _consider_library_file(
+    fp: Path, titles: Set[str], viewkeys: Set[str]
+) -> None:
+    try:
+        if not fp.is_file() or fp.suffix.lower() not in VIDEO_EXTENSIONS:
             return
+        key = normalize_compare_key_from_filename(fp.name)
+        if key:
+            titles.add(key)
+        stem = fp.stem
+        m = _PH_VIEWKEY_SUFFIX.search(stem)
+        if m:
+            viewkeys.add(m.group(1).lower())
+            title_part = stem[: m.start()].strip()
+            if title_part:
+                tk = _collapse_for_compare(normalize_name(f"{title_part}.mp4"))
+                if tk:
+                    titles.add(tk)
+    except OSError:
+        return
+
+
+def build_library_index(root: Path, *, recursive: bool) -> LibraryIndex:
+    """Scan a library folder for title keys and PornHub viewkeys (incl. ph/ subfolders)."""
+    titles: Set[str] = set()
+    viewkeys: Set[str] = set()
 
     if recursive:
         for dirpath, _dirnames, filenames in os.walk(root):
             for fn in filenames:
-                consider_file(Path(dirpath) / fn)
+                _consider_library_file(Path(dirpath) / fn, titles, viewkeys)
     else:
         try:
             for fp in root.iterdir():
-                consider_file(fp)
+                if fp.is_file():
+                    _consider_library_file(fp, titles, viewkeys)
+                elif fp.is_dir():
+                    # Site subfolders (ph/, xh/, pixiv/) when user points at downloads root
+                    for child in fp.iterdir():
+                        _consider_library_file(child, titles, viewkeys)
         except OSError:
             pass
 
-    return frozenset(found)
+    return LibraryIndex(
+        normalized_titles=frozenset(titles),
+        viewkeys=frozenset(viewkeys),
+    )
+
+
+def build_library_normalized_names(root: Path, *, recursive: bool) -> FrozenSet[str]:
+    """Normalized stems for video-like files under root."""
+    return build_library_index(root, recursive=recursive).normalized_titles
+
+
+def viewkey_from_pornhub_url(video_page_url: str) -> str:
+    qs = parse_qs(urlparse(video_page_url).query)
+    return ((qs.get("viewkey") or [""])[0] or "").strip()
+
+
+def matches_pornhub_in_library(
+    video_page_url: str, title: str, index: LibraryIndex
+) -> bool:
+    """Match favourites against on-disk PornHub files ({title}_{viewkey}.mp4)."""
+    vk = viewkey_from_pornhub_url(video_page_url).lower()
+    if vk and vk in index.viewkeys:
+        return True
+    if matches_existing_library(title, index.normalized_titles):
+        return True
+    if vk and (title or "").strip():
+        fn_key = normalize_compare_key_from_filename(f"{title}_{vk}.mp4")
+        if fn_key in index.normalized_titles:
+            return True
+    return False
 
 
 def matches_existing_library(title: str, library_norms: FrozenSet[str]) -> bool:
@@ -137,7 +200,8 @@ def matches_existing_library(title: str, library_norms: FrozenSet[str]) -> bool:
 
     for ln in library_norms:
         if len(nt) >= MIN_SUBSTRING_LEN and len(ln) >= MIN_SUBSTRING_LEN:
-            if nt in ln or ln in nt:
+            shorter, longer = (nt, ln) if len(nt) <= len(ln) else (ln, nt)
+            if shorter in longer and len(shorter) / len(longer) >= 0.92:
                 return True
 
     return False

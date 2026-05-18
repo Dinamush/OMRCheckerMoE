@@ -50,6 +50,17 @@
                 </div>
                 {% endif %}
 
+                <div class="info-box embedded-login-cta" role="region" aria-label="Continue after browser challenge" style="margin-top: 0.75rem;">
+                    <div class="embedded-login-cta-head">
+                        <div>
+                            <h3 class="embedded-login-cta-title">Continue after browser challenge</h3>
+                            <p class="help-text embedded-login-cta-desc">If a Cloudflare or captcha page appeared in Chrome, complete it there, then press this so scraping can continue.</p>
+                        </div>
+                    </div>
+                    <button type="button" id="btnBrowserChallengeDone" class="btn btn-secondary embedded-login-done-btn">Continue after browser challenge</button>
+                    <p id="browserChallengeDoneStatus" class="help-text embedded-login-status" aria-live="polite"></p>
+                </div>
+
                 <div class="layout-panel detail-panel session-quick-notes">
                     <div class="panel-heading">
                         <p class="panel-kicker">Operator notes</p>
@@ -146,7 +157,7 @@
                     {% endif %}
                     <li>Phase 1: SHUCK3R walks your favorites pages and collects links — <strong>queued</strong> stays at 0 until that finishes.</li>
                     <li>Phase 2: videos download in batches; counters and the bar update here.</li>
-                    <li>Files save under your profile (Windows: <code>%LOCALAPPDATA%\HamsterScraper\downloads</code>).</li>
+                    <li>Files save under <code>downloads/ph</code>, <code>xh</code>, or <code>pixiv</code> in your profile (see Settings for the root path).</li>
                 </ul>
             </details>
 
@@ -168,8 +179,8 @@
 
 {% block scripts %}
     <script>
-        const sessionId = '{{ session_id }}';
-        const logTimestamp = '{{ session_id }}';
+        const sessionId = {{ session_id | tojson }};
+        const logTimestamp = {{ session_id | tojson }};
         let progressInterval;
         let logInterval;
         let lastWorkflowActiveId = null;
@@ -524,6 +535,41 @@
         {% endif %}
 
         (function () {
+            const btn = document.getElementById('btnBrowserChallengeDone');
+            const statusEl = document.getElementById('browserChallengeDoneStatus');
+            if (!btn || !statusEl) return;
+            btn.addEventListener('click', async function () {
+                btn.disabled = true;
+                statusEl.textContent = 'Continuing…';
+                try {
+                    const r = await fetch('/api/browser-challenge/confirm', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ session_id: sessionId }),
+                    });
+                    const data = await r.json().catch(function () { return {}; });
+                    if (!r.ok) {
+                        let msg = r.statusText;
+                        if (data && data.detail) {
+                            msg = typeof data.detail === 'string'
+                                ? data.detail
+                                : (Array.isArray(data.detail) && data.detail[0] && data.detail[0].msg)
+                                    ? data.detail[0].msg
+                                    : String(data.detail);
+                        }
+                        statusEl.textContent = 'Could not continue: ' + msg;
+                        btn.disabled = false;
+                        return;
+                    }
+                    statusEl.textContent = 'OK — scraping will continue.';
+                } catch (err) {
+                    statusEl.textContent = 'Could not continue: ' + err.message;
+                    btn.disabled = false;
+                }
+            });
+        })();
+
+        (function () {
             const stopBtn = document.getElementById('btnStopDownload');
             if (!stopBtn) return;
             stopBtn.addEventListener('click', async function () {
@@ -537,6 +583,7 @@
                         stopBtn.textContent = 'Stopped';
                         clearInterval(progressInterval);
                         clearInterval(logInterval);
+                        if (typeof updateProgress === 'function') updateProgress();
                     } else {
                         stopBtn.textContent = 'Stop download';
                         stopBtn.disabled = false;

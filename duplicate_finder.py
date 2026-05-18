@@ -65,9 +65,15 @@ _SYSTEM_PATH_PREFIXES: tuple[str, ...] = (
 
 
 def _is_system_path(p: Path) -> bool:
-    """Return True if *p* starts with a known OS/system directory prefix."""
-    s = str(p).lower().replace("\\", "/")
-    return any(s.startswith(prefix.lower().replace("\\", "/")) for prefix in _SYSTEM_PATH_PREFIXES)
+    """Return True if *p* is under a known OS/system directory (segment-boundary match)."""
+    s = str(p.resolve()).lower().replace("\\", "/").rstrip("/")
+    for prefix in _SYSTEM_PATH_PREFIXES:
+        norm = prefix.lower().replace("\\", "/").rstrip("/")
+        if not norm:
+            continue
+        if s == norm or s.startswith(norm + "/"):
+            return True
+    return False
 
 
 def _strip_outer_quotes(s: str) -> str:
@@ -135,6 +141,20 @@ def resolve_deletable_file(path_str: str) -> Path:
         raise ValueError("Not a regular file.")
     if _is_system_path(p):
         raise ValueError("This path is in a protected system directory.")
+    return p
+
+
+def resolve_deletable_file_under_root(path_str: str, allowed_root: Path) -> Path:
+    """Like ``resolve_deletable_file`` but the file must lie under *allowed_root*."""
+    p = resolve_deletable_file(path_str)
+    root = allowed_root.resolve()
+    try:
+        p.resolve().relative_to(root)
+    except ValueError:
+        raise ValueError(
+            "Path is outside the folder from the last duplicate scan. "
+            f"Expected under: {root}"
+        ) from None
     return p
 
 
@@ -478,8 +498,57 @@ def cluster_duplicates(
         buckets.setdefault(r, []).append(i)
 
     groups = [sorted(ids) for ids in buckets.values() if len(ids) >= 2]
+    groups = _split_transitive_duplicate_groups(groups, norms, sizes)
     groups.sort(key=lambda g: g[0])
     return groups
+
+
+def _split_transitive_duplicate_groups(
+    groups: List[List[int]],
+    norms: List[str],
+    sizes: List[int],
+) -> List[List[int]]:
+    """Break union-find buckets that bridged different series episodes via a copy file."""
+    refined: List[List[int]] = []
+    for group in groups:
+        if len(group) < 2:
+            continue
+        episode_key: Dict[int, Optional[Tuple[str, Tuple[int, ...]]]] = {
+            idx: _series_episode_split(norms[idx]) for idx in group
+        }
+        for a in group:
+            for b in group:
+                if a >= b:
+                    continue
+                if not _is_likely_duplicate_copy(
+                    norms[a], norms[b], sizes[a], sizes[b]
+                ):
+                    continue
+                ka, kb = episode_key[a], episode_key[b]
+                if ka and not kb:
+                    episode_key[b] = ka
+                elif kb and not ka:
+                    episode_key[a] = kb
+                elif ka and kb and ka != kb:
+                    episode_key[b] = ka
+
+        by_episode: Dict[Tuple[str, Tuple[int, ...]], List[int]] = {}
+        unscoped: List[int] = []
+        for idx in group:
+            split = episode_key[idx]
+            if split is None:
+                unscoped.append(idx)
+            else:
+                by_episode.setdefault(split, []).append(idx)
+        if len(by_episode) <= 1:
+            refined.append(sorted(group))
+            continue
+        for sub in by_episode.values():
+            if len(sub) >= 2:
+                refined.append(sorted(sub))
+        if len(unscoped) >= 2:
+            refined.append(sorted(unscoped))
+    return refined
 
 
 def _group_max_pairwise_score(

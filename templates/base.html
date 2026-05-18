@@ -23,6 +23,7 @@
                 <a href="/library" class="site-nav-link" {% if request.url.path.startswith('/library') %}aria-current="page"{% endif %}>Library</a>
                 <a href="/integrity" class="site-nav-link" {% if request.url.path.startswith('/integrity') %}aria-current="page"{% endif %}>Integrity</a>
                 <a href="/history" class="site-nav-link" {% if request.url.path.startswith('/history') %}aria-current="page"{% endif %}>History</a>
+                <a href="/settings" class="site-nav-link" {% if request.url.path.startswith('/settings') %}aria-current="page"{% endif %}>Settings</a>
                 <a href="#important-information" class="site-nav-link site-nav-link-muted">Important info</a>
             </nav>
             <span class="site-header-corn" aria-hidden="true">
@@ -70,7 +71,7 @@
                     </ul>
                 </section>
             </div>
-            <p class="site-footer-meta">SHUCK3R <span class="site-footer-corn-stamp" aria-hidden="true">🌽</span> · Local utilities · No affiliation with third-party sites</p>
+            <p class="site-footer-meta">SHUCK3R <span class="site-footer-version">v{{ app_version }}</span> <span class="site-footer-corn-stamp" aria-hidden="true">🌽</span> · Local utilities · No affiliation with third-party sites</p>
         </div>
     </footer>
 
