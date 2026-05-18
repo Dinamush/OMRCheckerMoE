@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -103,7 +104,13 @@ def resolve_pixiv_target(
         return "artwork", None, illust
     if single_artwork and raw.isdigit():
         return "artwork", None, raw
-    return "bookmarks", parse_user_id(raw), None
+    uid = parse_user_id(raw)
+    if uid:
+        return "bookmarks", uid, None
+    raise ValueError(
+        "Unrecognized Pixiv input. Use a bookmarks URL (/users/…/bookmarks), "
+        "an artwork URL (/artworks/{id}), or enable single artwork with a numeric illust ID."
+    )
 
 
 def work_from_illust_body(body: Dict[str, Any], illust_id: str) -> Dict[str, Any]:
@@ -271,17 +278,17 @@ def establish_www_session(
             except Exception as e:
                 last_err = str(e)
                 logging.debug("Pixiv bookmarks probe failed: %s", e)
-
-        try:
-            data = ajax_get_json_via_driver(driver, "user/self")
-            uid, err = _parse_user_self(data)
-            if uid:
-                logging.info("Pixiv www session ready (logged-in user %s)", uid)
-                return uid
-            last_err = err
-        except Exception as e:
-            last_err = str(e)
-            logging.debug("Pixiv /ajax/user/self probe failed: %s", e)
+        else:
+            try:
+                data = ajax_get_json_via_driver(driver, "user/self")
+                uid, err = _parse_user_self(data)
+                if uid:
+                    logging.info("Pixiv www session ready (logged-in user %s)", uid)
+                    return uid
+                last_err = err
+            except Exception as e:
+                last_err = str(e)
+                logging.debug("Pixiv /ajax/user/self probe failed: %s", e)
 
         time.sleep(2.0)
         driver.get(landing)
@@ -637,9 +644,11 @@ def _safe_filename(
     max_total_len: int = _MAX_FILENAME_TOTAL,
 ) -> str:
     """``{id}_p{n}_{post_title}{ext}``; fall back to CDN page stem if path too long."""
-    base = sanitize_filename_slug((title or "").strip(), max_len=80)
-    if not base:
+    raw_title = (title or "").strip()
+    if not raw_title:
         base = _cdn_page_stem(image_url, page)
+    else:
+        base = sanitize_filename_slug(raw_title, max_len=80)
     prefix = f"{illust_id}_p{page}_"
     bare = f"{illust_id}_p{page}{ext}"
     name = f"{prefix}{base}{ext}" if base else bare
@@ -664,9 +673,37 @@ def _manga_zip_filename(file_title: str, illust_id: str) -> str:
     if not slug:
         return bare
     name = f"{illust_id}_{slug}.zip"
-    if len(name) > _MAX_FILENAME_TOTAL or len(raw) > budget:
+    if len(name) > _MAX_FILENAME_TOTAL:
         return bare
     return name
+
+
+def _dest_is_complete(dest: Path) -> bool:
+    if not dest.is_file() or dest.stat().st_size == 0:
+        return False
+    if dest.suffix.lower() == ".zip":
+        return zipfile.is_zipfile(dest)
+    return True
+
+
+def _clone_session(base: requests.Session) -> requests.Session:
+    s = requests.Session()
+    s.headers.update(base.headers)
+    s.cookies.update(base.cookies)
+    if base.proxies:
+        s.proxies.update(base.proxies)
+    return s
+
+
+_thread_local = threading.local()
+
+
+def _worker_session(base: requests.Session) -> requests.Session:
+    s = getattr(_thread_local, "session", None)
+    if s is None:
+        s = _clone_session(base)
+        _thread_local.session = s
+    return s
 
 
 def _ext_from_url(url: str) -> str:
@@ -686,19 +723,35 @@ def download_binary(
     skip_if_exists: bool = True,
     cancel_check: Optional[Callable[[], bool]] = None,
 ) -> bool:
-    if skip_if_exists and dest.is_file() and dest.stat().st_size > 0:
+    if skip_if_exists and _dest_is_complete(dest):
         return True
     dest.parent.mkdir(parents=True, exist_ok=True)
+    partial = dest.with_suffix(dest.suffix + ".part")
     headers = {**session.headers, "Referer": referer}
-    r = session.get(url, headers=headers, timeout=120, stream=True)
-    r.raise_for_status()
-    with open(dest, "wb") as f:
-        for chunk in r.iter_content(chunk_size=65536):
-            if cancel_check and cancel_check():
-                raise DownloadCancelled("Download cancelled by user.")
-            if chunk:
-                f.write(chunk)
-    return dest.is_file() and dest.stat().st_size > 0
+    try:
+        r = session.get(url, headers=headers, timeout=120, stream=True)
+        r.raise_for_status()
+        with open(partial, "wb") as f:
+            for chunk in r.iter_content(chunk_size=65536):
+                if cancel_check and cancel_check():
+                    try:
+                        partial.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    raise DownloadCancelled("Download cancelled by user.")
+                if chunk:
+                    f.write(chunk)
+        if not partial.is_file() or partial.stat().st_size == 0:
+            partial.unlink(missing_ok=True)
+            return False
+        partial.replace(dest)
+        return _dest_is_complete(dest)
+    except Exception:
+        try:
+            partial.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 def download_image(
@@ -766,8 +819,12 @@ def _extract_ugoira_frames(zip_path: Path, meta_body: Dict[str, Any]) -> Tuple[P
     if not isinstance(frames, list) or not frames:
         raise ValueError("ugoira_meta has no frames")
     work = Path(tempfile.mkdtemp(prefix="ugoira_"))
-    with zipfile.ZipFile(zip_path, "r") as zf:
-        zf.extractall(work)
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(work)
+    except Exception:
+        shutil.rmtree(work, ignore_errors=True)
+        raise
     return work, frames
 
 
@@ -812,7 +869,7 @@ def ugoira_zip_to_gif_pillow(
             disposal=2,
             optimize=False,
         )
-    except (OSError, zipfile.BadZipFile, ValueError) as e:
+    except Exception as e:
         logger.warning("Pillow ugoira GIF failed for %s: %s", zip_path, e)
         if dest.is_file():
             try:
@@ -881,6 +938,20 @@ def ugoira_zip_to_gif_ffmpeg(
             e.returncode,
             err_tail or e,
         )
+        if dest.is_file():
+            try:
+                dest.unlink()
+            except OSError:
+                pass
+        return False
+    except subprocess.TimeoutExpired as e:
+        logger.warning("Ugoira GIF conversion timed out for %s: %s", zip_path, e)
+        if dest.is_file():
+            try:
+                dest.unlink()
+            except OSError:
+                pass
+        return False
     except (OSError, zipfile.BadZipFile) as e:
         logger.warning("Ugoira GIF conversion failed for %s: %s", zip_path, e)
         if dest.is_file():
@@ -926,9 +997,7 @@ def download_ugoira_for_illust(
     gif_dest = root / _safe_filename(title, illust_id, 0, ".gif")
     saved: List[Path] = []
 
-    zip_ready = (
-        skip_if_exists and want_zip and zip_dest.is_file() and zip_dest.stat().st_size > 0
-    )
+    zip_ready = skip_if_exists and want_zip and _dest_is_complete(zip_dest)
     if want_zip and not zip_ready:
         if download_binary(
             session,
@@ -943,9 +1012,7 @@ def download_ugoira_for_illust(
         saved.append(zip_dest)
 
     if want_gif:
-        gif_exists = (
-            skip_if_exists and gif_dest.is_file() and gif_dest.stat().st_size > 0
-        )
+        gif_exists = skip_if_exists and _dest_is_complete(gif_dest)
         if gif_exists:
             saved.append(gif_dest)
         else:
@@ -992,35 +1059,50 @@ def download_manga_for_illust(
     if not urls:
         raise RuntimeError("No image URLs for manga illust")
     zip_dest = root / _manga_zip_filename(file_title, illust_id)
-    if skip_if_exists and zip_dest.is_file() and zip_dest.stat().st_size > 0:
+    if skip_if_exists and _dest_is_complete(zip_dest):
         return [zip_dest]
 
     referer = illust_artwork_referer(illust_id)
     work = Path(tempfile.mkdtemp(prefix="pixiv_manga_"))
+    zip_part = zip_dest.with_suffix(".zip.part")
     try:
+        pages_ok = 0
         for i, img_url in enumerate(urls):
             if cancel_check and cancel_check():
                 raise DownloadCancelled("Download cancelled by user.")
             ext = _ext_from_url(img_url)
             member = f"{i:03d}{ext}"
             page_path = work / member
-            download_binary(
+            if download_binary(
                 session,
                 img_url,
                 page_path,
                 referer=referer,
                 skip_if_exists=False,
                 cancel_check=cancel_check,
+            ):
+                pages_ok += 1
+        if pages_ok != len(urls):
+            raise RuntimeError(
+                f"Manga download incomplete for {illust_id}: {pages_ok}/{len(urls)} pages"
             )
         zip_dest.parent.mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(zip_dest, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        with zipfile.ZipFile(
+            zip_part, "w", compression=zipfile.ZIP_DEFLATED
+        ) as zf:
             for page_path in sorted(work.iterdir()):
                 if page_path.is_file():
                     zf.write(page_path, page_path.name)
+        if zip_part.is_file() and zip_part.stat().st_size > 0:
+            zip_part.replace(zip_dest)
     finally:
         shutil.rmtree(work, ignore_errors=True)
+        try:
+            zip_part.unlink(missing_ok=True)
+        except OSError:
+            pass
 
-    if zip_dest.is_file() and zip_dest.stat().st_size > 0:
+    if _dest_is_complete(zip_dest):
         return [zip_dest]
     return []
 
@@ -1043,6 +1125,7 @@ def download_bookmark_works(
     cancelled = False
 
     def _one(work: Dict[str, Any]) -> None:
+        ws = _worker_session(session)
         illust_id = str(work.get("id") or work.get("illustId") or "")
         title = str(work.get("title") or work.get("illustTitle") or illust_id)
         page_url = f"{PIXIV_HOME}artworks/{illust_id}"
@@ -1053,7 +1136,7 @@ def download_bookmark_works(
         tracker.add_urls([page_url], [title])
         tracker.start_download(page_url)
         try:
-            body = fetch_illust_body(session, illust_id)
+            body = fetch_illust_body(ws, illust_id)
             display_title = work_from_illust_body(body, illust_id)["title"]
             file_title = resolve_pixiv_filename_title(
                 display_title, illust_id, settings=settings
@@ -1061,7 +1144,7 @@ def download_bookmark_works(
             saved: List[Path] = []
             if is_ugoira_body(body):
                 saved = download_ugoira_for_illust(
-                    session,
+                    ws,
                     illust_id,
                     file_title,
                     root,
@@ -1071,7 +1154,7 @@ def download_bookmark_works(
                 )
             elif is_manga_body(body):
                 saved = download_manga_for_illust(
-                    session,
+                    ws,
                     illust_id,
                     file_title,
                     root,
@@ -1080,7 +1163,7 @@ def download_bookmark_works(
                     cancel_check=cancel_check,
                 )
             else:
-                urls = fetch_illust_image_urls(session, illust_id, body=body)
+                urls = fetch_illust_image_urls(ws, illust_id, body=body)
                 if not urls:
                     tracker.fail_download(page_url, "No image URLs in illust detail")
                     return
@@ -1092,7 +1175,7 @@ def download_bookmark_works(
                         file_title, illust_id, i, ext, image_url=img_url
                     )
                     if download_image(
-                        session,
+                        ws,
                         img_url,
                         dest,
                         skip_if_exists=skip_if_exists,

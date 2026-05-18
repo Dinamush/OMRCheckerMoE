@@ -1523,6 +1523,7 @@ def pixiv_workflow(
     *,
     pixiv_single_artwork: bool = False,
     cancel_event: Optional[_threading.Event] = None,
+    works_override: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     """Pixiv workflow: Chrome login → bookmarks or single artwork → download."""
     if not session_id:
@@ -1537,9 +1538,18 @@ def pixiv_workflow(
     driver = None
     ok = False
     rests = _pixiv_bookmark_rests(bookmark_mode)
-    pixiv_mode, bookmark_user_id, artwork_id = pixiv_ph.resolve_pixiv_target(
-        target_user_id, single_artwork=pixiv_single_artwork
-    )
+    if works_override is not None:
+        pixiv_mode = "artwork"
+        bookmark_user_id = None
+        artwork_id = None
+    else:
+        try:
+            pixiv_mode, bookmark_user_id, artwork_id = pixiv_ph.resolve_pixiv_target(
+                target_user_id, single_artwork=pixiv_single_artwork
+            )
+        except ValueError as e:
+            workflow_heuristics.mark_error(session_id, str(e))
+            return
 
     def _cancelled() -> bool:
         return bool(cancel_event and cancel_event.is_set())
@@ -1643,7 +1653,10 @@ def pixiv_workflow(
             except Exception as e:
                 logging.warning("FlareSolverr preflight for Pixiv failed: %s", e)
 
-        if pixiv_mode == "artwork":
+        if works_override is not None:
+            works = works_override
+            logging.info("Pixiv retry mode: %s artwork(s)", len(works))
+        elif pixiv_mode == "artwork":
             if not artwork_id:
                 workflow_heuristics.mark_error(
                     session_id,
@@ -2236,7 +2249,12 @@ def favicon_ico():
 @app.get("/")
 def read_form(request: Request):
     """Display the main form."""
-    return templates.TemplateResponse(request, "index.html", {"form_error": None})
+    cfg = load_settings()
+    return templates.TemplateResponse(
+        request,
+        "index.html",
+        {"form_error": None, "settings": asdict(cfg)},
+    )
 
 
 @app.get("/settings")
@@ -2303,7 +2321,9 @@ async def settings_save(request: Request):
         str(fd.get("pixiv_title_target_lang") or cfg.pixiv_title_target_lang).strip().lower()
         or "en"
     )
-    cfg.pixiv_deepl_api_key = str(fd.get("pixiv_deepl_api_key") or "").strip()
+    new_deepl = str(fd.get("pixiv_deepl_api_key") or "").strip()
+    if new_deepl:
+        cfg.pixiv_deepl_api_key = new_deepl
     cfg.pixiv_translate_delay_seconds = max(
         0.0, _pf("pixiv_translate_delay_seconds", cfg.pixiv_translate_delay_seconds)
     )
@@ -2358,10 +2378,11 @@ def handle_form(
             existing_library_dir, USER_DATA_DIR
         )
     except ValueError as e:
+        cfg = load_settings()
         return templates.TemplateResponse(
             request,
             "index.html",
-            {"form_error": str(e)},
+            {"form_error": str(e), "settings": asdict(cfg)},
             status_code=400,
         )
 
@@ -2410,6 +2431,7 @@ def handle_form(
             cancel_event=cancel_ev,
         )
     else:
+        cfg = load_settings()
         return templates.TemplateResponse(
             request,
             "index.html",
@@ -2418,6 +2440,7 @@ def handle_form(
                     f'Unknown site "{site}". Choose PornHub, xHamster, or Pixiv. '
                     "If Pixiv is missing from the form, restart the app from the latest code."
                 ),
+                "settings": asdict(cfg),
             },
             status_code=400,
         )
@@ -2755,6 +2778,35 @@ def api_session_retry_failed(
             new_session_id,
             url_override=[pair[0] for pair in failed_items],
             cancel_event=cancel_ev,
+        )
+    elif site_n == "pixiv":
+        retry_works = []
+        for url, title in failed_items:
+            iid = pixiv_ph.parse_illust_id(url)
+            if iid:
+                retry_works.append(
+                    {
+                        "id": iid,
+                        "illustId": iid,
+                        "title": title or iid,
+                    }
+                )
+        if not retry_works:
+            return {
+                "ok": False,
+                "message": "No Pixiv artwork URLs in failed list to retry.",
+                "retry_session_id": None,
+            }
+        background_tasks.add_task(
+            pixiv_workflow,
+            "",
+            "show",
+            dl_arg,
+            headless,
+            log_file,
+            new_session_id,
+            cancel_event=cancel_ev,
+            works_override=retry_works,
         )
     else:
         background_tasks.add_task(

@@ -60,7 +60,7 @@
                     <div class="form-group">
                         <label for="pixiv_ugoira_format">Pixiv ugoira (animated) format</label>
                         <select id="pixiv_ugoira_format" name="pixiv_ugoira_format">
-                            <option value="gif" {% if settings.pixiv_ugoira_format == 'gif' %}selected{% endif %}>GIF only (default, requires ffmpeg)</option>
+                            <option value="gif" {% if settings.pixiv_ugoira_format == 'gif' %}selected{% endif %}>GIF only (default, uses Pillow; ffmpeg optional)</option>
                             <option value="zip" {% if settings.pixiv_ugoira_format == 'zip' %}selected{% endif %}>ZIP only</option>
                             <option value="both" {% if settings.pixiv_ugoira_format == 'both' %}selected{% endif %}>ZIP + GIF</option>
                         </select>
@@ -81,7 +81,7 @@
                         </div>
                         <div class="form-group">
                             <label for="pixiv_deepl_api_key">DeepL API key (optional)</label>
-                            <input type="password" id="pixiv_deepl_api_key" name="pixiv_deepl_api_key" value="{{ settings.pixiv_deepl_api_key | e }}" autocomplete="off" placeholder="(empty = Google)">
+                            <input type="password" id="pixiv_deepl_api_key" name="pixiv_deepl_api_key" value="" autocomplete="off" placeholder="{% if settings.pixiv_deepl_api_key %}Leave blank to keep saved key{% else %}(empty = Google){% endif %}">
                         </div>
                         <div class="form-group">
                             <label for="pixiv_translate_delay_seconds">Delay between translation requests (seconds)</label>

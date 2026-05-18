@@ -27,6 +27,7 @@ CACHE_VERSION = 1
 CACHE_FILENAME = "pixiv_title_cache.json"
 
 _translate_lock = threading.Lock()
+_cache_io_lock = threading.Lock()
 _last_translate_at = 0.0
 
 
@@ -44,6 +45,8 @@ def _load_cache(path: Path) -> Dict[str, Any]:
     except Exception:
         return {"version": CACHE_VERSION, "entries": {}}
     if not isinstance(data, dict):
+        return {"version": CACHE_VERSION, "entries": {}}
+    if data.get("version") != CACHE_VERSION:
         return {"version": CACHE_VERSION, "entries": {}}
     entries = data.get("entries")
     if not isinstance(entries, dict):
@@ -75,7 +78,8 @@ def _needs_translation(title: str) -> bool:
         return True
 
 
-def _translate_remote(title: str, target: str, api_key: str, delay: float) -> str:
+def _translate_remote(title: str, target: str, api_key: str, delay: float) -> tuple[str, bool]:
+    """Return ``(text, ok)``; ``ok`` is False when the remote API failed."""
     global _last_translate_at
     snippet = title[:5000]
     with _translate_lock:
@@ -91,17 +95,17 @@ def _translate_remote(title: str, target: str, api_key: str, delay: float) -> st
                     api_key=api_key,
                     source="auto",
                     target=target,
-                    use_free_api=True,
+                    use_free_api=api_key.endswith(":fx"),
                 )
             else:
                 translator = GoogleTranslator(source="auto", target=target)
             result = (translator.translate(snippet) or "").strip()
             _last_translate_at = time.monotonic()
-            return result or title
+            return (result or title), True
         except Exception as e:
             logger.warning("Pixiv title translation failed: %s", e)
             _last_translate_at = time.monotonic()
-            return title
+            return title, False
 
 
 def resolve_pixiv_filename_title(
@@ -129,33 +133,37 @@ def resolve_pixiv_filename_title(
         return raw
 
     path = _cache_path(user_data_dir)
-    cache = _load_cache(path)
-    entries: Dict[str, Any] = cache.setdefault("entries", {})
-    ent = entries.get(illust_id)
-    if isinstance(ent, dict) and ent.get("source") == raw:
-        cached = ent.get(target)
-        if isinstance(cached, str) and cached.strip():
-            return cached.strip()
+    with _cache_io_lock:
+        cache = _load_cache(path)
+        entries: Dict[str, Any] = cache.setdefault("entries", {})
+        ent = entries.get(illust_id)
+        if isinstance(ent, dict) and ent.get("source") == raw:
+            cached = ent.get(target)
+            if isinstance(cached, str) and cached.strip():
+                return cached.strip()
 
-    api_key = _deepl_api_key(s)
-    delay = float(getattr(s, "pixiv_translate_delay_seconds", 0.35) or 0.0)
-    if not api_key:
-        delay = max(delay, 0.35)
+        api_key = _deepl_api_key(s)
+        delay = float(getattr(s, "pixiv_translate_delay_seconds", 0.35) or 0.0)
+        if not api_key:
+            delay = max(delay, 0.35)
 
-    translated = _translate_remote(raw, target, api_key, delay)
-    entries[illust_id] = {
-        "source": raw,
-        target: translated,
-        "updated": int(time.time()),
-    }
-    cache["version"] = CACHE_VERSION
-    _save_cache(path, cache)
-    return translated
+        translated, ok = _translate_remote(raw, target, api_key, delay)
+        if ok:
+            entries[illust_id] = {
+                "source": raw,
+                target: translated,
+                "updated": int(time.time()),
+            }
+            cache["version"] = CACHE_VERSION
+            _save_cache(path, cache)
+            return translated
+        return raw
 
 
 def sanitize_filename_slug(text: str, max_len: int = 80) -> str:
     """Windows-safe slug: forbidden chars, whitespace collapsed, length cap."""
-    s = re.sub(r'[<>:"/\\|?*]', "_", (text or "").strip())
+    s = re.sub(r"[\x00-\x1f\x7f]", "_", (text or "").strip())
+    s = re.sub(r'[<>:"/\\|?*]', "_", s)
     s = re.sub(r"\s+", "_", s).strip("._") or "untitled"
     if len(s) > max_len:
         s = s[:max_len].rstrip("._") or "untitled"

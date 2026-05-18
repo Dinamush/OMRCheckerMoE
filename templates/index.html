@@ -68,7 +68,7 @@
                         <p class="help-text">Paste an <strong>artworks</strong> link to download that work only. Or leave blank for all bookmarks on your account. Ugoira save as GIF (see Settings).</p>
                         <div class="form-group checkbox-group">
                             <input type="checkbox" id="pixiv_single_artwork" name="pixiv_single_artwork" value="true">
-                            <label for="pixiv_single_artwork">Download single artwork (numeric illust ID above)</label>
+                            <label for="pixiv_single_artwork">Download single artwork (check for bare numeric illust ID, or paste /artworks/ URL)</label>
                         </div>
                         <label for="pixiv_bookmarks">Bookmark visibility</label>
                         <select id="pixiv_bookmarks" name="pixiv_bookmarks">
@@ -79,8 +79,8 @@
                     </div>
 
                     <div class="form-group checkbox-group">
-                        <input type="checkbox" id="headless" name="headless">
-                        <label for="headless">Headless scraping (after login)</label>
+                        <input type="checkbox" id="headless" name="headless" {% if settings.headless_scraping %}checked{% endif %}>
+                        <label for="headless">Headless scraping (PornHub / xHamster after login; Pixiv uses API only)</label>
                         <p class="help-text">Login always uses the site window or visible Chrome. <strong>PornHub</strong> keeps Chrome visible for favourites and each video page (ph.py algorithm). Headless applies to xHamster/Pixiv only. Enable <strong>persistent cookies</strong> in Settings to skip login on later runs.</p>
                     </div>
 
@@ -123,7 +123,7 @@
                     <ul>
                         <li><strong>PornHub:</strong> Chrome scrolls your favourites, then downloads each video via page flashvars (requires login).</li>
                         <li><strong>xHamster:</strong> Downloads from your favorites page (requires login).</li>
-                        <li><strong>Pixiv:</strong> Bookmarks or a single artwork URL; ugoira export as GIF (Chrome login; optional FlareSolverr in Settings).</li>
+                        <li><strong>Pixiv:</strong> Bookmarks or a single artwork URL; ugoira format (GIF/ZIP/both) in Settings — GIF uses Pillow (ffmpeg optional).</li>
                         <li>Files save under <code>downloads/ph</code>, <code>downloads/xh</code>, or <code>downloads/pixiv</code> in your profile (Windows: <code>%LOCALAPPDATA%\HamsterScraper\downloads\…</code>).</li>
                         <li><strong>Library skip:</strong> PornHub reads titles from each video page. xHamster uses titles from the page. Very different filenames may still download.</li>
                     </ul>

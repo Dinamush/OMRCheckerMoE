@@ -26,6 +26,22 @@ class TestSanitizeFilenameSlug(unittest.TestCase):
         long = "a" * 100
         self.assertEqual(len(sanitize_filename_slug(long, max_len=80)), 80)
 
+    def test_dots_only_becomes_untitled(self) -> None:
+        self.assertEqual(sanitize_filename_slug("..."), "untitled")
+
+    def test_trailing_dots_stripped(self) -> None:
+        self.assertEqual(sanitize_filename_slug("Hello..."), "Hello")
+
+    def test_mixed_jp_en_slug(self) -> None:
+        slug = sanitize_filename_slug("オリジナル / Original Character (R-18)")
+        self.assertIn("オリジナル", slug)
+        self.assertIn("Original_Character", slug)
+
+    def test_ascii_control_chars_stripped(self) -> None:
+        slug = sanitize_filename_slug("a\x00b")
+        self.assertEqual(slug, "a_b")
+        self.assertNotIn("\x00", slug)
+
 
 class TestNeedsTranslation(unittest.TestCase):
     def test_ascii_skip(self) -> None:
@@ -73,6 +89,21 @@ class TestResolvePixivFilenameTitle(unittest.TestCase):
                 )
                 self.assertEqual(out, "Test title")
                 mock_tr.assert_not_called()
+
+    def test_translate_failure_not_cached(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = AppSettings(pixiv_translate_titles=True)
+            with patch(
+                "pixiv_titles._translate_remote", return_value=("オリジナル", False)
+            ) as mock_tr:
+                out = resolve_pixiv_filename_title(
+                    "オリジナル", "42", settings=cfg, user_data_dir=root
+                )
+                self.assertEqual(out, "オリジナル")
+                mock_tr.assert_called_once()
+            cache_path = root / CACHE_FILENAME
+            self.assertFalse(cache_path.is_file())
 
 
 if __name__ == "__main__":
