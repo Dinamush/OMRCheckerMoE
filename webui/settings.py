@@ -45,8 +45,29 @@ class Settings(BaseSettings):
     )
 
     max_upload_bytes: int = Field(
-        default=50 * 1024 * 1024,
-        description="Per-file upload limit in bytes (default 50 MiB).",
+        default=1024 * 1024 * 1024,
+        description="Per-file upload limit in bytes (default 1 GiB).",
+    )
+
+    pdf_render_dpi: int = Field(
+        default=150,
+        description=(
+            "DPI used when rasterising PDF pages to PNG for OMR processing. "
+            "150 DPI gives 44 %% less RAM/disk per page than 200 DPI while "
+            "keeping ArUco markers well above the detection threshold. "
+            "Override with OMR_WEBUI_PDF_RENDER_DPI."
+        ),
+    )
+
+    pdf_render_grayscale: bool = Field(
+        default=True,
+        description=(
+            "When true, PDF pages are rasterised as single-channel grayscale "
+            "(1 byte/px) instead of RGB (3 bytes/px). The OMR engine reads "
+            "all inputs as IMREAD_GRAYSCALE so colour information is discarded "
+            "on read anyway. Disabling gives no quality benefit for OMR sheets "
+            "but triples peak RAM. Override with OMR_WEBUI_PDF_RENDER_GRAYSCALE."
+        ),
     )
 
     presets_dir: Path = Field(

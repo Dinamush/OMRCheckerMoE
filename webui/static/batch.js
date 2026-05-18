@@ -1509,6 +1509,34 @@ const handleUpload = async (event) => {
         show(feedback, "Select at least one image first.", "error")
         return
     }
+
+    const hasPdf = Array.from(input.files).some((f) => f.name.toLowerCase().endsWith(".pdf"))
+    const progressEl = document.getElementById("upload-progress")
+    const progressBar = document.getElementById("upload-progress-bar")
+    const statCount = document.getElementById("upload-stat-count")
+    const statPct = document.getElementById("upload-stat-pct")
+
+    let pollInterval = null
+    const _updateSplitProgress = (pages, total) => {
+        const pct = total > 0 ? Math.round(pages / total * 100) : 0
+        if (progressBar) progressBar.style.width = `${pct}%`
+        if (statCount) statCount.textContent = `${pages} / ${total} pages`
+        if (statPct) statPct.textContent = `${pct}%`
+    }
+
+    if (hasPdf && progressEl) {
+        _updateSplitProgress(0, 0)
+        progressEl.hidden = false
+        pollInterval = setInterval(async () => {
+            try {
+                const status = await jsonFetch(apiUrl("/status"))
+                const pages = status.pdf_split_pages ?? 0
+                const total = status.pdf_split_total ?? 0
+                if (total > 0) _updateSplitProgress(pages, total)
+            } catch (_) { /* ignore poll errors during upload */ }
+        }, 1500)
+    }
+
     const formData = new FormData()
     Array.from(input.files).forEach((file) => formData.append("files", file))
     try {
@@ -1520,6 +1548,12 @@ const handleUpload = async (event) => {
         await refreshFiles()
     } catch (error) {
         show(feedback, error.message, "error")
+    } finally {
+        if (pollInterval) clearInterval(pollInterval)
+        if (progressEl) {
+            _updateSplitProgress(100, 100)
+            setTimeout(() => { progressEl.hidden = true }, 1200)
+        }
     }
 }
 

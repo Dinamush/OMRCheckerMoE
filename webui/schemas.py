@@ -137,6 +137,9 @@ class BatchStatusResponse(BaseModel):
     elapsed_s: float | None = None
     rate_per_min: float | None = None
     eta_s: float | None = None
+    # PDF split progress (populated while a PDF is being split during upload)
+    pdf_split_pages: int = 0
+    pdf_split_total: int = 0
 
 
 class ResultsRow(BaseModel):

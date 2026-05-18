@@ -249,14 +249,17 @@ async def upload_files(
                     f"({settings.max_upload_bytes} bytes)"
                 ),
             )
-        stored.extend(
-            batches_service.save_uploaded_file(
-                batch_id,
-                upload.filename or "upload",
-                data,
-                settings,
-            )
+        # Run the synchronous (CPU + disk I/O) conversion in a thread so the
+        # event loop stays free.  Large PDFs take seconds to minutes; without
+        # this the entire uvicorn worker stalls and other requests are blocked.
+        refs = await asyncio.to_thread(
+            batches_service.save_uploaded_file,
+            batch_id,
+            upload.filename or "upload",
+            data,
+            settings,
         )
+        stored.extend(refs)
     return stored
 
 
@@ -520,6 +523,8 @@ async def batch_status(
         elapsed_s=elapsed_s,
         rate_per_min=rate_per_min,
         eta_s=eta_s,
+        pdf_split_pages=int(metadata.get("pdf_split_pages", 0)),
+        pdf_split_total=int(metadata.get("pdf_split_total", 0)),
     )
 
 

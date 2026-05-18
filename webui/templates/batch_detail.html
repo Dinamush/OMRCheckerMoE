@@ -57,6 +57,16 @@
         </label>
         <button type="submit" class="btn primary">Upload</button>
         <div id="upload-feedback" class="feedback" hidden></div>
+        <div id="upload-progress" class="run-progress" hidden>
+            <p class="muted small" style="margin:0 0 4px">Splitting PDF pages…</p>
+            <div class="run-progress-bar-wrap">
+                <div id="upload-progress-bar" class="run-progress-bar" style="width:0%"></div>
+            </div>
+            <div class="run-stats">
+                <span id="upload-stat-count" class="run-stat">0 / 0 pages</span>
+                <span id="upload-stat-pct" class="run-stat">0%</span>
+            </div>
+        </div>
     </form>
 
     {% if allow_directory_import %}

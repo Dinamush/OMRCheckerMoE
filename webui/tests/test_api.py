@@ -160,6 +160,155 @@ def test_rejects_unsupported_filetype(client: TestClient) -> None:
     assert response.status_code == 400
 
 
+# ---------------------------------------------------------------------------
+# PDF rendering quality/format tests
+# ---------------------------------------------------------------------------
+
+def _make_simple_pdf(page_count: int = 1, width: int = 72, height: int = 72) -> bytes:
+    """Return minimal valid PDF bytes with ``page_count`` blank pages."""
+    fitz = pytest.importorskip("fitz")
+    doc = fitz.open()
+    for i in range(page_count):
+        p = doc.new_page(width=width, height=height)
+        p.insert_text((10, 40), str(i))
+    data = doc.tobytes()
+    doc.close()
+    return data
+
+
+def test_pdf_pages_are_grayscale_by_default(
+    client: TestClient, storage_root: Path
+) -> None:
+    """Default settings must produce single-channel grayscale PNGs (saves ~81 %% RAM)."""
+    pytest.importorskip("fitz")
+    batch_id = _create_batch(client, "Grayscale default")
+    pdf_bytes = _make_simple_pdf()
+
+    response = client.post(
+        f"/api/v1/batches/{batch_id}/files",
+        files=[("files", ("grey.pdf", pdf_bytes, "application/pdf"))],
+    )
+    assert response.status_code == 201, response.text
+
+    png_path = storage_root / batch_id / "inputs" / "grey_page_0001.png"
+    assert png_path.exists(), "Expected page PNG not written to disk"
+    img = cv2.imread(str(png_path), cv2.IMREAD_UNCHANGED)
+    assert img is not None, "cv2 could not read the output PNG"
+    assert img.ndim == 2, (
+        f"Expected 2-D grayscale array (1 channel), got shape {img.shape}"
+    )
+
+
+def test_pdf_pages_are_rgb_when_grayscale_disabled(
+    storage_root: Path, monkeypatch: pytest.MonkeyPatch, mocker
+) -> None:
+    """OMR_WEBUI_PDF_RENDER_GRAYSCALE=false must produce 3-channel RGB PNGs."""
+    pytest.importorskip("fitz")
+    monkeypatch.setenv("OMR_WEBUI_PDF_RENDER_GRAYSCALE", "false")
+    get_settings.cache_clear()
+
+    from webui.app import create_app
+    from src.tests.utils import setup_mocker_patches
+
+    setup_mocker_patches(mocker)
+    app = create_app()
+    with TestClient(app) as rgb_client:
+        batch_id = _create_batch(rgb_client, "RGB override")
+        pdf_bytes = _make_simple_pdf()
+        response = rgb_client.post(
+            f"/api/v1/batches/{batch_id}/files",
+            files=[("files", ("rgb.pdf", pdf_bytes, "application/pdf"))],
+        )
+        assert response.status_code == 201, response.text
+
+    png_path = storage_root / batch_id / "inputs" / "rgb_page_0001.png"
+    assert png_path.exists()
+    img = cv2.imread(str(png_path), cv2.IMREAD_UNCHANGED)
+    assert img is not None
+    assert img.ndim == 3 and img.shape[2] == 3, (
+        f"Expected 3-channel RGB array, got shape {img.shape}"
+    )
+
+
+def test_pdf_page_dimensions_match_150_dpi(
+    client: TestClient, storage_root: Path
+) -> None:
+    """At 150 DPI a 72-pt (1-inch) page must produce a ~150 px wide image."""
+    pytest.importorskip("fitz")
+    batch_id = _create_batch(client, "DPI dimensions")
+    # 72 pt == 1 inch; at 150 DPI → 150 px wide, 300 px tall
+    pdf_bytes = _make_simple_pdf(width=72, height=144)
+
+    response = client.post(
+        f"/api/v1/batches/{batch_id}/files",
+        files=[("files", ("dims.pdf", pdf_bytes, "application/pdf"))],
+    )
+    assert response.status_code == 201, response.text
+
+    png_path = storage_root / batch_id / "inputs" / "dims_page_0001.png"
+    img = cv2.imread(str(png_path), cv2.IMREAD_UNCHANGED)
+    assert img is not None
+    # Allow ±2 px rounding from PyMuPDF's integer scaling
+    assert abs(img.shape[1] - 150) <= 2, f"Width {img.shape[1]} not ~150 px at 150 DPI"
+    assert abs(img.shape[0] - 300) <= 2, f"Height {img.shape[0]} not ~300 px at 150 DPI"
+
+
+def test_pdf_split_skips_failing_page_and_returns_rest(tmp_path: Path) -> None:
+    """A per-page render error is skipped; all other pages are returned."""
+    fitz = pytest.importorskip("fitz")
+    from unittest.mock import patch
+    from webui.services.batches import _save_pdf_pages_as_images
+
+    pdf_bytes = _make_simple_pdf(page_count=3)
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+
+    call_count = [0]
+    original = fitz.Page.get_pixmap
+
+    def flaky(self, **kwargs):
+        call_count[0] += 1
+        if call_count[0] == 2:
+            raise RuntimeError("Synthetic render failure on page 2")
+        return original(self, **kwargs)
+
+    try:
+        with patch.object(fitz.Page, "get_pixmap", flaky):
+            refs = _save_pdf_pages_as_images(inputs, "flaky.pdf", pdf_bytes)
+    except (TypeError, AttributeError):
+        pytest.skip("Cannot patch fitz.Page.get_pixmap on this PyMuPDF build")
+
+    names = {r.name for r in refs}
+    assert len(refs) == 2, f"Expected 2 pages after 1 failure, got {len(refs)}"
+    assert "flaky_page_0001.png" in names
+    assert "flaky_page_0002.png" not in names, "Failed page must not produce a file"
+    assert "flaky_page_0003.png" in names
+
+
+def test_pdf_split_all_pages_fail_raises_error(tmp_path: Path) -> None:
+    """If every page fails to render, InvalidBatchRequest is raised (not a partial empty list)."""
+    fitz = pytest.importorskip("fitz")
+    from unittest.mock import patch
+    from webui.services.batches import _save_pdf_pages_as_images, InvalidBatchRequest
+
+    pdf_bytes = _make_simple_pdf(page_count=2)
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+
+    def always_fail(self, **kwargs):
+        raise RuntimeError("Synthetic total failure")
+
+    try:
+        with patch.object(fitz.Page, "get_pixmap", always_fail):
+            with pytest.raises(InvalidBatchRequest, match="all.*page.*failed"):
+                _save_pdf_pages_as_images(inputs, "bomb.pdf", pdf_bytes)
+    except (TypeError, AttributeError):
+        pytest.skip("Cannot patch fitz.Page.get_pixmap on this PyMuPDF build")
+
+
+
+
+
 def test_rotation_endpoint_persists_allowed_values(client: TestClient) -> None:
     batch_id = _create_batch(client, "Rotation setting")
 
