@@ -21,12 +21,34 @@ import json
 import logging
 import re
 import shutil
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
 logger = logging.getLogger(__name__)
+
+
+def _atomic_replace(tmp: Path, dest: Path) -> None:
+    """Rename *tmp* over *dest* atomically, retrying on Windows PermissionError.
+
+    Windows Defender (and some AV products) briefly locks a newly-written file
+    before scanning completes, causing ``os.replace`` to raise
+    ``PermissionError [WinError 5]``.  Three quick retries with a short sleep
+    cover the vast majority of cases; if all retries fail we fall back to a
+    non-atomic copy-then-delete so the write still succeeds.
+    """
+    for attempt in range(3):
+        try:
+            tmp.replace(dest)
+            return
+        except PermissionError:
+            if attempt < 2:
+                time.sleep(0.05 * (attempt + 1))
+    # Last-resort fallback: not atomic, but avoids a hard crash.
+    shutil.copy2(tmp, dest)
+    tmp.unlink(missing_ok=True)
 
 from webui.schemas import (
     Batch,
@@ -130,7 +152,7 @@ def _save_metadata(settings: Settings, batch_id: str, data: dict[str, Any]) -> N
     tmp = meta_path.with_suffix(".tmp")
     with tmp.open("w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=2, sort_keys=True)
-    tmp.replace(meta_path)
+    _atomic_replace(tmp, meta_path)
 
 
 def _file_count(batch_dir: Path) -> int:
@@ -635,7 +657,7 @@ def save_json_document(
     tmp = path.with_suffix(".tmp")
     with tmp.open("w", encoding="utf-8") as fh:
         json.dump(content, fh, indent=2, sort_keys=True)
-    tmp.replace(path)
+    _atomic_replace(tmp, path)
     meta = _load_metadata(settings, batch_id)
     meta["updated_at"] = _now().isoformat()
     _save_metadata(settings, batch_id, meta)
