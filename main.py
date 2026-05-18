@@ -1712,6 +1712,7 @@ def pixiv_workflow(
             skip_if_exists=cfg.skip_existing_in_download_dir,
             ugoira_format=cfg.pixiv_ugoira_format,
             cancel_check=_cancelled,
+            settings=cfg,
         )
         if stopped or _cancelled():
             workflow_heuristics.mark_error(
@@ -2297,6 +2298,15 @@ async def settings_save(request: Request):
     if uf == "webm":
         uf = "gif"
     cfg.pixiv_ugoira_format = uf if uf in ("zip", "gif", "both") else "gif"  # type: ignore[assignment]
+    cfg.pixiv_translate_titles = _combo_on("pixiv_translate_titles")
+    cfg.pixiv_title_target_lang = (
+        str(fd.get("pixiv_title_target_lang") or cfg.pixiv_title_target_lang).strip().lower()
+        or "en"
+    )
+    cfg.pixiv_deepl_api_key = str(fd.get("pixiv_deepl_api_key") or "").strip()
+    cfg.pixiv_translate_delay_seconds = max(
+        0.0, _pf("pixiv_translate_delay_seconds", cfg.pixiv_translate_delay_seconds)
+    )
     cfg.skip_existing_in_download_dir = _combo_on("skip_existing_in_download_dir")
     cfg.persistent_cookies = _combo_on("persistent_cookies")
     cfg.page_delay_seconds = max(0.0, _pf("page_delay_seconds", cfg.page_delay_seconds))

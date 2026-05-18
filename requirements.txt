@@ -10,3 +10,4 @@ requests
 pywebview>=5.0
 undetected-chromedriver>=3.5.0
 Pillow>=10.0.0
+deep-translator>=1.11.0

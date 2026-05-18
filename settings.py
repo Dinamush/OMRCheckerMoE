@@ -29,6 +29,10 @@ class AppSettings:
     max_parallel_downloads: int = 4
     video_quality: Literal["best", "720", "1080"] = "720"
     pixiv_ugoira_format: Literal["zip", "gif", "both"] = "gif"
+    pixiv_translate_titles: bool = True
+    pixiv_title_target_lang: str = "en"
+    pixiv_deepl_api_key: str = ""  # optional; else env DEEPL_AUTH_KEY
+    pixiv_translate_delay_seconds: float = 0.35  # throttle unofficial Google
     skip_existing_in_download_dir: bool = True
     persistent_cookies: bool = False
 
@@ -109,6 +113,9 @@ def load_settings(user_data_dir: Optional[Path] = None) -> AppSettings:
     out.page_delay_seconds = max(0.0, float(out.page_delay_seconds))
     out.download_delay_seconds = max(0.0, float(out.download_delay_seconds))
     out.delay_variance_seconds = max(0.0, float(out.delay_variance_seconds))
+    out.pixiv_translate_delay_seconds = max(0.0, float(out.pixiv_translate_delay_seconds))
+    lang = (out.pixiv_title_target_lang or "en").strip().lower()
+    out.pixiv_title_target_lang = lang or "en"
     return out
 
 

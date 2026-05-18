@@ -67,6 +67,28 @@
                         <p class="help-text">GIF uses built-in Pillow (via <code>pip install</code>). Optional: place <code>ffmpeg.exe</code> in <code>%LOCALAPPDATA%\HamsterScraper\bin\</code> for higher quality. R-18 needs login.</p>
                     </div>
 
+                    <fieldset class="form-group" style="margin: 1rem 0; padding: 0.75rem 1rem; border-radius: 6px;">
+                        <legend class="panel-kicker" style="padding: 0 0.25rem;">Pixiv filenames</legend>
+                        <div class="form-group checkbox-group">
+                            <input type="hidden" name="pixiv_translate_titles" value="off">
+                            <input type="checkbox" id="pixiv_translate_titles" name="pixiv_translate_titles" value="on" {% if settings.pixiv_translate_titles %}checked{% endif %}>
+                            <label for="pixiv_translate_titles">Translate post titles for filenames (e.g. Japanese → English)</label>
+                        </div>
+                        <div class="form-group">
+                            <label for="pixiv_title_target_lang">Target language code</label>
+                            <input type="text" id="pixiv_title_target_lang" name="pixiv_title_target_lang" value="{{ settings.pixiv_title_target_lang | e }}" placeholder="en">
+                            <p class="help-text">Google Translate (no key) or DeepL with API key below. Cached per illust. Long names use CDN page stems.</p>
+                        </div>
+                        <div class="form-group">
+                            <label for="pixiv_deepl_api_key">DeepL API key (optional)</label>
+                            <input type="password" id="pixiv_deepl_api_key" name="pixiv_deepl_api_key" value="{{ settings.pixiv_deepl_api_key | e }}" autocomplete="off" placeholder="(empty = Google)">
+                        </div>
+                        <div class="form-group">
+                            <label for="pixiv_translate_delay_seconds">Delay between translation requests (seconds)</label>
+                            <input type="text" inputmode="decimal" id="pixiv_translate_delay_seconds" name="pixiv_translate_delay_seconds" value="{{ settings.pixiv_translate_delay_seconds }}">
+                        </div>
+                    </fieldset>
+
                     <div class="form-group checkbox-group">
                         <input type="hidden" name="persistent_cookies" value="off">
                         <input type="checkbox" id="persistent_cookies" name="persistent_cookies" value="on" {% if settings.persistent_cookies %}checked{% endif %}>

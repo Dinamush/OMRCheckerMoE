@@ -37,6 +37,8 @@ a = Analysis(
         'cookie_health',
         'flaresolverr_client',
         'pixiv_ph',
+        'pixiv_titles',
+        'deep_translator',
         'PIL',
         'PIL.Image',
         'selenium_login_wait',
