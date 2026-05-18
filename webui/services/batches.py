@@ -112,15 +112,25 @@ def _load_metadata(settings: Settings, batch_id: str) -> dict[str, Any]:
     if not meta_path.exists():
         raise BatchNotFound(batch_id)
     with meta_path.open("r", encoding="utf-8") as fh:
-        return json.load(fh)
+        try:
+            return json.load(fh)
+        except json.JSONDecodeError:
+            # Transient: another thread is mid-write. Return an empty dict so
+            # callers degrade gracefully; the next read will see the full file.
+            return {}
 
 
 def _save_metadata(settings: Settings, batch_id: str, data: dict[str, Any]) -> None:
     meta_path = _metadata_path(settings, batch_id)
     meta_path.parent.mkdir(parents=True, exist_ok=True)
     data = {k: _serialise(v) for k, v in data.items()}
-    with meta_path.open("w", encoding="utf-8") as fh:
+    # Write to a sibling temp file then atomically rename so readers never
+    # see a truncated or partially-written file (os.replace is atomic on
+    # both POSIX and Windows NT).
+    tmp = meta_path.with_suffix(".tmp")
+    with tmp.open("w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=2, sort_keys=True)
+    tmp.replace(meta_path)
 
 
 def _file_count(batch_dir: Path) -> int:
@@ -622,8 +632,10 @@ def save_json_document(
         return
     if not isinstance(content, dict):
         raise InvalidBatchRequest(f"{doc_name}.json must be a JSON object")
-    with path.open("w", encoding="utf-8") as fh:
+    tmp = path.with_suffix(".tmp")
+    with tmp.open("w", encoding="utf-8") as fh:
         json.dump(content, fh, indent=2, sort_keys=True)
+    tmp.replace(path)
     meta = _load_metadata(settings, batch_id)
     meta["updated_at"] = _now().isoformat()
     _save_metadata(settings, batch_id, meta)
@@ -664,7 +676,7 @@ def find_results_csv(batch_id: str, settings: Settings | None = None) -> Path | 
         candidates.extend(results_dir.glob("Results_*.csv"))
     if not candidates:
         return None
-    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    candidates.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0.0, reverse=True)
     return candidates[0]
 
 

@@ -428,9 +428,16 @@ const pollStatus = async () => {
         } else if (data.status === "done" || data.status === "cancelled" || data.status === "failed") {
             updateProgress(data)
             await refreshResults()
+        } else {
+            // "created" or any future status — keep polling so transitions are
+            // picked up without a page reload.
+            setTimeout(pollStatus, 2000)
         }
     } catch (error) {
         console.error(error)
+        // Retry after a transient network error or 500 so the progress bar
+        // does not silently stop updating.
+        setTimeout(pollStatus, 3000)
     }
 }
 
@@ -654,13 +661,19 @@ const renderResults = (container, data) => {
     }).join("")
     const cards = data.rows.map((row, index) => renderResultCard(row, responseColumns, index)).join("")
     const header = columns.map((col) => `<th>${escapeHtml(col)}</th>`).join("")
-    const rows = data.rows.map((row) => {
+    const CSV_PREVIEW_LIMIT = 100
+    const allRows = data.rows
+    const previewRows = allRows.slice(0, CSV_PREVIEW_LIMIT)
+    const rows = previewRows.map((row) => {
         const cells = columns.map((col) => {
             const className = ["file_id", "input_path", "output_path"].includes(col) ? ' class="mono small"' : ""
             return `<td${className}>${escapeHtml(getResultCell(row, col))}</td>`
         }).join("")
         return `<tr>${cells}</tr>`
     }).join("")
+    const truncationNote = allRows.length > CSV_PREVIEW_LIMIT
+        ? `<p class="muted small" style="margin:6px 0 0">Showing first ${CSV_PREVIEW_LIMIT} of ${allRows.length} rows. <a href="${apiUrl('/results/download')}">Download the full CSV</a> for all results.</p>`
+        : ""
 
     container.innerHTML = `
         <div class="results-shell">
@@ -675,6 +688,7 @@ const renderResults = (container, data) => {
                     <tbody>${rows}</tbody>
                 </table>
             </div>
+            ${truncationNote}
         </details>
     `
 }

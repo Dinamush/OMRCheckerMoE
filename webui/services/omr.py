@@ -775,12 +775,13 @@ def run_batch_sync(batch_id: str, settings: Settings | None = None) -> None:
                             "total_files": len(input_images),
                             "latest_processed_file": latest_file_name,
                             "latest_dynamic_dimensions": latest_dimensions,
-                            "dynamic_dimensions_by_file": dynamic_dimensions_by_file,
+                            # dynamic_dimensions_by_file grows O(n) — only
+                            # written in the final completion call, not here.
                             "preprocess_failures": list(preprocess_failures),
                             "run_elapsed_s": round(time.monotonic() - run_started_at, 1),
                         },
                         settings,
-                    )
+                    ) if (completed % 5 == 0 or completed == len(input_images)) else None
 
                 if _is_cancel_requested(batch_id, settings):
                     _mark_cancelled(
@@ -942,9 +943,12 @@ def request_cancel(batch_id: str, settings: Settings | None = None) -> BatchStat
 
 
 def _read_csv_records(path: Path) -> tuple[list[str], list[dict[str, str]]]:
-    with path.open("r", encoding="utf-8", newline="") as fh:
-        reader = csv.reader(fh)
-        raw_rows = list(reader)
+    try:
+        with path.open("r", encoding="utf-8", newline="") as fh:
+            reader = csv.reader(fh)
+            raw_rows = list(reader)
+    except (FileNotFoundError, OSError):
+        return [], []
 
     if not raw_rows:
         return [], []
@@ -970,7 +974,7 @@ def _find_error_files_csvs(batch_id: str, settings: Settings) -> list[Path]:
         and "_workers" not in manual_dir.relative_to(outputs).parts
         for path in manual_dir.glob("ErrorFiles*.csv")
     ]
-    candidates.sort(key=lambda path: path.stat().st_mtime)
+    candidates.sort(key=lambda path: path.stat().st_mtime if path.exists() else 0.0)
     return candidates
 
 
