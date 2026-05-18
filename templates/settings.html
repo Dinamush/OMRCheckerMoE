@@ -14,6 +14,28 @@
                     <p><strong>Saved.</strong> New downloads will use these values immediately.</p>
                 </div>
                 {% endif %}
+                <ul class="hero-signal-list settings-overview-list" aria-label="Settings overview" style="margin-top: 20px;">
+                    <li>
+                        <span class="hero-signal-label">Download directory</span>
+                        <span class="hero-signal-value">Where files are saved — defaults to your user profile AppData folder</span>
+                    </li>
+                    <li>
+                        <span class="hero-signal-label">Parallel workers</span>
+                        <span class="hero-signal-value">How many files download simultaneously (1–32)</span>
+                    </li>
+                    <li>
+                        <span class="hero-signal-label">Pixiv quality</span>
+                        <span class="hero-signal-value">Original, regular, or small — applies to images and manga pages</span>
+                    </li>
+                    <li>
+                        <span class="hero-signal-label">Browser / anti-bot</span>
+                        <span class="hero-signal-value">Headless mode, persistent Chrome profiles, cookie persistence</span>
+                    </li>
+                    <li>
+                        <span class="hero-signal-label">Delays</span>
+                        <span class="hero-signal-value">Rate-limit controls between page loads and download submissions</span>
+                    </li>
+                </ul>
             </div>
 
             <section class="layout-panel control-panel" aria-labelledby="settings-form-title">
@@ -27,13 +49,12 @@
                         <label for="download_directory">Download directory</label>
                         <input type="text" id="download_directory" name="download_directory" value="{{ settings.download_directory | e }}" autocomplete="off"
                                placeholder="(empty = default …/downloads; files go in ph/, xh/, pixiv/ subfolders)">
-                        <p class="help-text">
-                            Root: <strong>{{ effective_download_dir | e }}</strong>
-                            — each site uses a subfolder:
+                        <div class="help-text">
+                            <span>Root: <strong>{{ effective_download_dir | e }}</strong> — each site uses a subfolder:</span>
                             {% for label, path in site_download_dirs.items() %}
-                            <br><span class="mono-path">{{ label }} → {{ path | e }}</span>
+                            <span class="mono-path">{{ label }} → {{ path | e }}</span>
                             {% endfor %}
-                        </p>
+                        </div>
                     </div>
 
                     <div class="form-group">

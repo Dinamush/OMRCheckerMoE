@@ -86,15 +86,12 @@
 {% endblock %}
 
 {% block content %}
-<section class="layout-hero" aria-labelledby="integrity-title">
-  <div class="layout-hero-copy">
+<div class="container container-wide">
+  <div class="util-page-header">
     <p class="page-eyebrow page-eyebrow-left">SHUCK3R</p>
     <h1 id="integrity-title" class="page-title-left">Integrity scanner</h1>
-    <p class="subtitle subtitle-left">Detect truncated or corrupt video files using ffprobe.</p>
+    <p class="subtitle subtitle-left" style="margin-bottom:0">Detect truncated or corrupt video files using ffprobe.</p>
   </div>
-</section>
-
-<div class="container" style="margin-top:28px">
   <form id="scanForm" class="integrity-form" onsubmit="return false">
     <div>
       <label for="scanDir">Directory to scan</label>

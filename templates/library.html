@@ -20,14 +20,12 @@
   .library-toolbar input[type="search"]:focus {
     border-color: var(--color-primary);
     outline: none;
-    box-shadow: 0 0 0 2px rgba(0, 255, 136, 0.14), var(--glow-primary-sm);
+    box-shadow: 0 0 0 3px rgba(124, 106, 200, 0.12);
   }
   .library-count {
     opacity: 0.55;
     font-size: 12px;
-    font-family: var(--font-display);
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
+    font-family: var(--font-sans);
     color: var(--color-text-muted);
   }
   .library-grid {
@@ -42,8 +40,8 @@
     overflow: hidden;
   }
   .library-card:hover {
-    border-color: rgba(0, 200, 255, 0.42);
-    box-shadow: var(--glow-cyan);
+    border-color: var(--color-primary-border);
+    box-shadow: var(--shadow-md);
   }
   .library-thumb-wrap {
     aspect-ratio: 16/9;
@@ -71,57 +69,51 @@
   .library-card-actions { display: flex; gap: 5px; margin-top: 7px; }
   .lib-btn {
     flex: 1; text-align: center;
-    font-size: 10px; font-weight: 700;
-    letter-spacing: 0.08em; text-transform: uppercase;
+    font-size: 11px; font-weight: 600;
     padding: 4px 6px;
     border-radius: var(--radius-lg);
     text-decoration: none;
     background: var(--color-muted);
     color: var(--color-text-muted);
     border: 1px solid var(--color-border);
-    font-family: var(--font-display);
+    font-family: var(--font-sans);
     transition: var(--transition);
   }
   .lib-btn:hover {
-    background: rgba(0, 200, 255, 0.08);
-    border-color: rgba(0, 200, 255, 0.38);
-    color: var(--color-secondary);
+    background: var(--color-primary-muted);
+    border-color: var(--color-primary-border);
+    color: var(--color-primary);
   }
   .library-empty {
     padding: 48px; text-align: center; opacity: 0.40;
-    font-family: var(--font-display);
-    font-size: 12px; letter-spacing: 0.1em; text-transform: uppercase;
+    font-family: var(--font-sans);
+    font-size: 13px;
   }
   .gen-btn {
-    padding: 8px 16px;
+    padding: 7px 14px;
     background: transparent;
-    border: 1px solid var(--color-corn);
-    color: var(--color-corn);
+    border: 1px solid var(--color-corn-border);
+    color: var(--color-corn-dim);
     border-radius: var(--radius-md);
     cursor: pointer;
-    font-size: 12px; font-weight: 700;
-    font-family: var(--font-display);
-    letter-spacing: 0.08em; text-transform: uppercase;
-    text-shadow: var(--glow-corn-sm);
+    font-size: 12px; font-weight: 600;
+    font-family: var(--font-sans);
     transition: var(--transition);
   }
   .gen-btn:hover {
-    background: rgba(255, 217, 74, 0.10);
+    background: var(--color-corn-muted);
     box-shadow: var(--glow-corn-sm);
   }
 </style>
 {% endblock %}
 
 {% block content %}
-<section class="layout-hero layout-hero-session" aria-labelledby="library-title">
-  <div class="layout-hero-copy">
+<div class="container container-wide">
+  <div class="util-page-header">
     <p class="page-eyebrow page-eyebrow-left">SHUCK3R</p>
     <h1 id="library-title" class="page-title-left">Library</h1>
-    <p class="subtitle subtitle-left">Browse your downloaded videos as a thumbnail grid (includes subfolders).</p>
+    <p class="subtitle subtitle-left" style="margin-bottom:0">Browse your downloaded videos as a thumbnail grid (includes subfolders).</p>
   </div>
-</section>
-
-<div class="container" style="margin-top:28px">
   {% if videos %}
   <div class="library-toolbar">
     <input type="search" id="searchBox" placeholder="Filter by name…" oninput="filterCards(this.value)">

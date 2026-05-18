@@ -45,22 +45,13 @@
 </style>
 {% endblock %}
 {% block content %}
-        <section class="layout-hero layout-hero-utility" aria-labelledby="duplicates-title">
-            <div class="layout-hero-copy">
+        <div class="util-page-header util-page-header-wide">
+            <div>
                 <p class="page-eyebrow page-eyebrow-left">SHUCK3R</p>
                 <h1 id="duplicates-title" class="page-title-left">Duplicate file checker</h1>
-                <p class="subtitle subtitle-left">Scan any folder on this PC, review likely duplicates, then delete extras with one working surface instead of a long settings document.</p>
+                <p class="subtitle subtitle-left" style="margin-bottom:0">Scan any folder on this PC, review likely duplicates, then delete extras with one working surface instead of a long settings document.</p>
             </div>
-
-            <div class="layout-panel detail-panel detail-panel-info">
-                <div class="panel-heading">
-                    <p class="panel-kicker">Default root</p>
-                    <h2>Where scans begin when Directory is empty</h2>
-                </div>
-                <p class="mono-path">{{ default_scan_directory or allowed_downloads_root }}</p>
-                <p class="help-text">Absolute paths work. Relative paths try your <strong>terminal&apos;s current directory</strong> first, then the SHUCK3R user-data folder. Set <code>HAMSTER_USER_DATA</code> to override the default root.</p>
-            </div>
-        </section>
+        </div>
 
         <section class="workspace-grid" aria-label="Duplicate scan workspace">
             <div class="layout-panel workspace-main">
@@ -89,6 +80,15 @@
                 <div id="alertArea" class="alert-area" role="status"></div>
             </div>
 
+            <div class="workspace-side-column">
+            <div class="layout-panel detail-panel detail-panel-info" style="margin-bottom:18px">
+                <div class="panel-heading">
+                    <p class="panel-kicker">Default root</p>
+                    <h2>Where scans begin when Directory is empty</h2>
+                </div>
+                <p class="mono-path">{{ default_scan_directory or allowed_downloads_root }}</p>
+                <p class="help-text">Absolute paths work. Relative paths try your <strong>terminal&apos;s current directory</strong> first, then the SHUCK3R user-data folder. Set <code>HAMSTER_USER_DATA</code> to override the default root.</p>
+            </div>
             <aside class="layout-panel workspace-side" aria-label="How results behave">
                 <div class="panel-heading">
                     <p class="panel-kicker">Review model</p>
@@ -101,6 +101,7 @@
                     <li>Preview thumbnails load lazily so the page stays responsive during large scans.</li>
                 </ul>
             </aside>
+            </div>
         </section>
 
         <section id="resultsSection" class="hidden workspace-results">

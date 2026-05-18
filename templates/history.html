@@ -83,15 +83,12 @@
 {% endblock %}
 
 {% block content %}
-<section class="layout-hero" aria-labelledby="history-title">
-  <div class="layout-hero-copy">
+<div class="container container-wide">
+  <div class="util-page-header">
     <p class="page-eyebrow page-eyebrow-left">SHUCK3R</p>
     <h1 id="history-title" class="page-title-left">Session history</h1>
-    <p class="subtitle subtitle-left">Running, completed, failed, and cancelled download runs (most recent first).</p>
+    <p class="subtitle subtitle-left" style="margin-bottom:0">Running, completed, failed, and cancelled download runs (most recent first).</p>
   </div>
-</section>
-
-<div class="container" style="margin-top:28px">
   <div id="history-wrap">
     <p id="history-loading">Loading</p>
     <table class="history-table" id="historyTable" style="display:none">
