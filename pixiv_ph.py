@@ -26,6 +26,7 @@ import requests
 
 import challenge_detect
 import flaresolverr_client
+from paths import bundled_ffmpeg_path
 from progress_tracker import get_tracker
 
 logger = logging.getLogger(__name__)
@@ -44,7 +45,7 @@ DEFAULT_UA = (
 )
 BOOKMARK_PAGE_LIMIT = 48
 PIXIV_ILLUST_TYPE_UGOIRA = 2
-PixivUgoiraFormat = Literal["zip", "webm", "both"]
+PixivUgoiraFormat = Literal["zip", "gif", "both"]
 _PIXIV_PARENT_DOMAIN = ".pixiv.net"
 _PIXIV_AUTH_NAMES = frozenset({"PHPSESSID", "__cf_bm", "cf_clearance"})
 
@@ -60,10 +61,61 @@ def parse_user_id(value: str) -> Optional[str]:
     raw = (value or "").strip()
     if not raw:
         return None
+    if parse_illust_id(raw):
+        return None
     if raw.isdigit():
         return raw
     m = re.search(r"/users/(\d+)", raw)
     return m.group(1) if m else None
+
+
+def parse_illust_id(value: str) -> Optional[str]:
+    """Extract illustration id from an artwork URL (not bare user ids)."""
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    for pattern in (
+        r"/artworks/(\d+)",
+        r"[?&]illust_id=(\d+)",
+    ):
+        m = re.search(pattern, raw)
+        if m:
+            return m.group(1)
+    return None
+
+
+def resolve_pixiv_target(
+    value: str,
+    *,
+    single_artwork: bool = False,
+) -> Tuple[str, Optional[str], Optional[str]]:
+    """
+    Classify Pixiv form input.
+
+    Returns ``(mode, user_id, illust_id)`` where mode is ``artwork`` or ``bookmarks``.
+    """
+    raw = (value or "").strip()
+    illust = parse_illust_id(raw)
+    if illust and (single_artwork or "/artworks/" in raw or "illust_id=" in raw):
+        return "artwork", None, illust
+    if single_artwork and raw.isdigit():
+        return "artwork", None, raw
+    return "bookmarks", parse_user_id(raw), None
+
+
+def work_from_illust_body(body: Dict[str, Any], illust_id: str) -> Dict[str, Any]:
+    title = str(
+        body.get("title")
+        or body.get("illustTitle")
+        or body.get("illustId")
+        or illust_id
+    )
+    return {"id": illust_id, "illustId": illust_id, "title": title}
+
+
+def work_from_illust(session: requests.Session, illust_id: str) -> Dict[str, Any]:
+    body = fetch_illust_body(session, illust_id)
+    return work_from_illust_body(body, illust_id)
 
 
 def _ua_sidecar_path(cookie_file: str) -> str:
@@ -631,15 +683,103 @@ def _write_ugoira_ffconcat(frames: List[Dict[str, Any]], path: Path) -> None:
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def ugoira_zip_to_webm(
+def find_ffmpeg() -> Optional[str]:
+    """Locate ffmpeg: bundled ``bin/``, PATH, or common install locations."""
+    bundled = bundled_ffmpeg_path()
+    if bundled:
+        return str(bundled)
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    pf = os.environ.get("ProgramFiles", r"C:\Program Files")
+    pfx86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+    local = os.environ.get("LOCALAPPDATA", "")
+    for candidate in (
+        Path(pf) / "ffmpeg" / "bin" / "ffmpeg.exe",
+        Path(pfx86) / "ffmpeg" / "bin" / "ffmpeg.exe",
+        Path(local) / "Microsoft" / "WinGet" / "Links" / "ffmpeg.exe",
+        Path(local) / "ffmpeg" / "bin" / "ffmpeg.exe",
+    ):
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def _extract_ugoira_frames(zip_path: Path, meta_body: Dict[str, Any]) -> Tuple[Path, List[Dict[str, Any]]]:
+    """Extract ZIP to a temp dir; return (work_dir, frames list). Caller must clean up work_dir parent."""
+    frames = meta_body.get("frames")
+    if not isinstance(frames, list) or not frames:
+        raise ValueError("ugoira_meta has no frames")
+    work = Path(tempfile.mkdtemp(prefix="ugoira_"))
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        zf.extractall(work)
+    return work, frames
+
+
+def ugoira_zip_to_gif_pillow(
     zip_path: Path,
     meta_body: Dict[str, Any],
     dest: Path,
 ) -> bool:
-    """Mux extracted ugoira frames to WebM via ffmpeg (returns False if ffmpeg missing)."""
-    ffmpeg = shutil.which("ffmpeg")
+    """Build animated GIF with Pillow (no external ffmpeg required)."""
+    try:
+        from PIL import Image
+    except ImportError:
+        logger.debug("Pillow not installed — cannot build GIF in-process")
+        return False
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    work: Optional[Path] = None
+    try:
+        work, frames_meta = _extract_ugoira_frames(zip_path, meta_body)
+        images: List[Any] = []
+        durations: List[int] = []
+        for fr in frames_meta:
+            fname = fr.get("file")
+            if not fname:
+                continue
+            fp = work / str(fname)
+            if not fp.is_file():
+                logger.warning("Ugoira frame missing in zip: %s", fname)
+                continue
+            im = Image.open(fp).convert("RGBA")
+            images.append(im)
+            durations.append(max(1, int(fr.get("delay") or 100)))
+        if not images:
+            return False
+        paletted = [im.convert("P", palette=Image.ADAPTIVE, colors=256) for im in images]
+        paletted[0].save(
+            dest,
+            save_all=True,
+            append_images=paletted[1:],
+            duration=durations,
+            loop=0,
+            disposal=2,
+            optimize=False,
+        )
+    except (OSError, zipfile.BadZipFile, ValueError) as e:
+        logger.warning("Pillow ugoira GIF failed for %s: %s", zip_path, e)
+        if dest.is_file():
+            try:
+                dest.unlink()
+            except OSError:
+                pass
+        return False
+    finally:
+        if work is not None:
+            shutil.rmtree(work, ignore_errors=True)
+    return dest.is_file() and dest.stat().st_size > 0
+
+
+def ugoira_zip_to_gif_ffmpeg(
+    zip_path: Path,
+    meta_body: Dict[str, Any],
+    dest: Path,
+) -> bool:
+    """Mux extracted ugoira frames to GIF via ffmpeg (optional; often smaller files)."""
+    ffmpeg = find_ffmpeg()
     if not ffmpeg:
-        logger.warning("ffmpeg not on PATH — skipping ugoira WebM conversion for %s", zip_path)
+        logger.warning("ffmpeg not found — skipping ugoira GIF conversion for %s", zip_path)
         return False
     frames = meta_body.get("frames")
     if not isinstance(frames, list) or not frames:
@@ -663,24 +803,31 @@ def ugoira_zip_to_webm(
                 "0",
                 "-i",
                 str(ffconcat),
-                "-c:v",
-                "libvpx",
-                "-crf",
-                "12",
-                "-b:v",
-                "2M",
-                "-an",
+                "-lavfi",
+                "split[s0][s1];[s0]palettegen=stats_mode=single[p];[s1][p]paletteuse=dither=bayer",
+                "-loop",
+                "0",
                 str(dest),
             ]
-            subprocess.run(
+            proc = subprocess.run(
                 cmd,
                 cwd=work,
                 check=True,
                 capture_output=True,
                 timeout=600,
             )
-    except (subprocess.CalledProcessError, OSError, zipfile.BadZipFile) as e:
-        logger.warning("Ugoira WebM conversion failed for %s: %s", zip_path, e)
+            if proc.stderr:
+                logger.debug("ffmpeg stderr: %s", proc.stderr.decode(errors="replace")[:500])
+    except subprocess.CalledProcessError as e:
+        err_tail = (e.stderr or b"").decode(errors="replace")[-400:]
+        logger.warning(
+            "Ugoira GIF conversion failed for %s (exit %s): %s",
+            zip_path,
+            e.returncode,
+            err_tail or e,
+        )
+    except (OSError, zipfile.BadZipFile) as e:
+        logger.warning("Ugoira GIF conversion failed for %s: %s", zip_path, e)
         if dest.is_file():
             try:
                 dest.unlink()
@@ -690,17 +837,28 @@ def ugoira_zip_to_webm(
     return dest.is_file() and dest.stat().st_size > 0
 
 
+def ugoira_zip_to_gif(
+    zip_path: Path,
+    meta_body: Dict[str, Any],
+    dest: Path,
+) -> bool:
+    """GIF from ugoira ZIP: Pillow first (bundled dep), then ffmpeg if available."""
+    if ugoira_zip_to_gif_pillow(zip_path, meta_body, dest):
+        return True
+    return ugoira_zip_to_gif_ffmpeg(zip_path, meta_body, dest)
+
+
 def download_ugoira_for_illust(
     session: requests.Session,
     illust_id: str,
     title: str,
     root: Path,
     *,
-    ugoira_format: PixivUgoiraFormat = "zip",
+    ugoira_format: PixivUgoiraFormat = "gif",
     skip_if_exists: bool = True,
     cancel_check: Optional[Callable[[], bool]] = None,
 ) -> List[Path]:
-    """Download ugoira ZIP and/or WebM for one illustration."""
+    """Download ugoira ZIP and/or GIF for one illustration."""
     meta = fetch_ugoira_meta(session, illust_id)
     zip_url = pick_ugoira_zip_url(meta)
     if not zip_url:
@@ -708,9 +866,9 @@ def download_ugoira_for_illust(
 
     referer = illust_artwork_referer(illust_id)
     want_zip = ugoira_format in ("zip", "both")
-    want_webm = ugoira_format in ("webm", "both")
+    want_gif = ugoira_format in ("gif", "both")
     zip_dest = root / _safe_filename(title, illust_id, 0, ".zip")
-    webm_dest = root / _safe_filename(title, illust_id, 0, ".webm")
+    gif_dest = root / _safe_filename(title, illust_id, 0, ".gif")
     saved: List[Path] = []
 
     zip_ready = (
@@ -729,24 +887,37 @@ def download_ugoira_for_illust(
     elif want_zip and zip_dest.is_file():
         saved.append(zip_dest)
 
-    if want_webm:
-        webm_exists = (
-            skip_if_exists and webm_dest.is_file() and webm_dest.stat().st_size > 0
+    if want_gif:
+        gif_exists = (
+            skip_if_exists and gif_dest.is_file() and gif_dest.stat().st_size > 0
         )
-        if webm_exists:
-            saved.append(webm_dest)
+        if gif_exists:
+            saved.append(gif_dest)
         else:
-            if not zip_dest.is_file() or zip_dest.stat().st_size == 0:
-                download_binary(
-                    session,
-                    zip_url,
-                    zip_dest,
-                    referer=referer,
-                    skip_if_exists=False,
-                    cancel_check=cancel_check,
-                )
-            if ugoira_zip_to_webm(zip_dest, meta, webm_dest):
-                saved.append(webm_dest)
+            try:
+                if not zip_dest.is_file() or zip_dest.stat().st_size == 0:
+                    download_binary(
+                        session,
+                        zip_url,
+                        zip_dest,
+                        referer=referer,
+                        skip_if_exists=False,
+                        cancel_check=cancel_check,
+                    )
+                if ugoira_zip_to_gif(zip_dest, meta, gif_dest):
+                    saved.append(gif_dest)
+                elif not want_zip:
+                    raise RuntimeError(
+                        "Downloaded ugoira frames but GIF conversion failed. "
+                        "Run: pip install Pillow — or install ffmpeg / drop ffmpeg.exe "
+                        "in %LOCALAPPDATA%\\HamsterScraper\\bin\\"
+                    )
+            finally:
+                if not want_zip and zip_dest.is_file():
+                    try:
+                        zip_dest.unlink()
+                    except OSError:
+                        pass
 
     return saved
 
@@ -759,7 +930,7 @@ def download_bookmark_works(
     *,
     max_workers: int = 4,
     skip_if_exists: bool = True,
-    ugoira_format: PixivUgoiraFormat = "zip",
+    ugoira_format: PixivUgoiraFormat = "gif",
     cancel_check: Optional[Callable[[], bool]] = None,
 ) -> bool:
     """Download bookmarked works. Returns True if stopped early by user cancel."""

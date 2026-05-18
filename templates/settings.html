@@ -60,11 +60,11 @@
                     <div class="form-group">
                         <label for="pixiv_ugoira_format">Pixiv ugoira (animated) format</label>
                         <select id="pixiv_ugoira_format" name="pixiv_ugoira_format">
-                            <option value="zip" {% if settings.pixiv_ugoira_format == 'zip' %}selected{% endif %}>ZIP only (default)</option>
-                            <option value="webm" {% if settings.pixiv_ugoira_format == 'webm' %}selected{% endif %}>WebM only (requires ffmpeg)</option>
-                            <option value="both" {% if settings.pixiv_ugoira_format == 'both' %}selected{% endif %}>ZIP + WebM</option>
+                            <option value="gif" {% if settings.pixiv_ugoira_format == 'gif' %}selected{% endif %}>GIF only (default, requires ffmpeg)</option>
+                            <option value="zip" {% if settings.pixiv_ugoira_format == 'zip' %}selected{% endif %}>ZIP only</option>
+                            <option value="both" {% if settings.pixiv_ugoira_format == 'both' %}selected{% endif %}>ZIP + GIF</option>
                         </select>
-                        <p class="help-text">Ugoira use <code>illustType=2</code> and Pixiv&apos;s <code>ugoira_meta</code> API. R-18 works need a logged-in session.</p>
+                        <p class="help-text">GIF uses built-in Pillow (via <code>pip install</code>). Optional: place <code>ffmpeg.exe</code> in <code>%LOCALAPPDATA%\HamsterScraper\bin\</code> for higher quality. R-18 needs login.</p>
                     </div>
 
                     <div class="form-group checkbox-group">

@@ -2,7 +2,7 @@
 
 import unittest
 
-from pixiv_ph import parse_user_id
+from pixiv_ph import parse_illust_id, parse_user_id
 
 
 class TestPixivParse(unittest.TestCase):
@@ -20,6 +20,15 @@ class TestPixivParse(unittest.TestCase):
     def test_empty(self) -> None:
         self.assertIsNone(parse_user_id(""))
         self.assertIsNone(parse_user_id("   "))
+
+    def test_artwork_url_not_user_id(self) -> None:
+        self.assertIsNone(
+            parse_user_id("https://www.pixiv.net/en/artworks/127692715")
+        )
+        self.assertEqual(
+            parse_illust_id("https://www.pixiv.net/en/artworks/127692715"),
+            "127692715",
+        )
 
 
 if __name__ == "__main__":

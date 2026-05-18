@@ -1521,9 +1521,10 @@ def pixiv_workflow(
     log_file: str,
     session_id: str,
     *,
+    pixiv_single_artwork: bool = False,
     cancel_event: Optional[_threading.Event] = None,
 ) -> None:
-    """Pixiv bookmark workflow: Chrome login → Ajax bookmark list → image download."""
+    """Pixiv workflow: Chrome login → bookmarks or single artwork → download."""
     if not session_id:
         session_id = str(int(time.time()))
 
@@ -1536,6 +1537,9 @@ def pixiv_workflow(
     driver = None
     ok = False
     rests = _pixiv_bookmark_rests(bookmark_mode)
+    pixiv_mode, bookmark_user_id, artwork_id = pixiv_ph.resolve_pixiv_target(
+        target_user_id, single_artwork=pixiv_single_artwork
+    )
 
     def _cancelled() -> bool:
         return bool(cancel_event and cancel_event.is_set())
@@ -1555,9 +1559,24 @@ def pixiv_workflow(
             session = pixiv_ph.load_session(cookie_file, cfg.proxy_url)
         else:
             workflow_heuristics.advance(session_id, "chrome_login")
-            driver = workflow_browser.create_driver(
-                "pixiv", cfg, headless=False, purpose="auth"
-            )
+            try:
+                driver = workflow_browser.create_driver(
+                    "pixiv", cfg, headless=False, purpose="auth"
+                )
+            except Exception as e:
+                err = str(e)
+                if "session not created" in err.lower() or "chromedriver" in err.lower():
+                    workflow_heuristics.mark_error(
+                        session_id,
+                        "Chrome failed to start for Pixiv login. Close any Chrome window "
+                        "using the Pixiv profile, update Chrome, or delete "
+                        "%LOCALAPPDATA%\\HamsterScraper\\browser_profiles\\pixiv "
+                        "and try again. Enable persistent cookies in Settings if you "
+                        "logged in successfully before. "
+                        f"({err[:200]})",
+                    )
+                    return
+                raise
             workflow_browser.apply_flaresolverr_preflight(
                 driver, pixiv_ph.PIXIV_HOME, cfg
             )
@@ -1589,7 +1608,7 @@ def pixiv_workflow(
                 pixiv_ph.establish_www_session(
                     driver,
                     timeout=120.0,
-                    target_user_id=target_user_id,
+                    target_user_id=bookmark_user_id if pixiv_mode == "bookmarks" else None,
                     bookmark_rest=rests[0] if rests else "show",
                     cancel_check=_cancelled,
                 )
@@ -1624,34 +1643,54 @@ def pixiv_workflow(
             except Exception as e:
                 logging.warning("FlareSolverr preflight for Pixiv failed: %s", e)
 
-        uid = pixiv_ph.parse_user_id(target_user_id) or pixiv_ph.get_logged_in_user_id(
-            session
-        )
-        logging.info("Pixiv target user id: %s (rests=%s)", uid, rests)
-
-        workflow_heuristics.advance(session_id, "collect_urls")
-        workflow_heuristics.set_detail(
-            session_id,
-            f"Collecting bookmarks for user {uid} ({', '.join(rests)})…",
-        )
-        works = pixiv_ph.collect_bookmark_works(
-            session, uid, rests, cancel_check=_cancelled
-        )
-        if _cancelled():
-            workflow_heuristics.mark_error(
-                session_id, "Download cancelled by user."
+        if pixiv_mode == "artwork":
+            if not artwork_id:
+                workflow_heuristics.mark_error(
+                    session_id,
+                    "No artwork ID — paste a URL like "
+                    "https://www.pixiv.net/en/artworks/123456789 or enable "
+                    "'Download single artwork' and enter the numeric id.",
+                )
+                return
+            workflow_heuristics.advance(session_id, "collect_urls")
+            workflow_heuristics.set_detail(
+                session_id, f"Preparing artwork {artwork_id}…",
             )
-            return
-        if not works:
-            workflow_heuristics.mark_error(
+            try:
+                works = [pixiv_ph.work_from_illust(session, artwork_id)]
+            except Exception as e:
+                workflow_heuristics.mark_error(
+                    session_id, f"Could not load artwork {artwork_id}: {e}"
+                )
+                return
+            logging.info("Pixiv single-artwork mode: %s", artwork_id)
+        else:
+            uid = bookmark_user_id or pixiv_ph.get_logged_in_user_id(session)
+            logging.info("Pixiv target user id: %s (rests=%s)", uid, rests)
+
+            workflow_heuristics.advance(session_id, "collect_urls")
+            workflow_heuristics.set_detail(
                 session_id,
-                "No bookmarks found (empty list, wrong user id, or login required).",
+                f"Collecting bookmarks for user {uid} ({', '.join(rests)})…",
             )
-            return
+            works = pixiv_ph.collect_bookmark_works(
+                session, uid, rests, cancel_check=_cancelled
+            )
+            if _cancelled():
+                workflow_heuristics.mark_error(
+                    session_id, "Download cancelled by user."
+                )
+                return
+            if not works:
+                workflow_heuristics.mark_error(
+                    session_id,
+                    "No bookmarks found (empty list, wrong user id, or login required).",
+                )
+                return
+            logging.info("Collected %s Pixiv bookmark works", len(works))
 
-        logging.info("Collected %s Pixiv bookmark works", len(works))
         workflow_heuristics.set_detail(
-            session_id, f"Found {len(works)} bookmarked works — downloading…",
+            session_id, f"Downloading {len(works)} work(s)…",
         )
 
         if cfg.persist_queue_snapshots:
@@ -2255,7 +2294,9 @@ async def settings_save(request: Request):
     cfg.max_parallel_downloads = max(1, min(32, _pi("max_parallel_downloads", cfg.max_parallel_downloads)))
     cfg.video_quality = vq  # type: ignore[assignment]
     uf = str(fd.get("pixiv_ugoira_format") or cfg.pixiv_ugoira_format).strip().lower()
-    cfg.pixiv_ugoira_format = uf if uf in ("zip", "webm", "both") else "zip"  # type: ignore[assignment]
+    if uf == "webm":
+        uf = "gif"
+    cfg.pixiv_ugoira_format = uf if uf in ("zip", "gif", "both") else "gif"  # type: ignore[assignment]
     cfg.skip_existing_in_download_dir = _combo_on("skip_existing_in_download_dir")
     cfg.persistent_cookies = _combo_on("persistent_cookies")
     cfg.page_delay_seconds = max(0.0, _pf("page_delay_seconds", cfg.page_delay_seconds))
@@ -2291,6 +2332,7 @@ def handle_form(
     library_recursive: str = Form("false"),
     pixiv_user_id: str = Form(""),
     pixiv_bookmarks: str = Form("public"),
+    pixiv_single_artwork: str = Form("false"),
 ):
     """Handle form submission and start the appropriate workflow."""
     site = (site or "").strip().lower()
@@ -2345,6 +2387,7 @@ def handle_form(
         )
     elif site == "pixiv":
         cancel_ev = _get_cancel_event(session_id)
+        pixiv_single = pixiv_single_artwork.lower() in ("true", "on", "1", "yes")
         background_tasks.add_task(
             pixiv_workflow,
             pixiv_user_id,
@@ -2353,6 +2396,7 @@ def handle_form(
             headless_bool,
             log_file,
             session_id,
+            pixiv_single_artwork=pixiv_single,
             cancel_event=cancel_ev,
         )
     else:

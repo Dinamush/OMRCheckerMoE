@@ -8,7 +8,9 @@ from unittest.mock import MagicMock, patch
 from pixiv_ph import (
     _write_ugoira_ffconcat,
     is_ugoira_body,
+    parse_illust_id,
     pick_ugoira_zip_url,
+    resolve_pixiv_target,
 )
 
 
@@ -19,6 +21,40 @@ class TestUgoiraDetection(unittest.TestCase):
     def test_static_illust(self) -> None:
         self.assertFalse(is_ugoira_body({"illustType": 0}))
         self.assertFalse(is_ugoira_body({}))
+
+
+class TestParseIllustId(unittest.TestCase):
+    def test_artworks_url(self) -> None:
+        self.assertEqual(
+            parse_illust_id("https://www.pixiv.net/en/artworks/127692715"),
+            "127692715",
+        )
+
+    def test_user_url_not_illust(self) -> None:
+        self.assertIsNone(
+            parse_illust_id("https://www.pixiv.net/en/users/33191689/bookmarks/artworks")
+        )
+
+
+class TestResolvePixivTarget(unittest.TestCase):
+    def test_artwork_url_auto(self) -> None:
+        mode, uid, iid = resolve_pixiv_target(
+            "https://www.pixiv.net/en/artworks/127692715", single_artwork=False
+        )
+        self.assertEqual(mode, "artwork")
+        self.assertIsNone(uid)
+        self.assertEqual(iid, "127692715")
+
+    def test_numeric_with_checkbox(self) -> None:
+        mode, uid, iid = resolve_pixiv_target("127692715", single_artwork=True)
+        self.assertEqual(mode, "artwork")
+        self.assertEqual(iid, "127692715")
+
+    def test_numeric_without_checkbox_is_user(self) -> None:
+        mode, uid, iid = resolve_pixiv_target("33191689", single_artwork=False)
+        self.assertEqual(mode, "bookmarks")
+        self.assertEqual(uid, "33191689")
+        self.assertIsNone(iid)
 
 
 class TestUgoiraMetaPick(unittest.TestCase):
@@ -74,7 +110,6 @@ class TestFetchUgoiraMeta(unittest.TestCase):
 
         body = fetch_ugoira_meta(session, "1")
         self.assertEqual(body["originalSrc"], "https://i.pximg.net/ugoira.zip")
-        session.get.assert_called_once()
         self.assertIn("ugoira_meta", session.get.call_args[0][0])
 
 

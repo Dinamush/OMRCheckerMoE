@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import Optional
 
 
 def is_frozen() -> bool:
@@ -49,6 +50,17 @@ def get_user_data_dir() -> Path:
     if xdg:
         return (Path(xdg).expanduser().resolve() / "hamster_scraper")
     return (Path.home() / ".local" / "share" / "hamster_scraper").resolve()
+
+
+def bundled_ffmpeg_path() -> Optional[Path]:
+    """Optional ffmpeg shipped next to the app: ``{resource}/bin/ffmpeg.exe`` or user ``bin/``."""
+    names = ("ffmpeg.exe", "ffmpeg") if sys.platform == "win32" else ("ffmpeg",)
+    for base in (get_resource_root(), get_user_data_dir()):
+        for name in names:
+            candidate = base / "bin" / name
+            if candidate.is_file():
+                return candidate
+    return None
 
 
 def ensure_runtime_cwd() -> None:

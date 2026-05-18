@@ -37,6 +37,8 @@ a = Analysis(
         'cookie_health',
         'flaresolverr_client',
         'pixiv_ph',
+        'PIL',
+        'PIL.Image',
         'selenium_login_wait',
         'workflow_browser',
         'selenium.webdriver.chrome.webdriver',

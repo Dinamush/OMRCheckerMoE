@@ -63,9 +63,13 @@
                     </div>
 
                     <div id="pixiv-options" class="form-group" hidden>
-                        <label for="pixiv_user_id">Pixiv user ID or bookmarks URL</label>
-                        <input type="text" id="pixiv_user_id" name="pixiv_user_id" autocomplete="off" placeholder="33191689 or https://www.pixiv.net/en/users/33191689/bookmarks/artworks">
-                        <p class="help-text">Leave blank to use your logged-in account. Public bookmarks use rest=show; private/all (rest=hide) requires owning the account.</p>
+                        <label for="pixiv_user_id">Pixiv user ID, bookmarks URL, or artwork URL</label>
+                        <input type="text" id="pixiv_user_id" name="pixiv_user_id" autocomplete="off" placeholder="33191689, bookmarks URL, or https://www.pixiv.net/en/artworks/127692715">
+                        <p class="help-text">Paste an <strong>artworks</strong> link to download that work only. Or leave blank for all bookmarks on your account. Ugoira save as GIF (see Settings).</p>
+                        <div class="form-group checkbox-group">
+                            <input type="checkbox" id="pixiv_single_artwork" name="pixiv_single_artwork" value="true">
+                            <label for="pixiv_single_artwork">Download single artwork (numeric illust ID above)</label>
+                        </div>
                         <label for="pixiv_bookmarks">Bookmark visibility</label>
                         <select id="pixiv_bookmarks" name="pixiv_bookmarks">
                             <option value="public">Public bookmarks (rest=show)</option>
@@ -119,7 +123,7 @@
                     <ul>
                         <li><strong>PornHub:</strong> Chrome scrolls your favourites, then downloads each video via page flashvars (requires login).</li>
                         <li><strong>xHamster:</strong> Downloads from your favorites page (requires login).</li>
-                        <li><strong>Pixiv:</strong> Downloads bookmarked illustrations and ugoira (animated ZIP/WebM) via Ajax API (Chrome login; optional FlareSolverr in Settings).</li>
+                        <li><strong>Pixiv:</strong> Bookmarks or a single artwork URL; ugoira export as GIF (Chrome login; optional FlareSolverr in Settings).</li>
                         <li>Files save under <code>downloads/ph</code>, <code>downloads/xh</code>, or <code>downloads/pixiv</code> in your profile (Windows: <code>%LOCALAPPDATA%\HamsterScraper\downloads\…</code>).</li>
                         <li><strong>Library skip:</strong> PornHub reads titles from each video page. xHamster uses titles from the page. Very different filenames may still download.</li>
                     </ul>
