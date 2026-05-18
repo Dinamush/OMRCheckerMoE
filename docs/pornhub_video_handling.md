@@ -6,7 +6,7 @@ This document describes **precisely** how PornHub videos are handled in the repo
 
 ## 1. Where PornHub Is Used
 
-- **`main.py`** – Web app (FastAPI) uses PornHub for the “PornHub” workflow: Chrome, login, then **yt-dlp** to extract playlist URLs and download.
+- **`main.py`** – Web app (FastAPI) uses PornHub for the “PornHub” workflow: Chrome (or embedded WebView login + HTTP pagination), favourites via **`pornhub_ph`** (scroll + Load more, or `?page=N`), then per-video **`mediaDefinitions`** download (requests / yt-dlp HLS).
 - **`archive/ph.py`** – Standalone script: **Firefox**, login, Netscape cookies, **Selenium + HTML parsing** for video URL extraction from the favorites page, then **yt-dlp** for per-video download (because yt-dlp returns 404 on the favorites playlist URL).
 
 Both rely on **yt-dlp** with a **Netscape cookie file** for the actual video downloads.

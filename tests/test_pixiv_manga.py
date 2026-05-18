@@ -61,8 +61,8 @@ class TestWindowsFilenameEdgeCases(unittest.TestCase):
         self.assertEqual(name, "12345_p0_\U0001f3a8\U00002728.jpg")
 
     def test_reserved_word_with_id_prefix(self) -> None:
-        self.assertEqual(_safe_filename("CON", "12345", 0, ".jpg"), "12345_p0_CON.jpg")
-        self.assertEqual(_manga_zip_filename("CON", "12345"), "12345_CON.zip")
+        self.assertEqual(_safe_filename("CON", "12345", 0, ".jpg"), "12345_p0_pixiv_CON.jpg")
+        self.assertEqual(_manga_zip_filename("CON", "12345"), "12345_pixiv_CON.zip")
 
     def test_trailing_dots_stripped_from_slug(self) -> None:
         self.assertEqual(_safe_filename("Hello...", "1", 0, ".jpg"), "1_p0_Hello.jpg")

@@ -38,6 +38,7 @@
                     <h2 id="download-form-title">Choose source and library rules</h2>
                 </div>
 
+                {% set form = form|default({}) %}
                 {% if form_error %}
                 <div class="form-error-banner" role="alert">
                     <p><strong>Could not start download.</strong> {{ form_error }}</p>
@@ -49,56 +50,60 @@
                         <label>Select Site:</label>
                         <div class="radio-group">
                             <label class="radio-option" for="pornhub">
-                                <input type="radio" id="pornhub" name="site" value="pornhub" required>
+                                <input type="radio" id="pornhub" name="site" value="pornhub" required {% if form.site == 'pornhub' %}checked{% endif %}>
                                 <span class="radio-option-text">PornHub</span>
                             </label>
                             <label class="radio-option" for="xhamster">
-                                <input type="radio" id="xhamster" name="site" value="xhamster" required>
+                                <input type="radio" id="xhamster" name="site" value="xhamster" required {% if form.site == 'xhamster' %}checked{% endif %}>
                                 <span class="radio-option-text">xHamster</span>
                             </label>
                             <label class="radio-option" for="pixiv">
-                                <input type="radio" id="pixiv" name="site" value="pixiv" required>
+                                <input type="radio" id="pixiv" name="site" value="pixiv" required {% if form.site == 'pixiv' %}checked{% endif %}>
                                 <span class="radio-option-text">Pixiv</span>
                             </label>
                         </div>
                     </div>
 
-                    <div id="pixiv-options" class="form-group" hidden>
+                    <div id="pixiv-options" class="form-group" {% if form.site != 'pixiv' %}hidden{% endif %}>
                         <label for="pixiv_user_id">Pixiv user ID, bookmarks URL, or artwork URL</label>
-                        <input type="text" id="pixiv_user_id" name="pixiv_user_id" autocomplete="off" placeholder="33191689, bookmarks URL, or https://www.pixiv.net/en/artworks/127692715">
+                        <input type="text" id="pixiv_user_id" name="pixiv_user_id" autocomplete="off" placeholder="33191689, bookmarks URL, or https://www.pixiv.net/en/artworks/127692715" value="{{ form.pixiv_user_id|default('', true) }}">
                         <p class="help-text">Paste an <strong>artworks</strong> link to download that work only. Or leave blank for all bookmarks on your account. Ugoira save as GIF (see Settings).</p>
                         <div class="form-group checkbox-group">
-                            <input type="checkbox" id="pixiv_single_artwork" name="pixiv_single_artwork" value="true">
+                            <input type="checkbox" id="pixiv_single_artwork" name="pixiv_single_artwork" value="true" {% if form.pixiv_single_artwork %}checked{% endif %}>
                             <label for="pixiv_single_artwork">Download single artwork (check for bare numeric illust ID, or paste /artworks/ URL)</label>
                         </div>
                         <label for="pixiv_bookmarks">Bookmark visibility</label>
                         <select id="pixiv_bookmarks" name="pixiv_bookmarks">
-                            <option value="public">Public bookmarks (rest=show)</option>
-                            <option value="private">Private / all bookmarks (rest=hide)</option>
-                            <option value="both">Both public and private</option>
+                            <option value="public" {% if form.pixiv_bookmarks|default('public') == 'public' %}selected{% endif %}>Public bookmarks (rest=show)</option>
+                            <option value="private" {% if form.pixiv_bookmarks == 'private' %}selected{% endif %}>Private / all bookmarks (rest=hide)</option>
+                            <option value="both" {% if form.pixiv_bookmarks == 'both' %}selected{% endif %}>Both public and private</option>
                         </select>
                         <p class="help-text" style="margin-top: 0.75rem;">
                             <strong>Image quality:</strong>
-                            {{ settings.pixiv_image_quality|default('original') }}
+                            {% set pq = settings.pixiv_image_quality|default('original') %}
+                            {% if pq == 'best' %}Best available (original → regular → small)
+                            {% elif pq == 'regular' %}Regular (~1200px)
+                            {% elif pq == 'small' %}Small / thumbnail
+                            {% else %}Original (full resolution){% endif %}
                             — set in <a href="/settings#pixiv-settings">Settings → Pixiv downloads</a>
                             (not the video quality dropdown).
                         </p>
                     </div>
 
                     <div class="form-group checkbox-group">
-                        <input type="checkbox" id="headless" name="headless" {% if settings.headless_scraping %}checked{% endif %}>
+                        <input type="checkbox" id="headless" name="headless" {% if form.headless is defined %}{% if form.headless %}checked{% endif %}{% elif settings.headless_scraping %}checked{% endif %}>
                         <label for="headless">Headless scraping (PornHub / xHamster after login; Pixiv uses API only)</label>
                         <p class="help-text">Login always uses the site window or visible Chrome. <strong>PornHub</strong> keeps Chrome visible for favourites and each video page (ph.py algorithm). Headless applies to xHamster/Pixiv only. Enable <strong>persistent cookies</strong> in Settings to skip login on later runs.</p>
                     </div>
 
                     <div class="form-group">
                         <label for="existing_library_dir">Only download what I don&apos;t have yet (optional)</label>
-                        <input type="text" id="existing_library_dir" name="existing_library_dir" autocomplete="off" placeholder="Folder where your existing videos are stored">
+                        <input type="text" id="existing_library_dir" name="existing_library_dir" autocomplete="off" placeholder="Folder where your existing videos are stored" value="{{ form.existing_library_dir|default('', true) }}">
                         <p class="help-text">Leave blank to download everything from favorites. If you set a folder (usually your <strong>downloads</strong> folder), SHUCK3R matches by title and PornHub <strong>viewkey</strong> in filenames like <code>Title_viewkey.mp4</code> under <code>ph/</code> and skips matches.</p>
                     </div>
 
                     <div class="form-group checkbox-group">
-                        <input type="checkbox" id="library_recursive" name="library_recursive" value="true" checked>
+                        <input type="checkbox" id="library_recursive" name="library_recursive" value="true" {% if form.library_recursive is defined %}{% if form.library_recursive %}checked{% endif %}{% else %}checked{% endif %}>
                         <label for="library_recursive">Include subfolders when scanning the library path above (recommended — videos live in ph/, xh/, pixiv/)</label>
                     </div>
 

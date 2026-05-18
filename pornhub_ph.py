@@ -17,7 +17,7 @@ import sys
 import time
 import concurrent.futures
 from http.cookiejar import MozillaCookieJar
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
 import requests
@@ -562,6 +562,7 @@ def _download_from_media_url(
     proxy_url: str = "",
     yt_dlp_retries: int = 3,
     referer: str = "",
+    yt_dlp_format: str = "",
 ) -> bool:
     pv = (proxy_url or "").strip()
     if fmt == "mp4" or "get_media" in media_url:
@@ -585,8 +586,11 @@ def _download_from_media_url(
     cmd = [sys.executable, "-m", "yt_dlp", "--cookies", cookie_file]
     if pv:
         cmd.extend(["--proxy", pv])
+    format_sel = (yt_dlp_format or "").strip() or "best"
     cmd.extend(
         [
+            "-f",
+            format_sel,
             "-o",
             output_path,
             "--merge-output-format",
@@ -619,6 +623,7 @@ def download_pornhub_video_page(
     proxy_url: str = "",
     skip_if_exists: bool = True,
     yt_dlp_retries: int = 3,
+    yt_dlp_format: str = "",
 ) -> None:
     """
     Download one PornHub video: page URL → mediaDefinitions → file on disk.
@@ -659,6 +664,7 @@ def download_pornhub_video_page(
         proxy_url=proxy_url,
         yt_dlp_retries=yt_dlp_retries,
         referer=video_page_url,
+        yt_dlp_format=yt_dlp_format,
     )
     if ok and os.path.exists(output_path):
         sz = os.path.getsize(output_path)
@@ -679,6 +685,8 @@ def download_pornhub_videos_parallel(
     proxy_url: str = "",
     skip_if_exists: bool = True,
     yt_dlp_retries: int = 3,
+    yt_dlp_format: str = "",
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> None:
     """Download PornHub videos from their page URLs.
 
@@ -691,12 +699,19 @@ def download_pornhub_videos_parallel(
     """
     if not video_page_urls:
         return
+    from progress_tracker import get_tracker
+
+    tracker = get_tracker(session_id)
     if driver is not None:
         logger.info(
             "Starting %s PornHub downloads (browser mode, sequential — ph.py style)",
             len(video_page_urls),
         )
         for url in video_page_urls:
+            if cancel_check and cancel_check():
+                tracker.fail_nonterminal("Download cancelled by user.")
+                logger.info("PornHub download batch cancelled by user.")
+                return
             download_pornhub_video_page(
                 url,
                 cookie_file,
@@ -706,32 +721,44 @@ def download_pornhub_videos_parallel(
                 proxy_url=proxy_url,
                 skip_if_exists=skip_if_exists,
                 yt_dlp_retries=yt_dlp_retries,
+                yt_dlp_format=yt_dlp_format,
             )
         logger.info("PornHub browser-mode download batch finished.")
         return
     logger.info("Starting %s PornHub downloads (%s workers, requests mode)", len(video_page_urls), max_workers)
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+    cancelled = False
     try:
-        futures = [
-            executor.submit(
-                download_pornhub_video_page,
-                url,
-                cookie_file,
-                download_dir,
-                session_id,
-                proxy_url=proxy_url,
-                skip_if_exists=skip_if_exists,
-                yt_dlp_retries=yt_dlp_retries,
+        futures = []
+        for url in video_page_urls:
+            if cancel_check and cancel_check():
+                cancelled = True
+                break
+            futures.append(
+                executor.submit(
+                    download_pornhub_video_page,
+                    url,
+                    cookie_file,
+                    download_dir,
+                    session_id,
+                    proxy_url=proxy_url,
+                    skip_if_exists=skip_if_exists,
+                    yt_dlp_retries=yt_dlp_retries,
+                    yt_dlp_format=yt_dlp_format,
+                )
             )
-            for url in video_page_urls
-        ]
         for fut in concurrent.futures.as_completed(futures):
+            if cancel_check and cancel_check():
+                cancelled = True
+                break
             try:
                 fut.result(timeout=7200)
             except Exception as e:
                 logger.error("PornHub parallel worker error: %s", e)
     finally:
-        executor.shutdown(wait=False, cancel_futures=True)
+        if cancelled:
+            tracker.fail_nonterminal("Download cancelled by user.")
+        executor.shutdown(wait=cancelled, cancel_futures=cancelled)
     logger.info("PornHub parallel download batch finished.")
 
 

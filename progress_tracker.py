@@ -9,7 +9,7 @@ import time
 import json
 import logging
 from enum import Enum
-from typing import List, Dict, Set, Optional, Tuple
+from typing import AbstractSet, List, Dict, Set, Optional, Tuple
 from dataclasses import dataclass, asdict
 from datetime import datetime
 import threading
@@ -235,6 +235,28 @@ class ProgressTracker:
                     self.logger.error(f"Failed: {item.title} - {error_message}")
                     
                 self._save_progress()
+
+    def fail_nonterminal(
+        self,
+        reason: str,
+        statuses: Optional[AbstractSet[DownloadStatus]] = None,
+    ) -> int:
+        """Mark in-flight downloads failed (e.g. user cancelled mid-batch)."""
+        targets = statuses or {DownloadStatus.PENDING, DownloadStatus.DOWNLOADING}
+        count = 0
+        with self._lock:
+            for item in self.download_items.values():
+                if item.status not in targets:
+                    continue
+                item.status = DownloadStatus.FAILED
+                item.error_message = reason
+                item.end_time = datetime.now()
+                self.stats.downloads_failed += 1
+                self.failed_downloads.append(item)
+                count += 1
+            if count:
+                self._save_progress()
+        return count
                 
     def skip_download(self, url: str, reason: str = "File already exists"):
         """Mark a download as skipped"""
@@ -378,6 +400,7 @@ class ProgressTracker:
 
 # Global tracker instances (one per session)
 _trackers: Dict[str, ProgressTracker] = {}
+_trackers_lock = threading.RLock()
 
 _default_log_dir: str = "logs"
 
@@ -391,12 +414,14 @@ def set_default_log_dir(log_dir: str) -> None:
 def get_tracker(session_id: str, log_dir: Optional[str] = None) -> ProgressTracker:
     """Get or create a progress tracker for a session."""
     ld = log_dir if log_dir is not None else _default_log_dir
-    if session_id not in _trackers:
-        _trackers[session_id] = ProgressTracker(session_id, log_dir=ld)
-    return _trackers[session_id]
+    with _trackers_lock:
+        if session_id not in _trackers:
+            _trackers[session_id] = ProgressTracker(session_id, log_dir=ld)
+        return _trackers[session_id]
 
 def cleanup_tracker(session_id: str):
     """Clean up a tracker after session completion"""
-    if session_id in _trackers:
-        _trackers[session_id].end_session()
-        del _trackers[session_id]
+    with _trackers_lock:
+        if session_id in _trackers:
+            _trackers[session_id].end_session()
+            del _trackers[session_id]

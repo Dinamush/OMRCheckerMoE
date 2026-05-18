@@ -93,7 +93,6 @@ def _translate_remote(title: str, target: str, api_key: str, delay: float) -> tu
             if api_key:
                 translator = DeeplTranslator(
                     api_key=api_key,
-                    source="auto",
                     target=target,
                     use_free_api=api_key.endswith(":fx"),
                 )
@@ -142,13 +141,16 @@ def resolve_pixiv_filename_title(
             if isinstance(cached, str) and cached.strip():
                 return cached.strip()
 
-        api_key = _deepl_api_key(s)
-        delay = float(getattr(s, "pixiv_translate_delay_seconds", 0.35) or 0.0)
-        if not api_key:
-            delay = max(delay, 0.35)
+    api_key = _deepl_api_key(s)
+    delay = float(getattr(s, "pixiv_translate_delay_seconds", 0.35) or 0.0)
+    if not api_key:
+        delay = max(delay, 0.35)
 
-        translated, ok = _translate_remote(raw, target, api_key, delay)
-        if ok:
+    translated, ok = _translate_remote(raw, target, api_key, delay)
+    if ok:
+        with _cache_io_lock:
+            cache = _load_cache(path)
+            entries = cache.setdefault("entries", {})
             entries[illust_id] = {
                 "source": raw,
                 target: translated,
@@ -156,8 +158,15 @@ def resolve_pixiv_filename_title(
             }
             cache["version"] = CACHE_VERSION
             _save_cache(path, cache)
-            return translated
-        return raw
+        return translated
+    return raw
+
+
+_WIN_RESERVED = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)}
+)
 
 
 def sanitize_filename_slug(text: str, max_len: int = 80) -> str:
@@ -165,6 +174,9 @@ def sanitize_filename_slug(text: str, max_len: int = 80) -> str:
     s = re.sub(r"[\x00-\x1f\x7f]", "_", (text or "").strip())
     s = re.sub(r'[<>:"/\\|?*]', "_", s)
     s = re.sub(r"\s+", "_", s).strip("._") or "untitled"
+    stem = s.split(".")[0].upper()
+    if stem in _WIN_RESERVED or re.match(r"^COM[1-9]\d?$", stem) or re.match(r"^LPT[1-9]\d?$", stem):
+        s = f"pixiv_{s}"
     if len(s) > max_len:
         s = s[:max_len].rstrip("._") or "untitled"
     return s

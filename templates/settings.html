@@ -42,6 +42,12 @@
                     </div>
 
                     <div class="form-group">
+                        <label for="pornhub_username">PornHub username (favourites)</label>
+                        <input type="text" id="pornhub_username" name="pornhub_username" value="{{ settings.pornhub_username | e }}" placeholder="Your PornHub profile name">
+                        <p class="help-text">Used to build your favourites URL when not scraping from the logged-in browser session.</p>
+                    </div>
+
+                    <div class="form-group">
                         <label for="video_quality">Video quality preset (yt-dlp)</label>
                         <select id="video_quality" name="video_quality">
                             <option value="720" {% if settings.video_quality == '720' %}selected{% endif %}>≤ 720p (default)</option>
@@ -97,6 +103,11 @@
                         <div class="form-group">
                             <label for="pixiv_deepl_api_key">DeepL API key (optional)</label>
                             <input type="password" id="pixiv_deepl_api_key" name="pixiv_deepl_api_key" value="" autocomplete="off" placeholder="{% if settings.pixiv_deepl_api_key %}Leave blank to keep saved key{% else %}(empty = Google){% endif %}">
+                        </div>
+                        <div class="form-group checkbox-group">
+                            <input type="hidden" name="pixiv_deepl_api_key_clear" value="off">
+                            <input type="checkbox" id="pixiv_deepl_api_key_clear" name="pixiv_deepl_api_key_clear" value="on">
+                            <label for="pixiv_deepl_api_key_clear">Clear saved DeepL API key</label>
                         </div>
                         <div class="form-group">
                             <label for="pixiv_translate_delay_seconds">Delay between translation requests (seconds)</label>

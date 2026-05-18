@@ -11,6 +11,8 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
+
+from duplicate_finder import _is_system_path
 from typing import FrozenSet, Optional, Set
 from urllib.parse import parse_qs, urlparse
 
@@ -97,6 +99,9 @@ def resolve_optional_library_directory(
 
     if not candidate.is_dir():
         raise ValueError("Existing-library path is not a directory or does not exist.")
+
+    if _is_system_path(candidate):
+        raise ValueError("System directories cannot be used as an existing-library folder.")
 
     return candidate
 
@@ -195,7 +200,8 @@ def matches_existing_library(title: str, library_norms: FrozenSet[str]) -> bool:
 
     for ln in library_norms:
         if len(nt) >= MIN_SUBSTRING_LEN and len(ln) >= MIN_SUBSTRING_LEN:
-            if nt in ln or ln in nt:
+            shorter, longer = (nt, ln) if len(nt) <= len(ln) else (ln, nt)
+            if shorter in longer and len(shorter) / len(longer) >= 0.92:
                 return True
 
     return False

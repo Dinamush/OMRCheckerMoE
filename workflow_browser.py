@@ -21,7 +21,8 @@ logger = logging.getLogger(__name__)
 
 
 def scrape_headless_enabled(form_headless: bool, cfg: AppSettings) -> bool:
-    return bool(form_headless or cfg.headless_scraping)
+    """Per-download checkbox on the home form overrides Settings (no OR with global default)."""
+    return bool(form_headless)
 
 
 def site_profile_dir(site: str, cfg: AppSettings):

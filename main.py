@@ -18,7 +18,7 @@ import subprocess
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Set
+from typing import Any, Callable, Dict, List, Optional, Tuple, Set
 from fastapi import FastAPI, Request, BackgroundTasks, Form, HTTPException, Query
 from fastapi.responses import RedirectResponse, FileResponse, Response, PlainTextResponse
 from pydantic import BaseModel, Field
@@ -46,6 +46,7 @@ from version import __version__
 from duplicate_finder import (
     resolve_scan_directory,
     resolve_deletable_file,
+    resolve_deletable_file_under_root,
     iter_files,
     cluster_duplicates,
     build_groups_payload,
@@ -117,6 +118,35 @@ def _clear_cancel_event(session_id: str) -> None:
         _cancel_events.pop(session_id, None)
 
 
+_SESSION_ID_RE = re.compile(
+    r"^(?:\d{8,20}|[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$",
+    re.I,
+)
+_last_duplicate_scan_root: Optional[Path] = None
+_duplicate_scan_lock = _threading.Lock()
+
+
+def _validate_session_id(session_id: str) -> str:
+    sid = (session_id or "").strip()
+    if not sid or ".." in sid or "/" in sid or "\\" in sid:
+        raise HTTPException(status_code=400, detail="Invalid session id.")
+    if not _SESSION_ID_RE.match(sid):
+        raise HTTPException(status_code=400, detail="Invalid session id.")
+    return sid
+
+
+def _resolve_under_log_dir(relative_name: str) -> Path:
+    log_root = Path(LOG_DIR).resolve()
+    if ".." in relative_name.replace("\\", "/").split("/"):
+        raise HTTPException(status_code=400, detail="Invalid session id.")
+    candidate = (log_root / relative_name).resolve()
+    try:
+        candidate.relative_to(log_root)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid session id.")
+    return candidate
+
+
 _watcher_shutdown = _threading.Event()
 
 
@@ -175,8 +205,17 @@ templates.env.globals["app_version"] = __version__
 templates.env.globals["load_app_settings"] = lambda: asdict(load_settings())
 
 
-def _index_template_ctx(*, form_error: Optional[str] = None) -> Dict[str, Any]:
-    return {"form_error": form_error, "settings": asdict(load_settings())}
+def _index_template_ctx(
+    *,
+    form_error: Optional[str] = None,
+    form_values: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    ctx: Dict[str, Any] = {
+        "form_error": form_error,
+        "settings": asdict(load_settings()),
+        "form": form_values or {},
+    }
+    return ctx
 app.mount("/static", StaticFiles(directory=str(RESOURCE_ROOT / "static")), name="static")
 
 
@@ -564,6 +603,20 @@ def scroll_to_bottom(driver, pause_time: float = 2.0) -> None:
     except Exception as e:
         logging.error(f"Error during scrolling: {e}")
 
+def find_xhamster_next_page_url(driver) -> Optional[str]:
+    """Return the href of xHamster's Next pagination link when present."""
+    try:
+        next_link = driver.find_element(By.LINK_TEXT, "Next")
+        href = (next_link.get_attribute("href") or "").strip()
+        if href and next_link.is_displayed():
+            return href
+    except NoSuchElementException:
+        pass
+    except Exception as e:
+        logging.debug("find_xhamster_next_page_url: %s", e)
+    return None
+
+
 def try_click_next_button(driver) -> bool:
     """Click the next-page button if one is visible and enabled.
 
@@ -770,6 +823,7 @@ def download_video_ytdlp(
     session_id: str,
     *,
     settings_snapshot: Optional[AppSettings] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> None:
     """Download video using yt-dlp with progress tracking and authentication."""
     cfg = settings_snapshot or load_settings()
@@ -805,6 +859,8 @@ def download_video_ytdlp(
         ydl_opts["proxy"] = pv
 
     def progress_hook(d):
+        if cancel_check and cancel_check():
+            raise InterruptedError("Download cancelled by user")
         if d["status"] == "downloading":
             if "total_bytes" in d and d["total_bytes"]:
                 percent = (d["downloaded_bytes"] / d["total_bytes"]) * 100
@@ -815,6 +871,8 @@ def download_video_ytdlp(
     ydl_opts["progress_hooks"] = [progress_hook]
 
     try:
+        if cancel_check and cancel_check():
+            raise InterruptedError("Download cancelled by user")
         logging.info(f"Downloading video with authentication: {video_url}")
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([video_url])
@@ -835,6 +893,9 @@ def download_video_ytdlp(
             tracker.fail_download(video_url, "Downloaded file not found")
             logging.error(f"No file found for {title}")
 
+    except InterruptedError:
+        tracker.fail_download(video_url, "Download cancelled by user")
+        logging.info("Cancelled yt-dlp download: %s", video_url)
     except Exception as e:
         tracker.fail_download(video_url, str(e))
         logging.error(f"Exception downloading {video_url}: {e}")
@@ -847,6 +908,7 @@ def download_video_direct(
     session_id: str,
     *,
     settings_snapshot: Optional[AppSettings] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> None:
     """Download video using yt-dlp without cookies with progress tracking."""
     cfg = settings_snapshot or load_settings()
@@ -880,6 +942,8 @@ def download_video_direct(
         ydl_opts["proxy"] = pv
 
     def progress_hook(d):
+        if cancel_check and cancel_check():
+            raise InterruptedError("Download cancelled by user")
         if d["status"] == "downloading":
             if "total_bytes" in d and d["total_bytes"]:
                 percent = (d["downloaded_bytes"] / d["total_bytes"]) * 100
@@ -890,6 +954,8 @@ def download_video_direct(
     ydl_opts["progress_hooks"] = [progress_hook]
 
     try:
+        if cancel_check and cancel_check():
+            raise InterruptedError("Download cancelled by user")
         logging.info(f"Downloading xHamster video: {video_url}")
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([video_url])
@@ -910,6 +976,9 @@ def download_video_direct(
             tracker.fail_download(video_url, "Downloaded file not found")
             logging.error(f"No file found for {title}")
 
+    except InterruptedError:
+        tracker.fail_download(video_url, "Download cancelled by user")
+        logging.info("Cancelled yt-dlp download: %s", video_url)
     except Exception as e:
         tracker.fail_download(video_url, str(e))
         logging.error(f"Exception downloading {video_url}: {e}")
@@ -923,6 +992,7 @@ def download_videos_parallel(
     session_id: str = None,
     *,
     settings_snapshot: Optional[AppSettings] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> None:
     """Download a batch of videos in parallel and track progress.
 
@@ -955,9 +1025,13 @@ def download_videos_parallel(
         logging.info(f"Starting download of {len(video_info_list)} videos with {max_workers} workers")
 
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+        cancelled = False
         try:
             futures = []
             for video_url, title in video_info_list:
+                if cancel_check and cancel_check():
+                    cancelled = True
+                    break
                 apply_delay(cfg.download_delay_seconds, cfg.delay_variance_seconds)
                 if cookie_file:
                     futures.append(
@@ -969,6 +1043,7 @@ def download_videos_parallel(
                             download_dir,
                             session_id,
                             settings_snapshot=cfg,
+                            cancel_check=cancel_check,
                         )
                     )
                 else:
@@ -980,10 +1055,14 @@ def download_videos_parallel(
                             download_dir,
                             session_id,
                             settings_snapshot=cfg,
+                            cancel_check=cancel_check,
                         )
                     )
 
             for future in concurrent.futures.as_completed(futures):
+                if cancel_check and cancel_check():
+                    cancelled = True
+                    break
                 try:
                     future.result(timeout=3600)
                 except concurrent.futures.TimeoutError:
@@ -991,7 +1070,9 @@ def download_videos_parallel(
                 except Exception as e:
                     logging.error(f"Error in video download: {e}")
         finally:
-            executor.shutdown(wait=False, cancel_futures=True)
+            if cancelled:
+                tracker.fail_nonterminal("Download cancelled by user.")
+            executor.shutdown(wait=cancelled, cancel_futures=cancelled)
 
         logging.info("Parallel download workers finished for this batch.")
 
@@ -1175,7 +1256,8 @@ def _history_from_progress_files(registry: Dict[str, dict]) -> Dict[str, dict]:
 
 def _read_progress_json(session_id: str) -> Optional[dict]:
     """Read the persisted progress JSON for a session (survives cleanup_tracker)."""
-    p = Path(LOG_DIR) / f"progress_{session_id}.json"
+    sid = _validate_session_id(session_id)
+    p = _resolve_under_log_dir(f"progress_{sid}.json")
     if not p.is_file():
         return None
     try:
@@ -1257,6 +1339,8 @@ def pornhub_workflow(
     driver = None
     ok = False
     on_favorites_page = False
+    cancelled_run = False
+    cancel_check = (lambda: bool(cancel_event and cancel_event.is_set())) if cancel_event else None
 
     try:
         use_embedded = webview_login_bridge.is_active() and webview_login_bridge.embedded_login_env_enabled()
@@ -1268,7 +1352,26 @@ def pornhub_workflow(
                 "favourites and video pages (ph.py algorithm)."
             )
 
-        if use_embedded:
+        cookies_ok_embedded, cookie_msg_embedded = workflow_browser.cookies_valid_for_site(
+            "pornhub", cookie_file, cfg
+        )
+        if use_embedded and cookies_ok_embedded:
+            logging.info("PornHub embedded path: reusing saved cookies — %s", cookie_msg_embedded)
+            workflow_heuristics.advance(session_id, "cookie_reuse")
+            workflow_heuristics.set_detail(session_id, cookie_msg_embedded)
+            driver = _pornhub_open_chrome_driver(cfg)
+            load_netscape_cookies_into_driver(driver, cookie_file, ph_landing)
+            driver_ok, driver_msg = pornhub_ph.check_cookie_health_with_driver(
+                driver, probe_url=playlist_url
+            )
+            if driver_ok:
+                playlist_url = _pornhub_goto_favorites(driver, playlist_url, cfg=cfg)
+                on_favorites_page = True
+            else:
+                workflow_browser.quit_driver(driver)
+                driver = None
+                use_embedded = True
+        if use_embedded and not on_favorites_page:
             workflow_heuristics.advance(session_id, "site_login")
             webview_login_bridge.begin_embedded_login(
                 ph_landing,
@@ -1282,7 +1385,7 @@ def pornhub_workflow(
             load_netscape_cookies_into_driver(driver, cookie_file, ph_landing)
             playlist_url = _pornhub_goto_favorites(driver, playlist_url, cfg=cfg)
             on_favorites_page = True
-        else:
+        elif not use_embedded:
             workflow_heuristics.advance(session_id, "cookie_reuse")
             cookies_ok, cookie_msg = workflow_browser.cookies_valid_for_site(
                 "pornhub", cookie_file, cfg
@@ -1441,6 +1544,7 @@ def pornhub_workflow(
                 if cancel_event and cancel_event.is_set():
                     logging.info("Cancellation requested before PH download batch — stopping.")
                     workflow_heuristics.mark_error(session_id, "Download cancelled by user.")
+                    cancelled_run = True
                     return
                 tracker.add_urls(
                     [pair[0] for pair in to_download],
@@ -1456,7 +1560,11 @@ def pornhub_workflow(
                     proxy_url=cfg.proxy_url,
                     skip_if_exists=cfg.skip_existing_in_download_dir,
                     yt_dlp_retries=cfg.yt_dlp_retries,
+                    yt_dlp_format=yt_dlp_format_string(cfg),
+                    cancel_check=cancel_check,
                 )
+                if cancel_event and cancel_event.is_set():
+                    cancelled_run = True
             else:
                 logging.info("All favorites matched files in the library folder; nothing to download.")
         else:
@@ -1466,6 +1574,7 @@ def pornhub_workflow(
             if cancel_event and cancel_event.is_set():
                 logging.info("Cancellation requested before PH download — stopping.")
                 workflow_heuristics.mark_error(session_id, "Download cancelled by user.")
+                cancelled_run = True
                 return
             pornhub_ph.download_pornhub_videos_parallel(
                 video_urls,
@@ -1477,9 +1586,14 @@ def pornhub_workflow(
                 proxy_url=cfg.proxy_url,
                 skip_if_exists=cfg.skip_existing_in_download_dir,
                 yt_dlp_retries=cfg.yt_dlp_retries,
+                yt_dlp_format=yt_dlp_format_string(cfg),
+                cancel_check=cancel_check,
             )
+            if cancel_event and cancel_event.is_set():
+                cancelled_run = True
 
-        ok = True
+        if not cancelled_run:
+            ok = True
 
     except Exception as e:
         logging.critical(f"Error in PornHub workflow: {e}")
@@ -1529,6 +1643,8 @@ def pixiv_workflow(
     session_id: str,
     *,
     pixiv_single_artwork: bool = False,
+    library_dir: Optional[str] = None,
+    library_recursive: bool = False,
     cancel_event: Optional[_threading.Event] = None,
     works_override: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
@@ -1709,6 +1825,29 @@ def pixiv_workflow(
                 return
             logging.info("Collected %s Pixiv bookmark works", len(works))
 
+        if library_dir:
+            try:
+                lib_index = build_library_index(
+                    Path(library_dir), recursive=library_recursive
+                )
+                before = len(works)
+                works = [
+                    w
+                    for w in works
+                    if not matches_existing_library(
+                        str(w.get("title") or w.get("illustTitle") or ""),
+                        lib_index.normalized_titles,
+                    )
+                ]
+                skipped = before - len(works)
+                if skipped:
+                    logging.info(
+                        "Pixiv library skip: %s work(s) already matched library titles",
+                        skipped,
+                    )
+            except Exception as e:
+                logging.warning("Pixiv library index failed: %s", e)
+
         workflow_heuristics.set_detail(
             session_id, f"Downloading {len(works)} work(s)…",
         )
@@ -1764,6 +1903,10 @@ def pixiv_workflow(
             maybe_notify_complete("SHUCK3R", "Pixiv download session finished.", cfg)
         else:
             _record_failed_session_history(session_id, "pixiv")
+        try:
+            cleanup_tracker(session_id)
+        except Exception as e:
+            logging.warning("Pixiv tracker cleanup: %s", e)
         _clear_cancel_event(session_id)
 
 
@@ -1822,6 +1965,8 @@ def xhamster_workflow(
     cookie_file = _workflow_cookie_file("xhamster", session_id, cfg)
     driver = None
     ok = False
+    cancelled_run = False
+    cancel_check = (lambda: bool(cancel_event and cancel_event.is_set())) if cancel_event else None
     try:
         login_url = "https://xhamster.com/login"
         use_embedded = webview_login_bridge.is_active() and webview_login_bridge.embedded_login_env_enabled()
@@ -1833,7 +1978,21 @@ def xhamster_workflow(
         )
         if not use_embedded:
             workflow_heuristics.set_detail(session_id, cookie_msg)
-        if use_embedded:
+        if use_embedded and cookies_ok:
+            logging.info("xHamster embedded path: reusing saved cookies — %s", cookie_msg)
+            workflow_heuristics.advance(session_id, "cookie_reuse")
+            workflow_heuristics.set_detail(session_id, cookie_msg)
+            if scrape_headless:
+                workflow_heuristics.advance(session_id, "headless_scrape")
+            workflow_heuristics.advance(session_id, "browser_start")
+            driver = workflow_browser.create_driver(
+                "xhamster", cfg, headless=scrape_headless, purpose="scrape"
+            )
+            workflow_browser.apply_flaresolverr_preflight(
+                driver, "https://xhamster.com/", cfg
+            )
+            load_netscape_cookies_into_driver(driver, cookie_file, "https://xhamster.com/")
+        elif use_embedded:
             workflow_heuristics.advance(session_id, "site_login")
             webview_login_bridge.begin_embedded_login(
                 login_url,
@@ -1952,6 +2111,7 @@ def xhamster_workflow(
                         cookie_file=cookie_file,
                         session_id=session_id,
                         settings_snapshot=cfg,
+                        cancel_check=cancel_check,
                     )
                     total_dn_retry += len(vids_td)
                 time.sleep(2)
@@ -1961,6 +2121,7 @@ def xhamster_workflow(
                         "Cancellation requested between xHamster retry batches — stopping."
                     )
                     workflow_heuristics.mark_error(session_id, "Download cancelled by user.")
+                    cancelled_run = True
                     break
             logging.info(
                 "=== RETRY PHASE COMPLETE: processed %s items (successful downloads counted per batch)",
@@ -1988,42 +2149,16 @@ def xhamster_workflow(
                 page_number = 1
                 consecutive_empty_pages = 0
                 max_consecutive_empty = 3
+                current_page_url = favorites_url
 
-                while True:
-                    # Try different pagination approaches for xHamster
-                    if page_number == 1:
-                        current_page_url = favorites_url
-                        html_content, driver = fetch_html_selenium(
-                            driver,
-                            current_page_url,
-                            session_id=session_id,
-                            site="xhamster",
-                            cfg=cfg,
-                        )
-                    else:
-                        # xHamster uses /page_number format for pagination
-                        if page_number == 2:
-                            current_page_url = f"{favorites_url}/2"
-                        else:
-                            current_page_url = f"{favorites_url}/{page_number}"
-
-                        html_content, driver = fetch_html_selenium(
-                            driver,
-                            current_page_url,
-                            session_id=session_id,
-                            site="xhamster",
-                            cfg=cfg,
-                        )
-
-                        # If URL pagination didn't work, try clicking next button
-                        if not html_content:
-                            logging.info(f"URL pagination didn't work for page {page_number}, trying next button...")
-                            if try_click_next_button(driver):
-                                html_content = driver.page_source
-                                current_page_url = driver.current_url
-                            else:
-                                logging.info(f"No next button found, stopping pagination")
-                                break
+                while current_page_url:
+                    html_content, driver = fetch_html_selenium(
+                        driver,
+                        current_page_url,
+                        session_id=session_id,
+                        site="xhamster",
+                        cfg=cfg,
+                    )
 
                     logging.info(f"Collecting URLs from page {page_number}: {current_page_url}")
 
@@ -2088,11 +2223,20 @@ def xhamster_workflow(
                         session_id,
                         f"Favorites page {page_number} · {len(all_video_links)} links collected so far",
                     )
+
+                    next_page_url = find_xhamster_next_page_url(driver)
+                    if not next_page_url and try_click_next_button(driver):
+                        next_page_url = (driver.current_url or "").strip()
+                    if not next_page_url or next_page_url == current_page_url:
+                        logging.info("No further favourites pages (Next link absent or unchanged).")
+                        break
+                    current_page_url = next_page_url
                     page_number += 1
 
                     if cancel_event and cancel_event.is_set():
                         logging.info("Cancellation requested during page collection - stopping.")
                         workflow_heuristics.mark_error(session_id, "Download cancelled by user.")
+                        cancelled_run = True
                         return
 
                     # Safety limit to prevent infinite loops
@@ -2189,6 +2333,7 @@ def xhamster_workflow(
                         cookie_file=cookie_file,
                         session_id=session_id,
                         settings_snapshot=cfg,
+                        cancel_check=cancel_check,
                     )
                     total_downloaded += len(videos_to_download)
                 
@@ -2199,13 +2344,15 @@ def xhamster_workflow(
                 if cancel_event and cancel_event.is_set():
                     logging.info("Cancellation requested between xHamster batches \u2014 stopping.")
                     workflow_heuristics.mark_error(session_id, "Download cancelled by user.")
+                    cancelled_run = True
                     break
             
             logging.info(f"=== PHASE 2 COMPLETE: Downloaded {total_downloaded} videos ===")
             logging.info(f"xHamster workflow completed. Total videos processed: {total_downloaded}")
     
             workflow_heuristics.set_detail(session_id, None)
-        ok = True
+        if not cancelled_run:
+            ok = True
 
     except Exception as e:
         logging.critical(f"Error in xHamster workflow: {e}")
@@ -2334,8 +2481,11 @@ async def settings_save(request: Request):
         or "en"
     )
     new_deepl = str(fd.get("pixiv_deepl_api_key") or "").strip()
-    if new_deepl:
+    if _combo_on("pixiv_deepl_api_key_clear"):
+        cfg.pixiv_deepl_api_key = ""
+    elif new_deepl:
         cfg.pixiv_deepl_api_key = new_deepl
+    cfg.pornhub_username = str(fd.get("pornhub_username") or "").strip()
     cfg.pixiv_translate_delay_seconds = max(
         0.0, _pf("pixiv_translate_delay_seconds", cfg.pixiv_translate_delay_seconds)
     )
@@ -2393,7 +2543,18 @@ def handle_form(
         return templates.TemplateResponse(
             request,
             "index.html",
-            _index_template_ctx(form_error=str(e)),
+            _index_template_ctx(
+                form_error=str(e),
+                form_values={
+                    "site": site,
+                    "headless": headless_bool,
+                    "existing_library_dir": existing_library_dir,
+                    "library_recursive": library_recursive_bool,
+                    "pixiv_user_id": pixiv_user_id,
+                    "pixiv_bookmarks": pixiv_bookmarks,
+                    "pixiv_single_artwork": pixiv_single,
+                },
+            ),
             status_code=400,
         )
 
@@ -2439,6 +2600,8 @@ def handle_form(
             log_file,
             session_id,
             pixiv_single_artwork=pixiv_single,
+            library_dir=library_dir_arg,
+            library_recursive=library_recursive_bool,
             cancel_event=cancel_ev,
         )
     else:
@@ -2450,6 +2613,15 @@ def handle_form(
                     f'Unknown site "{site}". Choose PornHub, xHamster, or Pixiv. '
                     "If Pixiv is missing from the form, restart the app from the latest code."
                 ),
+                form_values={
+                    "site": site,
+                    "headless": headless_bool,
+                    "existing_library_dir": existing_library_dir,
+                    "library_recursive": library_recursive_bool,
+                    "pixiv_user_id": pixiv_user_id,
+                    "pixiv_bookmarks": pixiv_bookmarks,
+                    "pixiv_single_artwork": pixiv_single,
+                },
             ),
             status_code=400,
         )
@@ -2569,7 +2741,8 @@ def _read_log_tail_text(log_path: Path, *, lines: int, max_bytes: int = 56_000) 
 @app.get("/download/log/{session_id}/tail", response_class=PlainTextResponse)
 def get_log_tail(session_id: str, lines: int = Query(48, ge=8, le=200)):
     """Last lines of the session log for the live dashboard (plain text)."""
-    log_file = Path(LOG_DIR) / f"video_downloader_{session_id}.log"
+    sid = _validate_session_id(session_id)
+    log_file = _resolve_under_log_dir(f"video_downloader_{sid}.log")
     if not log_file.is_file():
         raise HTTPException(status_code=404, detail="Log file not found.")
     body = _read_log_tail_text(log_file, lines=lines)
@@ -2591,21 +2764,21 @@ def get_downloaded_file(file_path: str):
 @app.get("/progress/{session_id}")
 def get_progress(session_id: str):
     """JSON snapshot of progress (machine-readable). Prefer /api/progress for new integrations."""
-    try:
-        tracker = get_tracker(session_id)
-        return tracker.get_progress()
-    except Exception as e:
-        return {"error": f"Session not found: {e}"}
+    sid = _validate_session_id(session_id)
+    pf = _resolve_under_log_dir(f"progress_{sid}.json")
+    if not pf.is_file():
+        raise HTTPException(status_code=404, detail="Session not found.")
+    return get_tracker(sid).get_progress()
 
 
 @app.get("/api/progress/{session_id}")
 def api_get_progress(session_id: str):
     """Same payload as /progress/{session_id}; use this path in docs and UI so users are not sent here by mistake."""
-    try:
-        tracker = get_tracker(session_id)
-        return tracker.get_progress()
-    except Exception as e:
-        return {"error": f"Session not found: {e}"}
+    sid = _validate_session_id(session_id)
+    pf = _resolve_under_log_dir(f"progress_{sid}.json")
+    if not pf.is_file():
+        raise HTTPException(status_code=404, detail="Session not found.")
+    return get_tracker(sid).get_progress()
 
 @app.get("/progress/{session_id}/summary")
 def get_progress_summary(session_id: str):
@@ -2624,11 +2797,15 @@ def get_progress_summary(session_id: str):
 @app.get("/progress/{session_id}/json")
 def get_progress_json(session_id: str):
     """Get progress as JSON file."""
-    progress_file = os.path.join(LOG_DIR, f"progress_{session_id}.json")
-    if os.path.exists(progress_file):
-        return FileResponse(path=progress_file, filename=f"progress_{session_id}.json", media_type='application/json')
-    else:
-        return {"error": "Progress file not found."}
+    sid = _validate_session_id(session_id)
+    progress_file = _resolve_under_log_dir(f"progress_{sid}.json")
+    if progress_file.is_file():
+        return FileResponse(
+            path=str(progress_file),
+            filename=f"progress_{sid}.json",
+            media_type="application/json",
+        )
+    raise HTTPException(status_code=404, detail="Progress file not found.")
 
 
 @app.get("/duplicates")
@@ -2651,6 +2828,9 @@ def api_duplicates_scan(body: DuplicateScanBody):
         root = resolve_scan_directory(body.directory or "", USER_DATA_DIR, "downloads")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    global _last_duplicate_scan_root
+    with _duplicate_scan_lock:
+        _last_duplicate_scan_root = root.resolve()
     files = iter_files(root, body.recursive)
     groups = cluster_duplicates(files, threshold=body.threshold)
     payload = build_groups_payload(files, groups)
@@ -2665,8 +2845,15 @@ def api_duplicates_scan(body: DuplicateScanBody):
 @app.get("/api/duplicates/preview-file")
 def api_duplicates_preview_file(path: str = Query(..., description="Absolute path to a video file")):
     """Stream a video file for HTML5 preview thumbnails (validated path, video extensions only)."""
+    with _duplicate_scan_lock:
+        scan_root = _last_duplicate_scan_root
+    if scan_root is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Run a duplicate scan first; preview is limited to the last scanned folder.",
+        )
     try:
-        fp = resolve_deletable_file(path)
+        fp = resolve_deletable_file_under_root(path, scan_root)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     ext = fp.suffix.lower()
@@ -2681,11 +2868,18 @@ def api_duplicates_preview_file(path: str = Query(..., description="Absolute pat
 
 @app.post("/api/duplicates/delete")
 def api_duplicates_delete(body: DuplicateDeleteBody):
+    with _duplicate_scan_lock:
+        scan_root = _last_duplicate_scan_root
+    if scan_root is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Run a duplicate scan first; delete is limited to the last scanned folder.",
+        )
     deleted: List[str] = []
     errors: List[dict] = []
     for path_str in body.paths:
         try:
-            fp = resolve_deletable_file(path_str)
+            fp = resolve_deletable_file_under_root(path_str, scan_root)
             fp.unlink()
             deleted.append(str(fp))
         except ValueError as e:
@@ -2880,9 +3074,26 @@ def api_queue_resume(snapshot_session_id: str, background_tasks: BackgroundTasks
             cancel_event=cancel_ev,
         )
     else:
-        raise HTTPException(
-            status_code=400,
-            detail="Queue resume for Pixiv is not supported yet; start a new download.",
+        resume_works: List[Dict[str, Any]] = []
+        for u in urls:
+            iid = pixiv_ph.parse_illust_id(str(u))
+            if iid:
+                resume_works.append({"id": iid, "illustId": iid, "title": iid})
+        if not resume_works:
+            raise HTTPException(
+                status_code=400,
+                detail="Snapshot has no valid Pixiv artwork URLs to resume.",
+            )
+        background_tasks.add_task(
+            pixiv_workflow,
+            "",
+            "show",
+            dl_arg,
+            headless,
+            log_file,
+            new_session_id,
+            cancel_event=cancel_ev,
+            works_override=resume_works,
         )
 
     workflow_heuristics.register_session(new_session_id, site, embedded=False)
@@ -3074,7 +3285,7 @@ if __name__ == "__main__":
 
         import uvicorn
 
-        host = os.environ.get("HAMSTER_HOST", "0.0.0.0")
+        host = os.environ.get("HAMSTER_HOST", "127.0.0.1")
         port = int(os.environ.get("HAMSTER_PORT", "8001"))
         uvicorn.run(app, host=host, port=port)
     except Exception as e:

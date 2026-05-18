@@ -179,8 +179,8 @@
 
 {% block scripts %}
     <script>
-        const sessionId = '{{ session_id }}';
-        const logTimestamp = '{{ session_id }}';
+        const sessionId = {{ session_id | tojson }};
+        const logTimestamp = {{ session_id | tojson }};
         let progressInterval;
         let logInterval;
         let lastWorkflowActiveId = null;

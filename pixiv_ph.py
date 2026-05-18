@@ -377,12 +377,15 @@ def load_session(cookie_file: str, proxy_url: str = "") -> requests.Session:
     jar.load(ignore_discard=True, ignore_expires=True)
     for c in jar:
         domain = _normalize_cookie_domain(c.name, c.domain or "")
+        d = domain.lstrip(".")
         session.cookies.set(
             c.name,
             c.value,
-            domain=domain.lstrip("."),
+            domain=d,
             path=c.path or "/",
         )
+        if c.name in _PIXIV_AUTH_NAMES:
+            session.cookies.set(c.name, c.value, domain="www.pixiv.net", path="/")
     return session
 
 
@@ -417,7 +420,13 @@ def _ajax_json(session: requests.Session, url: str, *, timeout: float = 30.0) ->
             f"Pixiv returned a challenge or login wall (HTTP {r.status_code}). "
             "Complete login in Chrome or enable FlareSolverr in Settings."
         )
-    data = r.json()
+    try:
+        data = r.json()
+    except ValueError as e:
+        raise RuntimeError(
+            f"Pixiv Ajax returned non-JSON (HTTP {r.status_code}). "
+            "Session may have expired — log in again."
+        ) from e
     if data.get("error"):
         raise RuntimeError(data.get("message") or "Pixiv Ajax error")
     return data
@@ -516,7 +525,7 @@ def collect_bookmark_works(
         total = None
         while True:
             if cancel_check and cancel_check():
-                break
+                return out
             works, total = fetch_bookmarks_page(
                 session, user_id, offset=offset, limit=BOOKMARK_PAGE_LIMIT, rest=rest
             )
@@ -779,6 +788,7 @@ def download_image(
     url: str,
     dest: Path,
     *,
+    referer: str = PIXIV_REFERER,
     skip_if_exists: bool = True,
     cancel_check: Optional[Callable[[], bool]] = None,
 ) -> bool:
@@ -786,6 +796,7 @@ def download_image(
         session,
         url,
         dest,
+        referer=referer,
         skip_if_exists=skip_if_exists,
         cancel_check=cancel_check,
     )
@@ -1020,7 +1031,7 @@ def download_ugoira_for_illust(
 
     zip_ready = skip_if_exists and want_zip and _dest_is_complete(zip_dest)
     if want_zip and not zip_ready:
-        if download_binary(
+        if not download_binary(
             session,
             zip_url,
             zip_dest,
@@ -1028,7 +1039,8 @@ def download_ugoira_for_illust(
             skip_if_exists=skip_if_exists,
             cancel_check=cancel_check,
         ):
-            saved.append(zip_dest)
+            raise RuntimeError(f"Ugoira ZIP download failed for {illust_id}")
+        saved.append(zip_dest)
     elif want_zip and zip_dest.is_file():
         saved.append(zip_dest)
 
@@ -1039,14 +1051,17 @@ def download_ugoira_for_illust(
         else:
             try:
                 if not zip_dest.is_file() or zip_dest.stat().st_size == 0:
-                    download_binary(
+                    if not download_binary(
                         session,
                         zip_url,
                         zip_dest,
                         referer=referer,
                         skip_if_exists=False,
                         cancel_check=cancel_check,
-                    )
+                    ):
+                        raise RuntimeError(
+                            f"Ugoira ZIP download failed for {illust_id} (GIF conversion needs frames)"
+                        )
                 if ugoira_zip_to_gif(zip_dest, meta, gif_dest):
                     saved.append(gif_dest)
                 elif not want_zip:
@@ -1216,16 +1231,24 @@ def download_bookmark_works(
                         ws,
                         img_url,
                         dest,
+                        referer=illust_artwork_referer(illust_id),
                         skip_if_exists=skip_if_exists,
                         cancel_check=cancel_check,
                     ):
                         saved.append(dest)
+                if urls and len(saved) < len(urls):
+                    tracker.fail_download(
+                        page_url,
+                        f"Incomplete download: {len(saved)}/{len(urls)} pages",
+                    )
+                    return
             if saved:
                 total_sz = sum(p.stat().st_size for p in saved)
                 tracker.complete_download(page_url, str(saved[0]), total_sz)
             else:
                 tracker.fail_download(page_url, "All pages failed or empty files")
         except DownloadCancelled:
+            tracker.fail_download(page_url, "Cancelled by user")
             raise
         except Exception as e:
             logger.warning("Pixiv download failed for %s: %s", illust_id, e)
@@ -1252,6 +1275,6 @@ def download_bookmark_works(
             except Exception as e:
                 logger.error("Pixiv worker error: %s", e)
     finally:
-        executor.shutdown(wait=False, cancel_futures=True)
+        executor.shutdown(wait=True, cancel_futures=True)
 
     return cancelled or bool(cancel_check and cancel_check())
