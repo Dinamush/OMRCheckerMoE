@@ -60,6 +60,15 @@
 {% block scripts %}
 <script>
 (function () {
+  function escapeHtml(s) {
+    return String(s ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
   function fmtDuration(s) {
     s = s || 0;
     if (s < 60) return s + 's';
@@ -98,19 +107,19 @@
       const st = (s.status || 'completed').toLowerCase();
       const failedCls = s.failed > 0 ? ' badge-failed' : ' badge-ok';
       const retryBtn = st === 'completed' && s.failed > 0 && (s.site === 'pornhub' || s.site === 'xhamster')
-        ? `<button class="retry-btn" onclick="retrySession('${s.session_id}','${s.site}')">Retry failed</button>`
+        ? `<button class="retry-btn" onclick="retrySession('${escapeHtml(s.session_id)}','${escapeHtml(s.site)}')">Retry failed</button>`
         : '';
       const viewBtn = (st === 'running' || st === 'failed')
-        ? `<a class="view-btn" href="${progressUrl(s)}">View progress</a>`
+        ? `<a class="view-btn" href="${escapeHtml(progressUrl(s))}">View progress</a>`
         : '';
       const err = s.error_message
-        ? `<div class="err-hint" title="${String(s.error_message).replace(/"/g, '&quot;')}">${s.error_message}</div>`
+        ? `<div class="err-hint" title="${escapeHtml(s.error_message)}">${escapeHtml(s.error_message)}</div>`
         : '';
-      const when = (s.updated_ts || s.ts || '').replace('T', ' ');
+      const when = escapeHtml((s.updated_ts || s.ts || '').replace('T', ' '));
       return `<tr>
         <td>${when}</td>
         <td>${statusBadge(s.status)}${err}</td>
-        <td>${s.site}</td>
+        <td>${escapeHtml(s.site)}</td>
         <td class="num">${s.total ?? 0}</td>
         <td class="num badge-ok">${s.downloaded ?? 0}</td>
         <td class="num">${s.skipped ?? 0}</td>
@@ -141,7 +150,7 @@
 
   window.retrySession = function (sessionId, site) {
     if (!confirm('Start a new download session retrying only the failed URLs from this session?')) return;
-    fetch(`/api/session/${sessionId}/retry-failed?site=${site}`, { method: 'POST' })
+    fetch(`/api/session/${encodeURIComponent(sessionId)}/retry-failed?site=${encodeURIComponent(site)}`, { method: 'POST' })
       .then(r => r.json())
       .then(d => {
         if (d.retry_session_id) {

@@ -28,6 +28,7 @@ class DownloadStatus(str, Enum):
 
 _TERMINAL_STATUSES: frozenset[DownloadStatus] = frozenset({
     DownloadStatus.COMPLETED,
+    DownloadStatus.FAILED,
     DownloadStatus.SKIPPED,
     DownloadStatus.NOT_FOUND,
 })

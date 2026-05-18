@@ -17,7 +17,7 @@ import sys
 import time
 import concurrent.futures
 from http.cookiejar import MozillaCookieJar
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
 import requests
@@ -182,6 +182,13 @@ def collect_favorites_urls_requests(
             r.raise_for_status()
         except Exception as e:
             logger.warning("Favourites page %s failed: %s", page, e)
+            break
+        # PornHub returns HTTP 200 even for login redirects — detect and bail out.
+        final_url = (getattr(r, 'url', '') or '').lower()
+        if 'login' in final_url or 'name="username"' in r.text:
+            logger.error(
+                "PornHub session expired — got login page on page %s (URL: %s)", page, r.url
+            )
             break
         new_links = parse_video_links_pornhub(r.text, PH_BASE)
         before = len(all_urls)
@@ -363,6 +370,7 @@ def collect_favorites_urls_with_driver(
     all_urls: set[str] = set()
     load_more_attempts = 0
     clicked_load_more = False
+    blank_after_click = 0  # consecutive zero-new-URL iterations after a Load More click
 
     while load_more_attempts < max_load_more:
         scroll_to_bottom_pornhub(driver, pause_time=2.0)
@@ -376,13 +384,30 @@ def collect_favorites_urls_with_driver(
         logger.info("PornHub favourites scrape: total %s URLs (+%s this pass)", len(all_urls), added)
 
         if clicked_load_more and added == 0:
-            logger.info("No new videos after last Load More; finished.")
-            break
+            # BUG 4 fix: allow one extra iteration in case the AJAX response was still
+            # loading when we read page_source (slow network / CDN lag after click).
+            blank_after_click += 1
+            if blank_after_click >= 2:
+                logger.info("No new videos after Load More (2 checks); finished.")
+                break
+            logger.info("No new URLs yet after Load More click — waiting one more cycle…")
+            time.sleep(3)
+            continue
+        else:
+            blank_after_click = 0
 
         clicked_load_more = try_click_load_more(driver)
         if not clicked_load_more:
-            logger.info("No Load More button; finished collecting favourites.")
-            break
+            # BUG 1 fix: on the very first iteration the #moreDataBtn may not have
+            # rendered yet (lazy-loaded JS section). Give it a brief extra wait and
+            # retry once before concluding there are no more pages.
+            if load_more_attempts == 0:
+                logger.info("No Load More button on first check — retrying after short wait…")
+                time.sleep(2.5)
+                clicked_load_more = try_click_load_more(driver)
+            if not clicked_load_more:
+                logger.info("No Load More button; finished collecting favourites.")
+                break
         load_more_attempts += 1
         logger.info("Clicked Load More (%s/%s), waiting…", load_more_attempts, max_load_more)
         time.sleep(3)
@@ -522,6 +547,31 @@ def fetch_video_title_from_page(
     return f"video_{abs(hash(video_page_url)) % 10_000_000}"
 
 
+def fetch_video_page_data(
+    cookie_file: str,
+    video_page_url: str,
+    *,
+    driver=None,
+    timeout: float = 30.0,
+    proxy_url: str = "",
+) -> Tuple[str, Optional[Tuple]]:
+    """Fetch a video page and return ``(title, extracted_tuple_or_None)``.
+
+    Returns the full ``(media_url, fmt, title, viewkey)`` tuple alongside the
+    title so callers can pass it to ``download_pornhub_video_page`` via
+    ``pre_extracted``, avoiding a second browser navigation for the same page.
+    """
+    html = _get_video_page_html(
+        video_page_url, cookie_file, driver=driver, timeout=timeout, proxy_url=proxy_url
+    )
+    if html:
+        extracted = extract_media_from_page(html, video_page_url)
+        if extracted:
+            _, _, title, _vk = extracted
+            return _sanitize_filename(title), extracted
+    return f"video_{abs(hash(video_page_url)) % 10_000_000}", None
+
+
 def _get_video_page_html(
     video_url: str,
     cookie_file: str,
@@ -624,27 +674,34 @@ def download_pornhub_video_page(
     skip_if_exists: bool = True,
     yt_dlp_retries: int = 3,
     yt_dlp_format: str = "",
+    pre_extracted: Optional[Tuple] = None,
 ) -> None:
     """
     Download one PornHub video: page URL → mediaDefinitions → file on disk.
     Integrates with progress_tracker using video_page_url as the item key.
     When driver is provided, the video page is opened in the authenticated browser
     (same approach as ph.py) so flashvars_* is always present.
+    Pass ``pre_extracted`` (from ``fetch_video_page_data``) to skip re-fetching the
+    page when it was already loaded during a prior library-compare phase.
     """
     from progress_tracker import get_tracker
 
     tracker = get_tracker(session_id)
 
-    logger.info("Opening PornHub video page for download: %s", video_page_url)
-    html = _get_video_page_html(video_page_url, cookie_file, driver=driver, proxy_url=proxy_url)
-    if not html:
-        tracker.fail_download(video_page_url, "Could not load video page")
-        return
+    if pre_extracted is not None:
+        extracted = pre_extracted
+        logger.info("Using pre-fetched page data for download: %s", video_page_url)
+    else:
+        logger.info("Opening PornHub video page for download: %s", video_page_url)
+        html = _get_video_page_html(video_page_url, cookie_file, driver=driver, proxy_url=proxy_url)
+        if not html:
+            tracker.fail_download(video_page_url, "Could not load video page")
+            return
 
-    extracted = extract_media_from_page(html, video_page_url)
-    if not extracted:
-        tracker.fail_download(video_page_url, "No flashvars / mediaDefinitions on page")
-        return
+        extracted = extract_media_from_page(html, video_page_url)
+        if not extracted:
+            tracker.fail_download(video_page_url, "No flashvars / mediaDefinitions on page")
+            return
 
     media_url, fmt, title, viewkey = extracted
     safe_title = _sanitize_filename(title)
@@ -687,6 +744,7 @@ def download_pornhub_videos_parallel(
     yt_dlp_retries: int = 3,
     yt_dlp_format: str = "",
     cancel_check: Optional[Callable[[], bool]] = None,
+    pre_extracted_map: Optional[Dict[str, Tuple]] = None,
 ) -> None:
     """Download PornHub videos from their page URLs.
 
@@ -696,6 +754,10 @@ def download_pornhub_videos_parallel(
 
     When driver is None (embedded-login mode), falls back to parallel
     requests with the Netscape cookie file.
+
+    Pass ``pre_extracted_map`` (a dict mapping URL → extracted tuple from
+    ``fetch_video_page_data``) to reuse already-fetched page data and avoid
+    navigating the browser to each page a second time.
     """
     if not video_page_urls:
         return
@@ -722,6 +784,7 @@ def download_pornhub_videos_parallel(
                 skip_if_exists=skip_if_exists,
                 yt_dlp_retries=yt_dlp_retries,
                 yt_dlp_format=yt_dlp_format,
+                pre_extracted=(pre_extracted_map or {}).get(url),
             )
         logger.info("PornHub browser-mode download batch finished.")
         return

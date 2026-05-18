@@ -50,6 +50,7 @@ from duplicate_finder import (
     iter_files,
     cluster_duplicates,
     build_groups_payload,
+    _is_system_path,
 )
 from existing_library import (
     build_library_index,
@@ -98,6 +99,7 @@ SESSION_REGISTRY_FILE = USER_DATA_DIR / "session_registry.json"
 import threading as _threading
 _cancel_events: Dict[str, _threading.Event] = {}
 _cancel_lock = _threading.Lock()
+_registry_lock = _threading.RLock()  # guards session registry read-modify-write
 
 def _get_cancel_event(session_id: str) -> _threading.Event:
     """Create and register a fresh cancel event for a session."""
@@ -340,6 +342,8 @@ def setup_chrome_driver(headless: bool = False, proxy_url: str = "") -> webdrive
     """Backward-compatible wrapper — prefer ``workflow_browser.create_driver``."""
     cfg = load_settings()
     purpose = "scrape" if headless else "auth"
+    if proxy_url:
+        cfg.proxy_url = proxy_url
     return workflow_browser.create_driver(
         "xhamster",
         cfg,
@@ -588,11 +592,11 @@ def fetch_html_selenium(
         logging.error(f"Error fetching HTML from {url}: {e}")
         return None, driver
 
-def scroll_to_bottom(driver, pause_time: float = 2.0) -> None:
+def scroll_to_bottom(driver, pause_time: float = 2.0, max_scrolls: int = 100) -> None:
     """Scroll to the bottom of the page to load all content."""
     try:
         last_height = driver.execute_script("return document.body.scrollHeight")
-        while True:
+        for _ in range(max_scrolls):
             driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
             time.sleep(pause_time)
             new_height = driver.execute_script("return document.body.scrollHeight")
@@ -1107,7 +1111,8 @@ def _load_session_registry() -> Dict[str, dict]:
     try:
         raw = json.loads(SESSION_REGISTRY_FILE.read_text(encoding="utf-8"))
         return raw if isinstance(raw, dict) else {}
-    except Exception:
+    except Exception as e:
+        logging.warning("Session registry corrupt/unreadable — starting fresh: %s", e)
         return {}
 
 
@@ -1137,23 +1142,24 @@ def session_history_register(
 ) -> None:
     """Record a new run as soon as the user starts a download (before background work finishes)."""
     try:
-        reg = _load_session_registry()
-        now = datetime.now().isoformat(timespec="seconds")
-        reg[session_id] = {
-            "ts": now,
-            "updated_ts": now,
-            "timestamp": timestamp or int(time.time()),
-            "site": site,
-            "session_id": session_id,
-            "status": "running",
-            "total": 0,
-            "downloaded": 0,
-            "skipped": 0,
-            "failed": 0,
-            "duration_s": 0,
-            "error_message": None,
-        }
-        _save_session_registry(reg)
+        with _registry_lock:
+            reg = _load_session_registry()
+            now = datetime.now().isoformat(timespec="seconds")
+            reg[session_id] = {
+                "ts": now,
+                "updated_ts": now,
+                "timestamp": timestamp or int(time.time()),
+                "site": site,
+                "session_id": session_id,
+                "status": "running",
+                "total": 0,
+                "downloaded": 0,
+                "skipped": 0,
+                "failed": 0,
+                "duration_s": 0,
+                "error_message": None,
+            }
+            _save_session_registry(reg)
         _write_session_meta(session_id, site)
     except Exception as e:
         logging.warning("Could not register session history: %s", e)
@@ -1169,20 +1175,21 @@ def session_history_update(
 ) -> None:
     """Update registry entry (running, completed, failed, cancelled)."""
     try:
-        reg = _load_session_registry()
-        now = datetime.now().isoformat(timespec="seconds")
-        rec = dict(reg.get(session_id) or {})
-        rec.setdefault("ts", now)
-        rec["updated_ts"] = now
-        rec["site"] = site
-        rec["session_id"] = session_id
-        rec["status"] = status
-        if tracker is not None:
-            rec.update(_stats_from_tracker(tracker))
-        if error_message:
-            rec["error_message"] = error_message
-        reg[session_id] = rec
-        _save_session_registry(reg)
+        with _registry_lock:
+            reg = _load_session_registry()
+            now = datetime.now().isoformat(timespec="seconds")
+            rec = dict(reg.get(session_id) or {})
+            rec.setdefault("ts", now)
+            rec["updated_ts"] = now
+            rec["site"] = site
+            rec["session_id"] = session_id
+            rec["status"] = status
+            if tracker is not None:
+                rec.update(_stats_from_tracker(tracker))
+            if error_message:
+                rec["error_message"] = error_message
+            reg[session_id] = rec
+            _save_session_registry(reg)
     except Exception as e:
         logging.warning("Could not update session history: %s", e)
 
@@ -1506,6 +1513,7 @@ def pornhub_workflow(
                 f"Comparing {len(video_urls)} favourites to your library folder…",
             )
             to_download: List[Tuple[str, str]] = []
+            pre_extracted_map: dict = {}
             skipped_n = 0
             for i, url in enumerate(video_urls):
                 vk = viewkey_from_pornhub_url(url)
@@ -1515,7 +1523,9 @@ def pornhub_workflow(
                     tracker.skip_download(url, "Already in library folder")
                     skipped_n += 1
                     continue
-                title = pornhub_ph.fetch_video_title_from_page(
+                # BUG 2 fix: use fetch_video_page_data so we also capture the full
+                # extracted tuple and can skip re-loading the page during download.
+                title, extracted = pornhub_ph.fetch_video_page_data(
                     cookie_file, url, proxy_url=cfg.proxy_url, driver=driver
                 )
                 if matches_pornhub_in_library(url, title, lib_index):
@@ -1524,6 +1534,8 @@ def pornhub_workflow(
                     skipped_n += 1
                 else:
                     to_download.append((url, title))
+                    if extracted is not None:
+                        pre_extracted_map[url] = extracted
                 if (i + 1) % 40 == 0 or (i + 1) == len(video_urls):
                     logging.info(
                         "Library compare: %s/%s URLs (skipped %s matches so far)",
@@ -1562,6 +1574,7 @@ def pornhub_workflow(
                     yt_dlp_retries=cfg.yt_dlp_retries,
                     yt_dlp_format=yt_dlp_format_string(cfg),
                     cancel_check=cancel_check,
+                    pre_extracted_map=pre_extracted_map,
                 )
                 if cancel_event and cancel_event.is_set():
                     cancelled_run = True
@@ -2464,7 +2477,12 @@ async def settings_save(request: Request):
     if vq not in ("best", "720", "1080"):
         vq = "720"
 
-    cfg.download_directory = str(fd.get("download_directory") or "").strip()
+    _raw_dl_dir = str(fd.get("download_directory") or "").strip()
+    if _raw_dl_dir:
+        _resolved_dl = Path(_raw_dl_dir).expanduser().resolve()
+        if _is_system_path(_resolved_dl):
+            raise HTTPException(status_code=400, detail="Download directory cannot be a system path.")
+    cfg.download_directory = _raw_dl_dir
     cfg.max_parallel_downloads = max(1, min(32, _pi("max_parallel_downloads", cfg.max_parallel_downloads)))
     cfg.video_quality = vq  # type: ignore[assignment]
     uf = str(fd.get("pixiv_ugoira_format") or cfg.pixiv_ugoira_format).strip().lower()
@@ -2711,11 +2729,11 @@ def api_browser_challenge_confirm(body: BrowserChallengeConfirmBody):
 @app.get("/download/log/{session_id}")
 def get_log(session_id: str):
     """Download log file."""
-    log_file = os.path.join(LOG_DIR, f"video_downloader_{session_id}.log")
-    if os.path.exists(log_file):
-        return FileResponse(path=log_file, filename=os.path.basename(log_file), media_type='text/plain')
-    else:
-        return {"error": "Log file not found."}
+    sid = _validate_session_id(session_id)
+    log_file = _resolve_under_log_dir(f"video_downloader_{sid}.log")
+    if log_file.is_file():
+        return FileResponse(path=str(log_file), filename=log_file.name, media_type='text/plain')
+    raise HTTPException(status_code=404, detail="Log file not found.")
 
 
 def _read_log_tail_text(log_path: Path, *, lines: int, max_bytes: int = 56_000) -> str:
@@ -3036,6 +3054,7 @@ def api_session_retry_failed(
 @app.post("/api/queue/resume/{snapshot_session_id}")
 def api_queue_resume(snapshot_session_id: str, background_tasks: BackgroundTasks, headless: bool = Query(False)):
     """Start a fresh session using a saved favourites URL list from a prior run (crash recovery)."""
+    snapshot_session_id = _validate_session_id(snapshot_session_id)
     snap = load_queue_snapshot(snapshot_session_id, USER_DATA_DIR)
     if not snap:
         raise HTTPException(status_code=404, detail="No queue snapshot for that session.")
