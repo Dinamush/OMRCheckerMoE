@@ -1,0 +1,1055 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SHUCK3R — Design Concepts</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700&family=Playfair+Display:wght@400;700;900&family=DM+Serif+Display&family=Bebas+Neue&family=Space+Mono&family=Cormorant+Garamond:wght@300;600&family=IBM+Plex+Mono:wght@400;600&family=Figtree:wght@300;400;600;800&family=Syne:wght@400;700;800&family=Instrument+Serif:ital@0;1&family=Fragment+Mono&display=swap" rel="stylesheet">
+<style>
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { font-size: 16px; }
+body {
+  background: #0a0a0a;
+  color: #e8e8e8;
+  font-family: 'Figtree', sans-serif;
+  min-height: 100vh;
+  padding: 48px 24px;
+}
+
+/* ─── Picker layout ─────────────────────────────── */
+.picker-header {
+  text-align: center;
+  margin-bottom: 56px;
+  max-width: 640px;
+  margin-left: auto;
+  margin-right: auto;
+}
+.picker-header h1 {
+  font-family: 'Syne', sans-serif;
+  font-size: clamp(1.8rem, 4vw, 3rem);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: #fff;
+  margin-bottom: 12px;
+}
+.picker-header p {
+  color: #888;
+  font-size: 1rem;
+  line-height: 1.6;
+}
+.picker-header p strong { color: #ccc; }
+
+.concepts-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 24px;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+.concept-card {
+  border-radius: 12px;
+  overflow: hidden;
+  cursor: pointer;
+  transition: transform 0.22s ease, box-shadow 0.22s ease;
+  position: relative;
+}
+.concept-card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+}
+.concept-card:hover .concept-label { opacity: 1; }
+
+.concept-preview {
+  height: 420px;
+  position: relative;
+  overflow: hidden;
+}
+
+.concept-label {
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  padding: 20px 24px 22px;
+  background: linear-gradient(0deg, rgba(0,0,0,0.85) 0%, transparent 100%);
+  opacity: 0.85;
+  transition: opacity 0.2s ease;
+  z-index: 10;
+}
+.concept-num {
+  font-family: 'Space Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  color: rgba(255,255,255,0.45);
+  margin-bottom: 4px;
+  text-transform: uppercase;
+}
+.concept-name {
+  font-family: 'Syne', sans-serif;
+  font-size: 1.2rem;
+  font-weight: 800;
+  color: #fff;
+  margin-bottom: 3px;
+}
+.concept-tagline {
+  font-size: 0.82rem;
+  color: rgba(255,255,255,0.6);
+  line-height: 1.4;
+}
+
+/* ─── CONCEPT A: Film Lab ─────────────────────────── */
+.film-lab {
+  background: #181410;
+  font-family: 'DM Serif Display', serif;
+  padding: 28px;
+  height: 100%;
+  position: relative;
+}
+.film-lab::before {
+  content: "";
+  position: absolute; inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.035'/%3E%3C/svg%3E");
+  pointer-events: none;
+  z-index: 1;
+  opacity: 0.6;
+}
+.film-lab-nav {
+  display: flex; align-items: center; gap: 20px;
+  margin-bottom: 36px; position: relative; z-index: 2;
+}
+.film-lab-logo {
+  font-family: 'DM Serif Display', serif;
+  font-size: 1.1rem;
+  color: #c8a96e;
+  letter-spacing: 0.04em;
+}
+.film-lab-navlinks {
+  display: flex; gap: 14px; margin-left: auto;
+}
+.film-lab-navlink {
+  font-family: 'Space Mono', monospace;
+  font-size: 9px; letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #6b5e4a;
+}
+.film-lab-navlink.active { color: #c8a96e; }
+.film-lab-divider {
+  width: 100%; height: 1px;
+  background: linear-gradient(90deg, #c8a96e44, transparent);
+  margin-bottom: 28px; position: relative; z-index: 2;
+}
+.film-lab-heading {
+  position: relative; z-index: 2;
+  font-family: 'DM Serif Display', serif;
+  font-size: 2.4rem;
+  color: #e8dcc8;
+  line-height: 1.1;
+  margin-bottom: 6px;
+}
+.film-lab-sub {
+  font-family: 'Space Mono', monospace;
+  font-size: 9px; letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: #c8a96e;
+  margin-bottom: 24px; position: relative; z-index: 2;
+}
+.film-lab-form { position: relative; z-index: 2; }
+.film-lab-field {
+  background: #0e0c0a;
+  border: 1px solid #3a3028;
+  color: #c8b89e;
+  padding: 10px 14px;
+  font-family: 'Space Mono', monospace;
+  font-size: 11px; letter-spacing: 0.04em;
+  width: 100%;
+  margin-bottom: 12px;
+  border-radius: 2px;
+}
+.film-lab-field::placeholder { color: #4a3e32; }
+.film-lab-btn {
+  background: transparent;
+  border: 1px solid #c8a96e;
+  color: #c8a96e;
+  padding: 10px 20px;
+  font-family: 'Space Mono', monospace;
+  font-size: 9px; letter-spacing: 0.18em; text-transform: uppercase;
+  cursor: pointer;
+}
+.film-lab-tags {
+  display: flex; gap: 8px; margin-top: 16px;
+}
+.film-lab-tag {
+  padding: 3px 8px;
+  background: #28201a;
+  border: 1px solid #3a2e22;
+  font-family: 'Space Mono', monospace;
+  font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase;
+  color: #7a6a56;
+  border-radius: 1px;
+}
+.film-lab-tag.active { background: #3a2e20; color: #c8a96e; border-color: #8a6a3a; }
+.film-lab-strip {
+  position: absolute; bottom: 0; left: 0; right: 0;
+  height: 52px; z-index: 2;
+  display: flex; align-items: center;
+  background: #0e0c0a;
+  border-top: 1px solid #2a2018;
+  padding: 0 10px;
+  gap: 2px;
+}
+.film-lab-sprocket {
+  width: 14px; height: 22px;
+  background: #1e1a14;
+  border: 1px solid #2a2018;
+  border-radius: 2px; flex-shrink: 0;
+}
+.film-lab-frame {
+  flex: 1; height: 36px;
+  background: #181410;
+  border-left: 1px solid #2a2018;
+}
+
+/* ─── CONCEPT B: Editorial Brutalism ─────────────── */
+.editorial {
+  background: #f5f0e8;
+  padding: 0;
+  height: 100%;
+  position: relative;
+  overflow: hidden;
+}
+.editorial-header {
+  background: #111;
+  padding: 16px 24px;
+  display: flex; align-items: center; justify-content: space-between;
+}
+.editorial-logo {
+  font-family: 'Bebas Neue', sans-serif;
+  font-size: 1.6rem;
+  color: #f5f0e8;
+  letter-spacing: 0.04em;
+}
+.editorial-nav {
+  display: flex; gap: 16px;
+}
+.editorial-navlink {
+  font-family: 'Figtree', sans-serif;
+  font-size: 10px; font-weight: 600;
+  letter-spacing: 0.1em; text-transform: uppercase;
+  color: #888;
+}
+.editorial-navlink.active { color: #ff4500; }
+.editorial-body { padding: 28px 24px; }
+.editorial-kicker {
+  display: inline-block;
+  background: #ff4500;
+  color: #fff;
+  font-family: 'Figtree', sans-serif;
+  font-size: 9px; font-weight: 800;
+  letter-spacing: 0.18em; text-transform: uppercase;
+  padding: 3px 8px;
+  margin-bottom: 14px;
+}
+.editorial-heading {
+  font-family: 'Bebas Neue', sans-serif;
+  font-size: 3.2rem;
+  color: #111;
+  letter-spacing: 0.01em;
+  line-height: 0.92;
+  margin-bottom: 16px;
+}
+.editorial-rule { border: none; border-top: 3px solid #111; margin-bottom: 18px; }
+.editorial-field {
+  background: transparent;
+  border: 2px solid #111;
+  color: #111;
+  padding: 10px 12px;
+  font-family: 'Space Mono', monospace;
+  font-size: 11px;
+  width: 100%;
+  margin-bottom: 10px;
+}
+.editorial-field::placeholder { color: #888; }
+.editorial-actions { display: flex; gap: 10px; }
+.editorial-btn {
+  background: #111;
+  border: none;
+  color: #f5f0e8;
+  padding: 10px 18px;
+  font-family: 'Figtree', sans-serif;
+  font-size: 10px; font-weight: 800;
+  letter-spacing: 0.14em; text-transform: uppercase;
+  cursor: pointer;
+}
+.editorial-btn.outline {
+  background: transparent;
+  border: 2px solid #111;
+  color: #111;
+}
+.editorial-meta {
+  margin-top: 14px;
+  font-family: 'Space Mono', monospace;
+  font-size: 9px; letter-spacing: 0.1em;
+  color: #888;
+  text-transform: uppercase;
+  border-top: 1px solid #ccc; padding-top: 10px;
+}
+.editorial-chips { display: flex; gap: 6px; margin-top: 10px; }
+.editorial-chip {
+  border: 1.5px solid #ccc;
+  padding: 3px 8px;
+  font-family: 'Figtree', sans-serif;
+  font-size: 9px; font-weight: 600;
+  letter-spacing: 0.1em; text-transform: uppercase;
+  color: #888;
+}
+.editorial-chip.active {
+  border-color: #ff4500;
+  color: #ff4500;
+}
+
+/* ─── CONCEPT C: Soft Noir ───────────────────────── */
+.soft-noir {
+  background: #1a1b2e;
+  padding: 28px;
+  height: 100%;
+  position: relative;
+  overflow: hidden;
+}
+.soft-noir::before {
+  content: "";
+  position: absolute; inset: 0;
+  background:
+    radial-gradient(ellipse 80% 50% at 60% -10%, rgba(120, 80, 200, 0.12), transparent),
+    radial-gradient(ellipse 60% 40% at -10% 80%, rgba(200, 120, 80, 0.06), transparent);
+  pointer-events: none;
+}
+.soft-noir-nav {
+  display: flex; align-items: center; gap: 16px;
+  margin-bottom: 32px; position: relative; z-index: 2;
+}
+.soft-noir-logo {
+  font-family: 'Cormorant Garamond', serif;
+  font-size: 1.3rem; font-weight: 600;
+  letter-spacing: 0.08em; text-transform: uppercase;
+  color: #c8b4a0;
+}
+.soft-noir-navlinks { display: flex; gap: 16px; margin-left: auto; }
+.soft-noir-navlink {
+  font-family: 'Fragment Mono', monospace;
+  font-size: 10px; letter-spacing: 0.08em;
+  color: #4a4a6a;
+}
+.soft-noir-navlink.active { color: #c8a87a; }
+.soft-noir-eyebrow {
+  font-family: 'Fragment Mono', monospace;
+  font-size: 9px; letter-spacing: 0.18em; text-transform: uppercase;
+  color: #c8a87a;
+  margin-bottom: 8px; position: relative; z-index: 2;
+}
+.soft-noir-heading {
+  font-family: 'Cormorant Garamond', serif;
+  font-size: 2.8rem; font-weight: 300;
+  color: #e8e0d8;
+  line-height: 1.15;
+  margin-bottom: 6px; position: relative; z-index: 2;
+  font-style: italic;
+}
+.soft-noir-heading strong {
+  font-style: normal; font-weight: 600;
+  color: #fff;
+}
+.soft-noir-desc {
+  font-family: 'Fragment Mono', monospace;
+  font-size: 10px; line-height: 1.65;
+  color: #5a5a7a;
+  margin-bottom: 22px; position: relative; z-index: 2;
+  max-width: 280px;
+}
+.soft-noir-field {
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.09);
+  color: #c8c0b8;
+  padding: 10px 14px;
+  font-family: 'Fragment Mono', monospace;
+  font-size: 11px;
+  width: 100%;
+  margin-bottom: 10px;
+  border-radius: 4px;
+  position: relative; z-index: 2;
+}
+.soft-noir-field::placeholder { color: #3a3a5a; }
+.soft-noir-sites {
+  display: flex; gap: 8px; margin-bottom: 16px;
+  position: relative; z-index: 2;
+}
+.soft-noir-site {
+  flex: 1; padding: 8px 4px; text-align: center;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 4px;
+  font-family: 'Fragment Mono', monospace;
+  font-size: 9px; letter-spacing: 0.1em;
+  color: #4a4a6a;
+}
+.soft-noir-site.active {
+  background: rgba(200, 168, 122, 0.08);
+  border-color: rgba(200, 168, 122, 0.3);
+  color: #c8a87a;
+}
+.soft-noir-btn {
+  background: transparent;
+  border: 1px solid rgba(200, 168, 122, 0.4);
+  color: #c8a87a;
+  padding: 10px 20px;
+  font-family: 'Fragment Mono', monospace;
+  font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase;
+  cursor: pointer;
+  border-radius: 3px;
+  position: relative; z-index: 2;
+}
+.soft-noir-orbs {
+  position: absolute; bottom: 20px; right: 20px; z-index: 1;
+  width: 120px; height: 120px;
+}
+.soft-noir-orb {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(28px);
+}
+.soft-noir-orb:nth-child(1) {
+  width: 80px; height: 80px;
+  background: rgba(120, 80, 200, 0.18);
+  top: 0; right: 0;
+}
+.soft-noir-orb:nth-child(2) {
+  width: 60px; height: 60px;
+  background: rgba(200, 160, 80, 0.12);
+  bottom: 0; left: 0;
+}
+
+/* ─── CONCEPT D: Industrial Utility ─────────────── */
+.industrial {
+  background: #f0ede8;
+  padding: 0;
+  height: 100%;
+}
+.industrial-topbar {
+  background: #2a2820;
+  height: 6px;
+  background: repeating-linear-gradient(90deg, #e05020 0px, #e05020 12px, #2a2820 12px, #2a2820 18px);
+}
+.industrial-header {
+  background: #2a2820;
+  padding: 14px 22px;
+  display: flex; align-items: center; gap: 12px;
+}
+.industrial-logo {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 1rem; font-weight: 600;
+  letter-spacing: 0.08em;
+  color: #f0ede8;
+}
+.industrial-version {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 9px; letter-spacing: 0.1em;
+  color: #5a5650;
+  padding: 2px 6px;
+  border: 1px solid #3a3830;
+}
+.industrial-nav {
+  display: flex; gap: 0; margin-left: auto;
+}
+.industrial-navlink {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase;
+  color: #5a5650;
+  padding: 6px 12px;
+  border-left: 1px solid #3a3830;
+}
+.industrial-navlink.active {
+  color: #e05020;
+  background: rgba(224, 80, 32, 0.08);
+}
+.industrial-body {
+  padding: 24px 22px;
+}
+.industrial-label {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 9px; font-weight: 600;
+  letter-spacing: 0.16em; text-transform: uppercase;
+  color: #8a8680;
+  border-left: 2px solid #e05020;
+  padding-left: 8px;
+  margin-bottom: 14px;
+}
+.industrial-heading {
+  font-family: 'Syne', sans-serif;
+  font-size: 2rem; font-weight: 800;
+  color: #1a1814;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  margin-bottom: 18px;
+}
+.industrial-row { display: flex; gap: 0; margin-bottom: 10px; }
+.industrial-field {
+  flex: 1;
+  background: #fff;
+  border: 1.5px solid #c8c0b8;
+  border-right: none;
+  color: #1a1814;
+  padding: 9px 12px;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+}
+.industrial-field::placeholder { color: #b0a8a0; }
+.industrial-field-btn {
+  background: #e05020;
+  border: 1.5px solid #e05020;
+  color: #fff;
+  padding: 9px 16px;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 9px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.industrial-options {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 12px 0;
+}
+.industrial-option {
+  background: #fff;
+  border: 1.5px solid #c8c0b8;
+  padding: 8px 12px;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 10px; letter-spacing: 0.04em;
+  color: #4a4840;
+  cursor: pointer;
+}
+.industrial-option.active {
+  border-color: #e05020;
+  color: #e05020;
+  background: rgba(224, 80, 32, 0.04);
+}
+.industrial-footer {
+  display: flex; align-items: center;
+  background: #e8e4de;
+  border-top: 1.5px solid #c8c0b8;
+  padding: 8px 22px;
+  gap: 10px;
+  position: absolute; bottom: 0; left: 0; right: 0;
+}
+.industrial-status {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase;
+  color: #8a8680;
+}
+.industrial-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: #e05020;
+  flex-shrink: 0;
+}
+
+/* ─── CONCEPT E: Soft Minimal (Light) ───────────── */
+.soft-minimal {
+  background: #faf9f7;
+  padding: 28px;
+  height: 100%;
+  position: relative;
+}
+.soft-minimal::after {
+  content: "";
+  position: absolute; top: 0; right: 0;
+  width: 240px; height: 240px;
+  background: radial-gradient(circle, rgba(180, 160, 220, 0.12) 0%, transparent 70%);
+  pointer-events: none;
+}
+.soft-minimal-nav {
+  display: flex; align-items: center; gap: 10px;
+  margin-bottom: 32px; position: relative; z-index: 2;
+}
+.soft-minimal-logo {
+  font-family: 'Instrument Serif', serif;
+  font-size: 1.1rem;
+  color: #2a2828;
+  letter-spacing: 0.02em;
+}
+.soft-minimal-navlinks { display: flex; gap: 14px; margin-left: auto; }
+.soft-minimal-navlink {
+  font-family: 'Figtree', sans-serif;
+  font-size: 11px; font-weight: 500;
+  color: #a0989a;
+}
+.soft-minimal-navlink.active {
+  color: #7c6ac8;
+  font-weight: 600;
+}
+.soft-minimal-eyebrow {
+  font-family: 'Figtree', sans-serif;
+  font-size: 10px; font-weight: 600;
+  letter-spacing: 0.12em; text-transform: uppercase;
+  color: #b0a0d0;
+  margin-bottom: 8px; position: relative; z-index: 2;
+}
+.soft-minimal-heading {
+  font-family: 'Instrument Serif', serif;
+  font-size: 2.2rem;
+  color: #1a1818;
+  line-height: 1.15;
+  margin-bottom: 8px; position: relative; z-index: 2;
+}
+.soft-minimal-heading em {
+  font-style: italic;
+  color: #7c6ac8;
+}
+.soft-minimal-desc {
+  font-family: 'Figtree', sans-serif;
+  font-size: 12px; font-weight: 400; line-height: 1.6;
+  color: #888;
+  margin-bottom: 24px; position: relative; z-index: 2;
+  max-width: 240px;
+}
+.soft-minimal-field {
+  background: #fff;
+  border: 1.5px solid #e0d8e8;
+  color: #2a2828;
+  padding: 10px 14px;
+  font-family: 'Figtree', sans-serif;
+  font-size: 12px;
+  width: 100%;
+  margin-bottom: 10px;
+  border-radius: 8px;
+  position: relative; z-index: 2;
+}
+.soft-minimal-field::placeholder { color: #c0b8c8; }
+.soft-minimal-field:focus { outline: none; border-color: #b4a0e0; box-shadow: 0 0 0 3px rgba(160, 120, 220, 0.12); }
+.soft-minimal-sites {
+  display: flex; gap: 6px; margin-bottom: 16px;
+  position: relative; z-index: 2;
+}
+.soft-minimal-site {
+  flex: 1; padding: 7px 6px; text-align: center;
+  background: #f0ecf8;
+  border: 1.5px solid transparent;
+  border-radius: 6px;
+  font-family: 'Figtree', sans-serif;
+  font-size: 10px; font-weight: 500;
+  color: #a090b8;
+  cursor: pointer;
+}
+.soft-minimal-site.active {
+  background: rgba(124, 106, 200, 0.1);
+  border-color: rgba(124, 106, 200, 0.3);
+  color: #7c6ac8;
+  font-weight: 600;
+}
+.soft-minimal-btn {
+  background: #7c6ac8;
+  border: none;
+  color: #fff;
+  padding: 10px 24px;
+  font-family: 'Figtree', sans-serif;
+  font-size: 11px; font-weight: 700;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  border-radius: 8px;
+  position: relative; z-index: 2;
+  box-shadow: 0 4px 16px rgba(124, 106, 200, 0.28);
+}
+.soft-minimal-dots {
+  position: absolute; bottom: 24px; right: 24px;
+  display: grid; grid-template-columns: repeat(5, 10px);
+  gap: 6px; z-index: 1; opacity: 0.18;
+}
+.soft-minimal-dot {
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  background: #b4a0e0;
+}
+
+/* ─── CONCEPT F: Warm Paper ──────────────────────── */
+.warm-paper {
+  background: #f7f3eb;
+  padding: 0;
+  height: 100%;
+  position: relative;
+  font-family: 'Instrument Serif', serif;
+}
+.warm-paper::before {
+  content: "";
+  position: absolute; inset: 0;
+  background-image:
+    repeating-linear-gradient(0deg, rgba(0,0,0,0.012) 0px, transparent 1px, transparent 28px, rgba(0,0,0,0.012) 28px);
+  pointer-events: none; z-index: 1;
+}
+.warm-paper-header {
+  border-bottom: 2px double #c8bc9a;
+  padding: 18px 24px 14px;
+  display: flex; align-items: baseline; gap: 16px;
+  position: relative; z-index: 2;
+}
+.warm-paper-logo {
+  font-family: 'Playfair Display', serif;
+  font-size: 1.4rem; font-weight: 900;
+  font-style: italic;
+  color: #2a2010;
+  letter-spacing: -0.01em;
+}
+.warm-paper-tagline {
+  font-family: 'Space Mono', monospace;
+  font-size: 8px; letter-spacing: 0.16em; text-transform: uppercase;
+  color: #9a8e78;
+}
+.warm-paper-nav {
+  display: flex; gap: 0; margin-left: auto;
+}
+.warm-paper-navlink {
+  font-family: 'Space Mono', monospace;
+  font-size: 8px; letter-spacing: 0.1em; text-transform: uppercase;
+  color: #9a8e78;
+  padding: 4px 10px;
+  border-left: 1px solid #d8d0be;
+}
+.warm-paper-navlink.active { color: #5a3e1a; }
+.warm-paper-body {
+  padding: 24px;
+  position: relative; z-index: 2;
+}
+.warm-paper-dateline {
+  font-family: 'Space Mono', monospace;
+  font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase;
+  color: #9a8e78;
+  margin-bottom: 14px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #d8d0be;
+}
+.warm-paper-heading {
+  font-family: 'Playfair Display', serif;
+  font-size: 2.2rem; font-weight: 900;
+  color: #1e1608;
+  line-height: 1.1;
+  margin-bottom: 10px;
+}
+.warm-paper-deck {
+  font-family: 'Playfair Display', serif;
+  font-size: 0.9rem; font-style: italic; font-weight: 400;
+  color: #5a4e38;
+  margin-bottom: 18px;
+  line-height: 1.5;
+}
+.warm-paper-rule {
+  border: none; border-top: 1px solid #c8bc9a; margin-bottom: 16px;
+}
+.warm-paper-field {
+  background: transparent;
+  border: none;
+  border-bottom: 1.5px solid #c8bc9a;
+  color: #2a2010;
+  padding: 8px 4px;
+  font-family: 'Space Mono', monospace;
+  font-size: 11px;
+  width: 100%;
+  margin-bottom: 14px;
+}
+.warm-paper-field::placeholder { color: #b0a48a; }
+.warm-paper-sites {
+  display: flex; gap: 10px; margin-bottom: 14px;
+}
+.warm-paper-site {
+  font-family: 'Space Mono', monospace;
+  font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase;
+  color: #9a8e78;
+  padding: 4px 0;
+  border-bottom: 1.5px solid transparent;
+  cursor: pointer;
+}
+.warm-paper-site.active {
+  color: #5a3e1a;
+  border-bottom-color: #8a6a3a;
+}
+.warm-paper-btn {
+  background: #2a2010;
+  border: none;
+  color: #f7f3eb;
+  padding: 10px 20px;
+  font-family: 'Space Mono', monospace;
+  font-size: 9px; letter-spacing: 0.16em; text-transform: uppercase;
+  cursor: pointer;
+}
+
+/* ─── Picker footer ─────────────────────────────────── */
+.picker-footer {
+  text-align: center;
+  margin-top: 56px;
+  padding-top: 32px;
+  border-top: 1px solid #1a1a1a;
+}
+.picker-footer p {
+  font-size: 0.85rem;
+  color: #444;
+  line-height: 1.6;
+  max-width: 500px;
+  margin: 0 auto;
+}
+.picker-footer p strong { color: #888; }
+
+/* ─── Current concept highlight ─────────────────── */
+.current-badge {
+  position: absolute;
+  top: 12px; right: 12px;
+  background: rgba(0,0,0,0.7);
+  color: #888;
+  font-family: 'Space Mono', monospace;
+  font-size: 8px; letter-spacing: 0.14em; text-transform: uppercase;
+  padding: 3px 8px;
+  border-radius: 2px;
+  z-index: 20;
+  border: 1px solid #333;
+}
+
+</style>
+</head>
+<body>
+
+<div class="picker-header">
+  <h1>Pick a Direction</h1>
+  <p>Six radically different aesthetic concepts for SHUCK3R. Each shows a <strong>live mini-preview</strong> of the header + downloader form. Pick the vibe that speaks to you.</p>
+</div>
+
+<div class="concepts-grid">
+
+  <!-- A: Film Lab -->
+  <div class="concept-card">
+    <div class="concept-preview">
+      <div class="film-lab">
+        <div class="film-lab-nav">
+          <div class="film-lab-logo">Shuck3r</div>
+          <div class="film-lab-navlinks">
+            <div class="film-lab-navlink active">Archive</div>
+            <div class="film-lab-navlink">Library</div>
+            <div class="film-lab-navlink">Scan</div>
+          </div>
+        </div>
+        <div class="film-lab-divider"></div>
+        <div class="film-lab-sub">Personal media archive</div>
+        <div class="film-lab-heading">Downloader</div>
+        <div class="film-lab-form">
+          <div class="film-lab-tags">
+            <div class="film-lab-tag active">PornHub</div>
+            <div class="film-lab-tag">xHamster</div>
+            <div class="film-lab-tag">Pixiv</div>
+          </div>
+          <div style="margin-top:14px">
+            <input class="film-lab-field" placeholder="Paste URL or leave blank…" readonly>
+          </div>
+          <button class="film-lab-btn">Develop ↗</button>
+        </div>
+        <div class="film-lab-strip">
+          <div class="film-lab-sprocket"></div><div class="film-lab-frame"></div>
+          <div class="film-lab-sprocket"></div><div class="film-lab-frame"></div>
+          <div class="film-lab-sprocket"></div><div class="film-lab-frame"></div>
+          <div class="film-lab-sprocket"></div>
+        </div>
+      </div>
+    </div>
+    <div class="concept-label">
+      <div class="concept-num">Concept A</div>
+      <div class="concept-name">Film Lab</div>
+      <div class="concept-tagline">Dark amber & grain. Serif display. Cinema archive mood.</div>
+    </div>
+  </div>
+
+  <!-- B: Editorial Brutalism -->
+  <div class="concept-card">
+    <div class="concept-preview">
+      <div class="editorial">
+        <div class="editorial-header">
+          <div class="editorial-logo">SHUCK3R</div>
+          <div class="editorial-nav">
+            <div class="editorial-navlink active">↓</div>
+            <div class="editorial-navlink">Lib</div>
+            <div class="editorial-navlink">Hist</div>
+          </div>
+        </div>
+        <div class="editorial-body">
+          <div class="editorial-kicker">Favourites Downloader</div>
+          <div class="editorial-heading">GET THE<br>FILES.</div>
+          <hr class="editorial-rule">
+          <input class="editorial-field" placeholder="Paste a URL" readonly>
+          <div class="editorial-chips">
+            <div class="editorial-chip active">PornHub</div>
+            <div class="editorial-chip">xHamster</div>
+            <div class="editorial-chip">Pixiv</div>
+          </div>
+          <div class="editorial-actions" style="margin-top:12px">
+            <button class="editorial-btn">Queue Download</button>
+            <button class="editorial-btn outline">Library</button>
+          </div>
+          <div class="editorial-meta">SHUCK3R v1.2.0 · Local · No cloud</div>
+        </div>
+      </div>
+    </div>
+    <div class="concept-label">
+      <div class="concept-num">Concept B</div>
+      <div class="concept-name">Editorial Brutalism</div>
+      <div class="concept-tagline">Cream & black. Bebas Neue headlines. Hard contrast. Light mode.</div>
+    </div>
+  </div>
+
+  <!-- C: Soft Noir -->
+  <div class="concept-card">
+    <div class="concept-preview">
+      <div class="soft-noir">
+        <div class="soft-noir-nav">
+          <div class="soft-noir-logo">Shuck3r</div>
+          <div class="soft-noir-navlinks">
+            <div class="soft-noir-navlink active">↓</div>
+            <div class="soft-noir-navlink">Library</div>
+            <div class="soft-noir-navlink">History</div>
+          </div>
+        </div>
+        <div class="soft-noir-eyebrow">Favourites Downloader</div>
+        <div class="soft-noir-heading"><strong>Download</strong><br><em>your favourites</em></div>
+        <div class="soft-noir-desc">Queue PornHub, xHamster or Pixiv. Auth stays local.</div>
+        <div class="soft-noir-sites">
+          <div class="soft-noir-site active">PornHub</div>
+          <div class="soft-noir-site">xHamster</div>
+          <div class="soft-noir-site">Pixiv</div>
+        </div>
+        <input class="soft-noir-field" placeholder="Paste URL, or leave blank…" readonly>
+        <button class="soft-noir-btn">Begin Queue ↗</button>
+        <div class="soft-noir-orbs">
+          <div class="soft-noir-orb"></div>
+          <div class="soft-noir-orb"></div>
+        </div>
+      </div>
+    </div>
+    <div class="concept-label">
+      <div class="concept-num">Concept C</div>
+      <div class="concept-name">Soft Noir</div>
+      <div class="concept-tagline">Deep slate-indigo. Cormorant Garamond. Warm amber accents. Soft glow orbs.</div>
+    </div>
+  </div>
+
+  <!-- D: Industrial Utility -->
+  <div class="concept-card">
+    <div class="concept-preview">
+      <div class="industrial" style="position:relative">
+        <div class="industrial-topbar"></div>
+        <div class="industrial-header">
+          <div class="industrial-logo">SHUCK3R</div>
+          <div class="industrial-version">v1.2.0</div>
+          <div class="industrial-nav">
+            <div class="industrial-navlink active">Downloader</div>
+            <div class="industrial-navlink">Library</div>
+            <div class="industrial-navlink">History</div>
+          </div>
+        </div>
+        <div class="industrial-body">
+          <div class="industrial-label">Favourites downloader</div>
+          <div class="industrial-heading">Queue<br>Downloads</div>
+          <div class="industrial-row">
+            <input class="industrial-field" placeholder="Paste a URL or leave blank" readonly>
+            <button class="industrial-field-btn">→ Queue</button>
+          </div>
+          <div class="industrial-options">
+            <div class="industrial-option active">● PornHub</div>
+            <div class="industrial-option">○ xHamster</div>
+            <div class="industrial-option">○ Pixiv</div>
+            <div class="industrial-option">○ All favs</div>
+          </div>
+        </div>
+        <div class="industrial-footer">
+          <div class="industrial-dot"></div>
+          <div class="industrial-status">Ready · 0 queued · Local</div>
+        </div>
+      </div>
+    </div>
+    <div class="concept-label">
+      <div class="concept-num">Concept D</div>
+      <div class="concept-name">Industrial Utility</div>
+      <div class="concept-tagline">Off-white & deep espresso. IBM Plex Mono. Hazard-stripe accent. Tool aesthetic.</div>
+    </div>
+  </div>
+
+  <!-- E: Soft Minimal -->
+  <div class="concept-card">
+    <div class="concept-preview">
+      <div class="soft-minimal">
+        <div class="soft-minimal-nav">
+          <div class="soft-minimal-logo">Shuck3r</div>
+          <div class="soft-minimal-navlinks">
+            <div class="soft-minimal-navlink active">Download</div>
+            <div class="soft-minimal-navlink">Library</div>
+            <div class="soft-minimal-navlink">History</div>
+          </div>
+        </div>
+        <div class="soft-minimal-eyebrow">Favourites downloader</div>
+        <div class="soft-minimal-heading">Queue <em>what<br>you love</em></div>
+        <div class="soft-minimal-desc">PornHub, xHamster, Pixiv. Credentials stay on your device.</div>
+        <div class="soft-minimal-sites">
+          <div class="soft-minimal-site active">PornHub</div>
+          <div class="soft-minimal-site">xHamster</div>
+          <div class="soft-minimal-site">Pixiv</div>
+        </div>
+        <input class="soft-minimal-field" placeholder="Paste URL or leave blank…" readonly>
+        <button class="soft-minimal-btn">Start download</button>
+        <div class="soft-minimal-dots">
+          <div class="soft-minimal-dot"></div><div class="soft-minimal-dot"></div><div class="soft-minimal-dot"></div><div class="soft-minimal-dot"></div><div class="soft-minimal-dot"></div>
+          <div class="soft-minimal-dot"></div><div class="soft-minimal-dot"></div><div class="soft-minimal-dot"></div><div class="soft-minimal-dot"></div><div class="soft-minimal-dot"></div>
+          <div class="soft-minimal-dot"></div><div class="soft-minimal-dot"></div><div class="soft-minimal-dot"></div><div class="soft-minimal-dot"></div><div class="soft-minimal-dot"></div>
+          <div class="soft-minimal-dot"></div><div class="soft-minimal-dot"></div><div class="soft-minimal-dot"></div><div class="soft-minimal-dot"></div><div class="soft-minimal-dot"></div>
+        </div>
+      </div>
+    </div>
+    <div class="concept-label">
+      <div class="concept-num">Concept E</div>
+      <div class="concept-name">Soft Minimal</div>
+      <div class="concept-tagline">Warm white. Instrument Serif + Figtree. Soft lavender accents. Light, calm, modern.</div>
+    </div>
+  </div>
+
+  <!-- F: Warm Paper -->
+  <div class="concept-card">
+    <div class="concept-preview">
+      <div class="warm-paper">
+        <div class="warm-paper-header">
+          <div class="warm-paper-logo">Shuck3r</div>
+          <div class="warm-paper-tagline">Media Archive</div>
+          <div class="warm-paper-nav">
+            <div class="warm-paper-navlink active">Download</div>
+            <div class="warm-paper-navlink">Library</div>
+            <div class="warm-paper-navlink">History</div>
+          </div>
+        </div>
+        <div class="warm-paper-body">
+          <div class="warm-paper-dateline">Sunday, 18 May 2026 · Local session</div>
+          <div class="warm-paper-heading">Downloader</div>
+          <div class="warm-paper-deck">Queue favourites from PornHub, xHamster, or Pixiv. Auth stays local.</div>
+          <hr class="warm-paper-rule">
+          <div class="warm-paper-sites">
+            <div class="warm-paper-site active">PornHub</div>
+            <div class="warm-paper-site">xHamster</div>
+            <div class="warm-paper-site">Pixiv</div>
+          </div>
+          <input class="warm-paper-field" placeholder="Paste URL or leave blank…" readonly>
+          <button class="warm-paper-btn">Queue →</button>
+        </div>
+      </div>
+    </div>
+    <div class="concept-label">
+      <div class="concept-num">Concept F</div>
+      <div class="concept-name">Warm Paper</div>
+      <div class="concept-tagline">Parchment & ruled lines. Playfair Display. Newspaper editorial. Light mode.</div>
+    </div>
+  </div>
+
+</div>
+
+<div class="picker-footer">
+  <p>Each of these is a full system — <strong>typography, spacing, color, and interaction language</strong> — not just a color swap. Tell me which one (or combination) resonates, and I'll build the complete design system for every page.</p>
+</div>
+
+</body>
+</html>

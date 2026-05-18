@@ -4,19 +4,19 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{% block title %}SHUCK3R{% endblock %}</title>
-    <meta name="color-scheme" content="dark">
+    <meta name="color-scheme" content="light">
     <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="/static/style.css">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@600;700;800;900&family=Exo+2:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Figtree:wght@300;400;500;600;700;800&family=Fragment+Mono&display=swap" rel="stylesheet">
     {% block extra_head %}{% endblock %}
 </head>
 <body>
     <a class="skip-link" href="#main-content">Skip to content</a>
     <header class="site-header">
         <div class="site-header-inner">
-            <a href="/" class="site-brand" {% if request.url.path == '/' %}aria-current="page"{% endif %}>SHUCK3R</a>
+            <a href="/" class="site-brand" {% if request.url.path == '/' %}aria-current="page"{% endif %}>Shuck3r</a>
             <nav class="site-nav" aria-label="Site">
                 <a href="/" class="site-nav-link" {% if request.url.path == '/' %}aria-current="page"{% endif %}>Downloader</a>
                 <a href="/duplicates" class="site-nav-link" {% if request.url.path.startswith('/duplicates') %}aria-current="page"{% endif %}>Duplicate checker</a>
