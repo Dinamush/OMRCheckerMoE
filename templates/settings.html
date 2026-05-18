@@ -63,8 +63,8 @@
                         <label for="skip_existing_in_download_dir">Skip if same title/size already exists in the download folder</label>
                     </div>
 
-                    <fieldset class="form-group" id="pixiv-settings" style="margin: 1.25rem 0; padding: 0.75rem 1rem; border-radius: 6px; border: 1px solid rgba(255, 212, 74, 0.35);">
-                        <legend class="panel-kicker" style="padding: 0 0.25rem; font-size: 1rem;">Pixiv downloads</legend>
+                    <fieldset class="form-group" id="pixiv-settings" style="border-color: var(--color-corn-border);">
+                        <legend class="panel-kicker" style="padding: 0 0.25rem;">Pixiv downloads</legend>
                         <p class="help-text" style="margin-top: 0;">Not the <strong>Video quality</strong> preset above (PornHub / xHamster only).</p>
 
                     <div class="form-group">
@@ -88,7 +88,7 @@
                         <p class="help-text">GIF uses built-in Pillow (via <code>pip install</code>). Optional: place <code>ffmpeg.exe</code> in <code>%LOCALAPPDATA%\HamsterScraper\bin\</code> for higher quality. R-18 needs login.</p>
                     </div>
 
-                    <fieldset class="form-group" style="margin: 1rem 0; padding: 0.75rem 1rem; border-radius: 6px;">
+                    <fieldset class="form-group">
                         <legend class="panel-kicker" style="padding: 0 0.25rem;">Pixiv filenames</legend>
                         <div class="form-group checkbox-group">
                             <input type="hidden" name="pixiv_translate_titles" value="off">
@@ -123,7 +123,7 @@
                         <label for="persistent_cookies">Keep cookie files between sessions (stable Netscape jars under profile)</label>
                     </div>
 
-                    <fieldset class="form-group" style="margin: 1rem 0; padding: 0.75rem 1rem; border-radius: 6px;">
+                    <fieldset class="form-group">
                         <legend class="panel-kicker" style="padding: 0 0.25rem;">Delays</legend>
                         <p class="help-text">Applied after Selenium navigation / between xHamster batches and parallel worker submissions.</p>
                         <div class="form-group">
@@ -163,7 +163,7 @@
                         </p>
                     </div>
 
-                    <fieldset class="form-group" style="margin: 1rem 0; padding: 0.75rem 1rem; border-radius: 6px;">
+                    <fieldset class="form-group">
                         <legend class="panel-kicker" style="padding: 0 0.25rem;">Browser / anti-bot</legend>
                         <p class="help-text">HDoujin-style: login stays visible; scraping may run headless. FlareSolverr is optional and often unreliable.</p>
                         <div class="form-group checkbox-group">
@@ -199,7 +199,7 @@
                         </div>
                     </fieldset>
 
-                    <fieldset class="form-group" style="margin: 1rem 0; padding: 0.75rem 1rem; border-radius: 6px;">
+                    <fieldset class="form-group">
                         <legend class="panel-kicker" style="padding: 0 0.25rem;">Automation</legend>
                         <div class="form-group checkbox-group">
                             <input type="hidden" name="watcher_enabled" value="off">
