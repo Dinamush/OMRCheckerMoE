@@ -473,7 +473,10 @@ const pollStatus = async () => {
             setTimeout(pollStatus, 2000)
         } else if (data.status === "done" || data.status === "cancelled" || data.status === "failed") {
             updateProgress(data)
-            await refreshResults()
+            await Promise.all([
+                refreshResults(),
+                refreshFiles(),
+            ])
         } else {
             // "created" or any future status — keep polling so transitions are
             // picked up without a page reload.
@@ -1643,6 +1646,7 @@ const handleUpload = async (event) => {
     // Set when the server accepted the upload as a background task (202).
     // The poll is responsible for detecting completion and cleaning up.
     let _isBackgroundUpload = false
+    const _uploadStartFileCount = fileBrowserState.files.length
 
     if (hasPdf && progressEl) {
         _updateSplitProgress(0, 0)
@@ -1653,6 +1657,23 @@ const handleUpload = async (event) => {
         let _splitRefreshPending = false
         // Whether the poll has seen total > 0 (split is/was in progress).
         let _splitSeenTotal = false
+        let _splitEmptyPollRefreshPending = false
+        const _finishBackgroundUpload = async () => {
+            _splitSeenTotal = false
+            _isBackgroundUpload = false
+            _autoStartFired = false
+            if (pollInterval) { clearInterval(pollInterval); pollInterval = null }
+            await refreshFiles()
+            const count = fileBrowserState.files.length
+            const added = Math.max(0, count - _uploadStartFileCount)
+            show(feedback, `Split complete — ${added || count} page(s) ready.`, "success")
+            if (progressEl) {
+                _updateSplitProgress(count, count)
+                setTimeout(() => { progressEl.hidden = true }, 1200)
+            }
+            const pipelineAction = document.getElementById("pipeline-action")
+            if (pipelineAction) pipelineAction.hidden = true
+        }
         pollInterval = setInterval(async () => {
             try {
                 const status = await jsonFetch(apiUrl("/status"))
@@ -1688,19 +1709,21 @@ const handleUpload = async (event) => {
                     handleAutoStart(status)
                 } else if (_splitSeenTotal) {
                     // total went back to 0 after being active → split complete.
-                    _splitSeenTotal = false
-                    _isBackgroundUpload = false
-                    _autoStartFired = false
-                    if (pollInterval) { clearInterval(pollInterval); pollInterval = null }
-                    await refreshFiles()
-                    const count = fileBrowserState.files.length
-                    show(feedback, `Split complete — ${count} page(s) ready.`, "success")
-                    if (progressEl) {
-                        _updateSplitProgress(count, count)
-                        setTimeout(() => { progressEl.hidden = true }, 1200)
+                    await _finishBackgroundUpload()
+                } else if (_isBackgroundUpload && !_splitEmptyPollRefreshPending) {
+                    // Race: very small PDFs can split and clear pdf_split_total
+                    // before this 500ms poll ever observes total > 0. Refresh
+                    // the navigator; if files were added, treat the upload as
+                    // complete instead of polling forever until page refresh.
+                    _splitEmptyPollRefreshPending = true
+                    try {
+                        await refreshFiles()
+                        if (fileBrowserState.files.length > _uploadStartFileCount) {
+                            await _finishBackgroundUpload()
+                        }
+                    } finally {
+                        _splitEmptyPollRefreshPending = false
                     }
-                    const pipelineAction = document.getElementById("pipeline-action")
-                    if (pipelineAction) pipelineAction.hidden = true
                 }
             } catch (_) { /* ignore poll errors during upload */ }
         }, 500)
