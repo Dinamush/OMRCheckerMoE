@@ -19,6 +19,127 @@ from src.utils.image import CLAHE_HELPER, ImageUtils
 from src.utils.interaction import InteractionUtils
 
 
+def _aspect_matches(actual: float, expected: float, tolerance: float = 0.12) -> bool:
+    if actual <= 0 or expected <= 0:
+        return False
+    return abs(actual / expected - 1.0) <= tolerance
+
+
+def _detect_aruco_centers(image, pre_processor):
+    gray = (
+        cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        if len(image.shape) == 3
+        else image
+    )
+    pad = 60
+    padded = cv2.copyMakeBorder(
+        gray, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=255
+    )
+    corners_raw, ids_raw, _ = pre_processor.aruco_detector.detectMarkers(padded)
+    if ids_raw is None or len(ids_raw) == 0:
+        return {}
+    detected = {}
+    for idx, marker_id in enumerate(ids_raw.flatten()):
+        center = (corners_raw[idx] - [[pad, pad]])[0].mean(axis=0)
+        detected[int(marker_id)] = (float(center[0]), float(center[1]))
+    return detected
+
+
+def _rotation_score_for_markers(detected, corner_ids, width, height, rotation):
+    expected_positions = {
+        0: (0.0, 0.0),
+        1: (1.0, 0.0),
+        2: (0.0, 1.0),
+        3: (1.0, 1.0),
+    }
+    id_to_corner = {int(marker_id): idx for idx, marker_id in enumerate(corner_ids)}
+    transformed_width = height if rotation in {"cw", "ccw"} else width
+    transformed_height = width if rotation in {"cw", "ccw"} else height
+    distances = []
+    for marker_id, center in detected.items():
+        if marker_id not in id_to_corner:
+            continue
+        x, y = center
+        if rotation == "cw":
+            x, y = height - 1 - y, x
+        elif rotation == "ccw":
+            x, y = y, width - 1 - x
+        elif rotation == "180":
+            x, y = width - 1 - x, height - 1 - y
+        expected_x, expected_y = expected_positions[id_to_corner[marker_id]]
+        normalized_x = x / max(1.0, float(transformed_width - 1))
+        normalized_y = y / max(1.0, float(transformed_height - 1))
+        distances.append(
+            ((normalized_x - expected_x) ** 2 + (normalized_y - expected_y) ** 2)
+            ** 0.5
+        )
+    if not distances:
+        return float("inf")
+    return float(sum(distances) / len(distances))
+
+
+def _auto_orient_to_template(file_path, in_omr, template, tuning_config):
+    if in_omr is None:
+        return in_omr
+
+    height, width = in_omr.shape[:2]
+    target_width = float(tuning_config.dimensions.processing_width)
+    target_height = float(tuning_config.dimensions.processing_height)
+    target_aspect = target_width / max(1.0, target_height)
+    source_aspect = width / max(1.0, float(height))
+    if _aspect_matches(source_aspect, target_aspect):
+        return in_omr
+    if not _aspect_matches(1.0 / source_aspect, target_aspect):
+        return in_omr
+
+    aruco_processor = next(
+        (
+            processor
+            for processor in template.pre_processors
+            if getattr(processor, "marker_type", None) == "aruco"
+            and hasattr(processor, "aruco_detector")
+        ),
+        None,
+    )
+    if aruco_processor is None:
+        return in_omr
+
+    detected = _detect_aruco_centers(in_omr, aruco_processor)
+    if not detected:
+        return in_omr
+
+    scores = {
+        "cw": _rotation_score_for_markers(
+            detected, aruco_processor.aruco_corner_ids, width, height, "cw"
+        ),
+        "ccw": _rotation_score_for_markers(
+            detected, aruco_processor.aruco_corner_ids, width, height, "ccw"
+        ),
+    }
+    rotation, score = min(scores.items(), key=lambda item: item[1])
+    other_score = max(scores.values())
+    if score > 0.30 or other_score - score < 0.15:
+        logger.warning(
+            file_path,
+            "\nAuto-orient skipped: marker IDs did not give a confident "
+            f"90-degree rotation ({rotation} score={score:.3f}).",
+        )
+        return in_omr
+
+    rotate_code = (
+        cv2.ROTATE_90_CLOCKWISE
+        if rotation == "cw"
+        else cv2.ROTATE_90_COUNTERCLOCKWISE
+    )
+    logger.info(
+        file_path,
+        "\nAuto-orient: rotating scan "
+        f"{'90 degrees clockwise' if rotation == 'cw' else '90 degrees counter-clockwise'} "
+        "to match the template aspect before resizing.",
+    )
+    return cv2.rotate(in_omr, rotate_code)
+
+
 def select_question_response(
     *,
     marked_options: list[tuple[str, float]],
@@ -59,6 +180,7 @@ class ImageInstanceOps:
 
     def apply_preprocessors(self, file_path, in_omr, template):
         tuning_config = self.tuning_config
+        in_omr = _auto_orient_to_template(file_path, in_omr, template, tuning_config)
         # resize to conform to template
         in_omr = ImageUtils.resize_util(
             in_omr,

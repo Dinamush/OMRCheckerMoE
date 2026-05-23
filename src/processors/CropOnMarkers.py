@@ -128,6 +128,37 @@ def _find_homography_robust(src_pts: np.ndarray, dst_pts: np.ndarray) -> np.ndar
     return homography
 
 
+def _similarity_homography_from_pairs(
+    src_pts: np.ndarray, dst_pts: np.ndarray
+) -> np.ndarray | None:
+    """Fit a similarity homography (rotation + uniform scale + translation).
+
+    Used as a degraded-mode recovery when only two ArUco markers decode on
+    a Xerox/feeder scan and the other two are present-but-corrupted (common
+    when one half of the page has weak ink contrast). Restricting the
+    recovery to a 4-DOF similarity transform means there is no extra
+    perspective freedom to silently mis-warp content, and the existing
+    geometric sanity check on the resulting homography (convexity, aspect,
+    area) gates the output further. Returns ``None`` if the source points
+    are coincident or the rigid solver could not converge.
+    """
+    src = np.asarray(src_pts, dtype=np.float64).reshape(-1, 2)
+    dst = np.asarray(dst_pts, dtype=np.float64).reshape(-1, 2)
+    if src.shape != dst.shape or src.shape[0] < 2:
+        return None
+    matrix, _ = cv2.estimateAffinePartial2D(
+        src.astype(np.float32),
+        dst.astype(np.float32),
+        method=cv2.RANSAC,
+        ransacReprojThreshold=3.0,
+    )
+    if matrix is None:
+        return None
+    homography = np.eye(3, dtype=np.float64)
+    homography[:2, :] = matrix
+    return homography
+
+
 class CropOnMarkers(ImagePreprocessor):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -189,24 +220,16 @@ class CropOnMarkers(ImagePreprocessor):
             # the missing IDs. This is a pure code change — no template
             # update or reprint required.
             # ----------------------------------------------------------------
-            half_size = float(marker_ops.get("referenceMarkerHalfSize", 12.0))
+            half_size = float(marker_ops.get("referenceMarkerHalfSize", 10.0))
             self.reference_marker_half_size = half_size
             if self.reference_marker_centers is not None:
                 obj_points = np.zeros((4, 4, 3), dtype=np.float32)
                 # ArUco corner ordering inside one marker: TL, TR, BR, BL.
-                offsets = np.array(
-                    [
-                        [-half_size, -half_size],
-                        [half_size, -half_size],
-                        [half_size, half_size],
-                        [-half_size, half_size],
-                    ],
-                    dtype=np.float32,
-                )
-                for i, (cx, cy) in enumerate(self.reference_marker_centers):
+                for i in range(4):
+                    ref_corners = self._reference_marker_corners(i)
                     for j in range(4):
-                        obj_points[i, j, 0] = cx + offsets[j, 0]
-                        obj_points[i, j, 1] = cy + offsets[j, 1]
+                        obj_points[i, j, 0] = ref_corners[j, 0]
+                        obj_points[i, j, 1] = ref_corners[j, 1]
                         obj_points[i, j, 2] = 0.0
                 board_ids = np.array(self.aruco_corner_ids, dtype=np.int32)
                 self.aruco_board = cv2.aruco.Board(obj_points, aruco_dict, board_ids)
@@ -263,6 +286,27 @@ class CropOnMarkers(ImagePreprocessor):
                 )
             parsed.append((float(point[0]), float(point[1])))
         return parsed
+
+    def _reference_marker_corners(self, corner_idx: int) -> np.ndarray:
+        cx, cy = self.reference_marker_centers[corner_idx]
+        half = float(self.reference_marker_half_size)
+        marker_size = half * 2.0
+        quiet_zone = max(6.0, marker_size / 8.0)
+        width = float(self.tuning_config.dimensions.processing_width)
+        height = float(self.tuning_config.dimensions.processing_height)
+        x0 = max(quiet_zone, min(cx - half, width - marker_size - quiet_zone))
+        y0 = max(quiet_zone, min(cy - half, height - marker_size - quiet_zone))
+        x1 = x0 + marker_size
+        y1 = y0 + marker_size
+        return np.array(
+            [
+                [x0, y0],
+                [x1, y0],
+                [x1, y1],
+                [x0, y1],
+            ],
+            dtype=np.float32,
+        )
 
     @staticmethod
     def _parse_marker_corners(raw):
@@ -484,12 +528,17 @@ class CropOnMarkers(ImagePreprocessor):
             )
             return None
 
-        # Build id → center mapping
+        # Build ID-keyed center and sub-corner maps. The sub-corners let the
+        # 3-marker path solve a real projective transform from observed points
+        # instead of synthesizing a fourth marker center.
         detected: dict[int, list[float]] = {}
+        detected_corners: dict[int, np.ndarray] = {}
         for i, marker_id in enumerate(ids_raw.flatten()):
             # corners_raw[i] has shape (1, 4, 2); mean over the 4 sub-corners
             center = corners_raw[i][0].mean(axis=0).tolist()
-            detected[int(marker_id)] = center
+            marker_id_int = int(marker_id)
+            detected[marker_id_int] = center
+            detected_corners[marker_id_int] = corners_raw[i][0].astype(np.float32)
 
         # Map expected IDs to canonical corner indices
         id_to_corner = {
@@ -509,17 +558,30 @@ class CropOnMarkers(ImagePreprocessor):
                 )
 
         detected_count = 4 - len(missing_indices)
-        if detected_count < 3:
+        if detected_count < 2:
             logger.error(
                 file_path,
                 f"\nArUco: only {detected_count}/4 markers detected — "
-                "need at least 3 to recover orientation.",
+                "need at least 2 to attempt recovery.",
+            )
+            return None
+        if detected_count == 2 and not self.preserve_full_image:
+            # The non-preserveFullImage path warps via ``four_point_transform``
+            # which needs all four page corners; the 2-marker similarity
+            # recovery only feeds the homography path below.
+            logger.error(
+                file_path,
+                "\nArUco: only 2/4 markers detected and preserveFullImage is "
+                "off — cannot recover with the four_point_transform path.",
             )
             return None
 
         # Extrapolate the one missing corner using an affine fit over the 3
-        # detected corners and their reference positions.
-        if missing_indices:
+        # detected corners and their reference positions. This is retained for
+        # the non-preserveFullImage path, which still needs four page corners
+        # for four_point_transform. The preserveFullImage path below uses only
+        # observed marker sub-corners for its homography.
+        if missing_indices and not self.preserve_full_image:
             if self.reference_marker_centers is None:
                 logger.error(
                     file_path,
@@ -552,16 +614,42 @@ class CropOnMarkers(ImagePreprocessor):
                 f"[{round(float(estimated[0]), 1)}, {round(float(estimated[1]), 1)}]",
             )
 
-        centres = [c for c in centres_by_index if c is not None]
-
         if self.preserve_full_image:
-            src_pts = np.array(centres, dtype=np.float32)
-            dst_pts = np.array(self.reference_marker_centers, dtype=np.float32)
-            homography = _find_homography_robust(src_pts, dst_pts)
+            if self.reference_marker_centers is None:
+                logger.error(
+                    file_path,
+                    "\nArUco: preserveFullImage=true requires referenceMarkerCenters.",
+                )
+                return None
+            src_corner_points = []
+            dst_corner_points = []
+            for id_val, corner_idx in id_to_corner.items():
+                if id_val not in detected_corners:
+                    continue
+                src_corner_points.extend(detected_corners[id_val])
+                dst_corner_points.extend(self._reference_marker_corners(corner_idx))
+            src_pts = np.array(src_corner_points, dtype=np.float32)
+            dst_pts = np.array(dst_corner_points, dtype=np.float32)
+            if detected_count >= 3:
+                homography = _find_homography_robust(src_pts, dst_pts)
+            else:
+                # Degraded recovery: only 2 markers decoded. Restrict the
+                # transform to a similarity (rotation + uniform scale +
+                # translation) so we cannot silently introduce perspective
+                # in the unobserved direction. The downstream sanity check
+                # on aspect/area/convexity still gates the result.
+                homography = _similarity_homography_from_pairs(src_pts, dst_pts)
+                if homography is not None:
+                    logger.warning(
+                        file_path,
+                        "\nArUco: only 2/4 markers decoded — using degraded "
+                        "similarity-transform recovery (rotation + uniform "
+                        "scale + translation only). Verify alignment.",
+                    )
             if homography is None:
                 logger.error(
                     file_path,
-                    "\nArUco: could not compute homography from detected markers.",
+                    "\nArUco: could not compute homography from detected marker corners.",
                 )
                 return None
             # Sanity check: with refineDetectedMarkers occasionally promoting a
@@ -591,6 +679,7 @@ class CropOnMarkers(ImagePreprocessor):
                 border_mode=cv2.BORDER_REPLICATE,
             )
         else:
+            centres = [c for c in centres_by_index if c is not None]
             image = ImageUtils.four_point_transform(image, np.array(centres))
 
         if config.outputs.show_image_level >= 2:
