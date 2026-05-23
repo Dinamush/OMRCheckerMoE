@@ -1,0 +1,10 @@
+{
+  "label": "gpu",
+  "gpu_available": true,
+  "gpu_status": "GPU acceleration enabled \u2014 using CUDA device 0: unknown",
+  "output_mode": "zip",
+  "rows": 5000,
+  "elapsed_s": 255.17,
+  "output_bytes": 8855508955,
+  "rows_per_sec": 19.59
+}

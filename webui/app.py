@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import uuid
 from contextlib import asynccontextmanager
+from src.utils.cuda_paths import register_cuda_dll_directories
+
+register_cuda_dll_directories()
+
 from pathlib import Path
 
 import logging

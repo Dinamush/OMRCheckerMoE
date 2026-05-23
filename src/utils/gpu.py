@@ -31,6 +31,10 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from src.utils.cuda_paths import register_cuda_dll_directories
+
+register_cuda_dll_directories()
+
 import cv2
 import numpy as np
 
@@ -67,7 +71,9 @@ def _detect_gpu() -> tuple[bool, str]:
             "Running on CPU."
         )
     try:
-        dev_name: str = cv2.cuda.DeviceInfo(0).name()
+        info = cv2.cuda.DeviceInfo(0)
+        name_attr = getattr(info, "name", None)
+        dev_name = name_attr() if callable(name_attr) else str(name_attr or "unknown")
     except Exception:
         dev_name = "unknown"
     return True, f"GPU acceleration enabled — using CUDA device 0: {dev_name}"

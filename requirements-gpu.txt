@@ -1,0 +1,8 @@
+# GPU-accelerated OpenCV (CUDA) — use scripts/install_opencv_cuda.ps1 instead of pip -r.
+#
+# 1. pip install -r requirements.txt
+# 2. Install CUDA Toolkit 12.8 + cuDNN 9.7 (see scripts/install_opencv_cuda.ps1 header)
+# 3. powershell -ExecutionPolicy Bypass -File scripts/install_opencv_cuda.ps1
+#
+# Wheel (Windows x64, CUDA 12.8):
+# https://github.com/cudawarped/opencv-python-cuda-wheels/releases/download/4.11.0.20250124/opencv_contrib_python_rolling-4.12.0.86-cp37-abi3-win_amd64.whl

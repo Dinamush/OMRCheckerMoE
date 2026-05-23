@@ -6,8 +6,17 @@ import csv
 import io
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Iterable
+
+# Worker processes must register CUDA/cuDNN DLL paths before importing cv2.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+from src.utils.cuda_paths import register_cuda_dll_directories  # noqa: E402
+
+register_cuda_dll_directories()
 
 import cv2
 import numpy as np
