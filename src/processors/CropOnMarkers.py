@@ -1,4 +1,5 @@
 import os
+from dataclasses import dataclass
 
 import cv2
 import numpy as np
@@ -39,6 +40,21 @@ _HOMOGRAPHY_ASPECT_TOLERANCE = 0.10
 # sliver" homographies produced by collinear / near-collinear marker sets.
 _HOMOGRAPHY_AREA_MIN = 0.30
 _HOMOGRAPHY_AREA_MAX = 1.50
+_DEGRADED_BUBBLE_SAMPLE_LIMIT = 240
+_DEGRADED_BUBBLE_MIN_SAMPLES = 16
+_DEGRADED_BUBBLE_CONTRAST_FLOOR = 0.03
+_DEGRADED_BUBBLE_MIN_MEDIAN_CONTRAST = 0.04
+_DEGRADED_BUBBLE_MIN_COVERAGE = 0.70
+
+
+@dataclass(frozen=True)
+class WarpBubbleConfidence:
+    sample_count: int
+    median_contrast: float
+    coverage: float
+    score: float
+    ok: bool
+    reason: str
 
 
 def _homography_is_sane(
@@ -119,7 +135,9 @@ def _find_homography_robust(src_pts: np.ndarray, dst_pts: np.ndarray) -> np.ndar
     RANSAC actively rejects mismatched outliers.
     """
     method = getattr(cv2, "USAC_MAGSAC", cv2.RANSAC)
-    homography, _ = cv2.findHomography(src_pts, dst_pts, method=method, ransacReprojThreshold=3.0)
+    homography, _ = cv2.findHomography(
+        src_pts, dst_pts, method=method, ransacReprojThreshold=3.0
+    )
     if homography is None:
         # MAGSAC sometimes refuses noisy 4-point sets; fall back to the
         # plain DLT solver (``method=0``) which always returns something
@@ -159,12 +177,146 @@ def _similarity_homography_from_pairs(
     return homography
 
 
+def _iter_template_bubble_boxes(
+    template, sample_limit: int = _DEGRADED_BUBBLE_SAMPLE_LIMIT
+):
+    boxes: list[tuple[int, int, int, int]] = []
+    for field_block in getattr(template, "field_blocks", []) or []:
+        try:
+            box_w, box_h = (int(v) for v in field_block.bubble_dimensions)
+        except (TypeError, ValueError):
+            continue
+        if box_w <= 0 or box_h <= 0:
+            continue
+        for field_block_bubbles in (
+            getattr(field_block, "traverse_bubbles", []) or []
+        ):
+            for bubble in field_block_bubbles:
+                boxes.append((int(bubble.x), int(bubble.y), box_w, box_h))
+
+    if len(boxes) <= sample_limit:
+        return boxes
+    indices = np.linspace(0, len(boxes) - 1, num=sample_limit, dtype=np.int32)
+    return [boxes[int(index)] for index in indices]
+
+
+def _score_warp_bubble_confidence(image, template) -> WarpBubbleConfidence | None:
+    """Score whether expected bubble outlines are still aligned after a warp.
+
+    This is intentionally cheap and is only used on the degraded 2-marker
+    path. A correct warp places each template bubble outline on dark printed
+    ink, so the outline ring should be darker than nearby paper. Perspective
+    drift in the similarity fallback pushes that ring off the printed bubble
+    and collapses the contrast/coverage signal.
+    """
+    if template is None:
+        return None
+
+    boxes = _iter_template_bubble_boxes(template)
+    if len(boxes) < _DEGRADED_BUBBLE_MIN_SAMPLES:
+        return WarpBubbleConfidence(
+            sample_count=len(boxes),
+            median_contrast=0.0,
+            coverage=0.0,
+            score=0.0,
+            ok=False,
+            reason=f"only {len(boxes)} bubble samples available",
+        )
+
+    gray = (
+        cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        if len(image.shape) == 3
+        else image
+    )
+    height, width = gray.shape[:2]
+    contrasts: list[float] = []
+    for x, y, box_w, box_h in boxes:
+        center_x = x + box_w / 2.0
+        center_y = y + box_h / 2.0
+        margin = max(4, int(max(box_w, box_h) * 0.6))
+        x0 = max(0, int(x - margin))
+        y0 = max(0, int(y - margin))
+        x1 = min(width, int(x + box_w + margin))
+        y1 = min(height, int(y + box_h + margin))
+        patch = gray[y0:y1, x0:x1]
+        if patch.size == 0:
+            continue
+
+        center = (int(round(center_x - x0)), int(round(center_y - y0)))
+        outer_axes = (
+            max(2, int(round(box_w * 0.55))),
+            max(2, int(round(box_h * 0.55))),
+        )
+        inner_axes = (
+            max(1, int(round(box_w * 0.30))),
+            max(1, int(round(box_h * 0.30))),
+        )
+        background_axes = (
+            max(3, int(round(box_w * 0.75))),
+            max(3, int(round(box_h * 0.75))),
+        )
+        outer_mask = np.zeros(patch.shape, dtype=np.uint8)
+        inner_mask = np.zeros(patch.shape, dtype=np.uint8)
+        background_mask = np.full(patch.shape, 255, dtype=np.uint8)
+        cv2.ellipse(outer_mask, center, outer_axes, 0, 0, 360, 255, -1)
+        cv2.ellipse(inner_mask, center, inner_axes, 0, 0, 360, 255, -1)
+        cv2.ellipse(background_mask, center, background_axes, 0, 0, 360, 0, -1)
+        outline_mask = cv2.subtract(outer_mask, inner_mask)
+        if (
+            cv2.countNonZero(outline_mask) < 4
+            or cv2.countNonZero(background_mask) < 4
+        ):
+            continue
+
+        outline_mean = float(cv2.mean(patch, mask=outline_mask)[0])
+        background_mean = float(cv2.mean(patch, mask=background_mask)[0])
+        contrasts.append((background_mean - outline_mean) / 255.0)
+
+    if len(contrasts) < _DEGRADED_BUBBLE_MIN_SAMPLES:
+        return WarpBubbleConfidence(
+            sample_count=len(contrasts),
+            median_contrast=0.0,
+            coverage=0.0,
+            score=0.0,
+            ok=False,
+            reason=f"only {len(contrasts)} valid bubble samples",
+        )
+
+    contrast_array = np.asarray(contrasts, dtype=np.float32)
+    median_contrast = float(np.median(contrast_array))
+    coverage = float(np.mean(contrast_array > _DEGRADED_BUBBLE_CONTRAST_FLOOR))
+    normalized_median = min(1.0, max(0.0, median_contrast / 0.16))
+    score = 0.60 * normalized_median + 0.40 * coverage
+    ok = (
+        median_contrast >= _DEGRADED_BUBBLE_MIN_MEDIAN_CONTRAST
+        and coverage >= _DEGRADED_BUBBLE_MIN_COVERAGE
+    )
+    reason = (
+        "ok"
+        if ok
+        else (
+            f"median_contrast={median_contrast:.3f} "
+            f"coverage={coverage:.2f}"
+        )
+    )
+    return WarpBubbleConfidence(
+        sample_count=len(contrasts),
+        median_contrast=median_contrast,
+        coverage=coverage,
+        score=score,
+        ok=ok,
+        reason=reason,
+    )
+
+
 class CropOnMarkers(ImagePreprocessor):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         config = self.tuning_config
         marker_ops = self.options
         self.threshold_circles = []
+        self.template_context = None
+        self.last_warp_bubble_confidence: WarpBubbleConfidence | None = None
         # img_utils = ImageUtils()
 
         # Marker detection type: "template_matching" (default) or "aruco"
@@ -441,6 +593,9 @@ class CropOnMarkers(ImagePreprocessor):
             return f"CropOnMarkers[aruco ids={self.aruco_corner_ids}]"
         return self.marker_path
 
+    def set_template_context(self, template) -> None:
+        self.template_context = template
+
     def exclude_files(self):
         if self.marker_type == "aruco":
             return []
@@ -455,6 +610,7 @@ class CropOnMarkers(ImagePreprocessor):
         Corner index → ID mapping comes from ``self.aruco_corner_ids``:
             index 0 = top-left, 1 = top-right, 2 = bottom-left, 3 = bottom-right
         """
+        self.last_warp_bubble_confidence = None
         config = self.tuning_config
 
         # ArUco detector works best on grayscale
@@ -630,6 +786,7 @@ class CropOnMarkers(ImagePreprocessor):
                 dst_corner_points.extend(self._reference_marker_corners(corner_idx))
             src_pts = np.array(src_corner_points, dtype=np.float32)
             dst_pts = np.array(dst_corner_points, dtype=np.float32)
+            degraded_similarity = detected_count == 2
             if detected_count >= 3:
                 homography = _find_homography_robust(src_pts, dst_pts)
             else:
@@ -678,6 +835,39 @@ class CropOnMarkers(ImagePreprocessor):
                 flags=cv2.INTER_LINEAR,
                 border_mode=cv2.BORDER_REPLICATE,
             )
+            if degraded_similarity:
+                confidence = _score_warp_bubble_confidence(
+                    image, self.template_context
+                )
+                self.last_warp_bubble_confidence = confidence
+                if confidence is None:
+                    logger.warning(
+                        file_path,
+                        "\nArUco: degraded 2-marker recovery could not run "
+                        "bubble confidence scoring because template geometry "
+                        "was unavailable. Verify alignment.",
+                    )
+                elif not confidence.ok:
+                    logger.error(
+                        file_path,
+                        "\nArUco: rejected degraded 2-marker recovery because "
+                        "bubble alignment confidence was too low "
+                        f"(score={confidence.score:.2f}, "
+                        f"median_contrast={confidence.median_contrast:.3f}, "
+                        f"coverage={confidence.coverage:.2f}, "
+                        f"samples={confidence.sample_count}; "
+                        f"{confidence.reason}).",
+                    )
+                    return None
+                else:
+                    logger.warning(
+                        file_path,
+                        "\nArUco: degraded 2-marker bubble alignment confidence "
+                        f"accepted (score={confidence.score:.2f}, "
+                        f"median_contrast={confidence.median_contrast:.3f}, "
+                        f"coverage={confidence.coverage:.2f}, "
+                        f"samples={confidence.sample_count}). Verify alignment.",
+                    )
         else:
             centres = [c for c in centres_by_index if c is not None]
             image = ImageUtils.four_point_transform(image, np.array(centres))

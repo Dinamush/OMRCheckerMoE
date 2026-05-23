@@ -21,6 +21,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import itertools
 import io
 import json
 import sys
@@ -36,7 +37,9 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 from prefill_only_package import prefill_answer_sheet_final as prefill_module
+from src.constants.common import FIELD_TYPES
 from src.constants.image_processing import QUADRANT_DIVISION  # noqa: F401  (used downstream)
+from src.template import FieldBlock
 from webui.services import prefill as prefill_service
 
 # Lazy-construct one CropOnMarkers via the same plumbing the OMR engine uses,
@@ -55,6 +58,15 @@ REFERENCE_CENTRES = [
     [651.5, 499.0],
 ]
 ARUCO_IDS = [0, 1, 2, 3]
+CORNER_NAMES = ["TL", "TR", "BL", "BR"]
+PAIR_TYPES = {
+    frozenset((0, 1)): "same_edge_top",
+    frozenset((0, 2)): "same_edge_left",
+    frozenset((1, 3)): "same_edge_right",
+    frozenset((2, 3)): "same_edge_bottom",
+    frozenset((0, 3)): "diagonal",
+    frozenset((1, 2)): "diagonal",
+}
 
 
 class _StubImageOps:
@@ -78,6 +90,34 @@ class _StubImageOps:
         pass
 
 
+class _TemplateContext:
+    def __init__(self, field_blocks: list[FieldBlock]) -> None:
+        self.field_blocks = field_blocks
+
+
+def make_prefilled_template_context() -> _TemplateContext:
+    from webui.api import _PREFILLED_25Q_TEMPLATE
+
+    field_blocks = []
+    for block_name, field_block_object in _PREFILLED_25Q_TEMPLATE[
+        "fieldBlocks"
+    ].items():
+        block_object = dict(field_block_object)
+        if "fieldType" in block_object:
+            block_object = {
+                **FIELD_TYPES[block_object["fieldType"]],
+                **block_object,
+            }
+        block_object = {
+            "direction": "vertical",
+            "emptyValue": "",
+            "bubbleDimensions": _PREFILLED_25Q_TEMPLATE["bubbleDimensions"],
+            **block_object,
+        }
+        field_blocks.append(FieldBlock(block_name, block_object))
+    return _TemplateContext(field_blocks)
+
+
 def make_cropper() -> CropOnMarkers:
     image_ops = _StubImageOps()
     proc = CropOnMarkers(
@@ -91,6 +131,7 @@ def make_cropper() -> CropOnMarkers:
         relative_dir=str(REPO),
         image_instance_ops=image_ops,
     )
+    proc.set_template_context(make_prefilled_template_context())
     return proc
 
 
@@ -237,6 +278,92 @@ def occlude(
     return out
 
 
+def _perspective_jitter(image: np.ndarray, amount: float) -> np.ndarray:
+    h, w = image.shape[:2]
+    dx = w * amount
+    dy = h * amount
+    src = np.array(
+        [[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]],
+        dtype=np.float32,
+    )
+    dst = np.array(
+        [
+            [dx * 0.2, dy],
+            [w - 1 - dx, dy * 0.3],
+            [w - 1 - dx * 0.3, h - 1 - dy],
+            [dx, h - 1 - dy * 0.2],
+        ],
+        dtype=np.float32,
+    )
+    matrix = cv2.getPerspectiveTransform(src, dst)
+    return cv2.warpPerspective(
+        image,
+        matrix,
+        (w, h),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(255, 255, 255),
+    )
+
+
+def _rotate_skew(image: np.ndarray, degrees: float) -> np.ndarray:
+    h, w = image.shape[:2]
+    matrix = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), degrees, 1.0)
+    return cv2.warpAffine(
+        image,
+        matrix,
+        (w, h),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(255, 255, 255),
+    )
+
+
+def _jpeg_roundtrip(image: np.ndarray, quality: int) -> np.ndarray:
+    ok, encoded = cv2.imencode(".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+    if not ok:
+        return image
+    decoded = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+    return decoded if decoded is not None else image
+
+
+def _motion_blur(image: np.ndarray, kernel_size: int) -> np.ndarray:
+    kernel = np.zeros((kernel_size, kernel_size), dtype=np.float32)
+    kernel[kernel_size // 2, :] = 1.0 / kernel_size
+    return cv2.filter2D(image, -1, kernel)
+
+
+def apply_transform(image: np.ndarray, transform: str) -> np.ndarray:
+    out = image.copy()
+    if transform == "none":
+        return out
+    if transform == "rotate_180":
+        return cv2.rotate(out, cv2.ROTATE_180)
+    if transform == "skew_2deg":
+        return _rotate_skew(out, 2.0)
+    if transform == "skew_5deg":
+        return _rotate_skew(out, 5.0)
+    if transform == "perspective_mild":
+        return _perspective_jitter(out, 0.025)
+    if transform == "perspective_strong":
+        return _perspective_jitter(out, 0.055)
+    if transform == "gaussian_blur":
+        return cv2.GaussianBlur(out, (5, 5), 0)
+    if transform == "motion_blur":
+        return _motion_blur(out, 7)
+    if transform == "jpeg_q55":
+        return _jpeg_roundtrip(out, 55)
+    if transform == "xerox_low_contrast":
+        out = cv2.convertScaleAbs(out, alpha=0.72, beta=42)
+        out = cv2.GaussianBlur(out, (3, 3), 0)
+        return _jpeg_roundtrip(out, 65)
+    if transform == "xerox_perspective":
+        out = _perspective_jitter(out, 0.035)
+        out = cv2.convertScaleAbs(out, alpha=0.76, beta=36)
+        return _jpeg_roundtrip(out, 65)
+    raise ValueError(f"Unknown transform: {transform}")
+
+
 def detect_marker_centres(image_bgr: np.ndarray) -> dict[int, np.ndarray]:
     """Detect ArUco markers and return id → centre (x, y) mapping."""
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY) if image_bgr.ndim == 3 else image_bgr
@@ -277,18 +404,64 @@ def reprojection_error(warped: np.ndarray) -> float | None:
     return float(mean(diffs))
 
 
+def _content_alignment_error(reference: np.ndarray, warped: np.ndarray) -> float | None:
+    """Mean absolute difference against the clean sheet, ignoring marker zones."""
+    if warped is None or warped.shape != reference.shape:
+        return None
+    mask = np.full(reference.shape[:2], 255, dtype=np.uint8)
+    for corner_idx in range(4):
+        x0, y0, x1, y1 = _marker_box_on_canvas(corner_idx)
+        pad = 12
+        mask[
+            max(0, y0 - pad): min(mask.shape[0], y1 + pad),
+            max(0, x0 - pad): min(mask.shape[1], x1 + pad),
+        ] = 0
+    diff = cv2.absdiff(reference, warped)
+    masked = cv2.mean(diff, mask=mask)
+    return float(sum(masked[:3]) / 3.0)
+
+
+def _pair_type(corners: list[int]) -> str:
+    if len(corners) == 0:
+        return "none"
+    if len(corners) == 1:
+        return "single"
+    if len(corners) == 2:
+        return PAIR_TYPES.get(frozenset(corners), "unknown_pair")
+    if len(corners) == 3:
+        return "three_missing"
+    return "all_missing"
+
+
+def _scenario_label(corners: list[int], severity: str, transform: str) -> str:
+    base = (
+        "clean"
+        if not corners
+        else f"{severity}_" + "+".join(CORNER_NAMES[c] for c in corners)
+    )
+    return base if transform == "none" else f"{base}__{transform}"
+
+
 def run_scenario(
     cropper: CropOnMarkers,
     sheets: list[np.ndarray],
     occluded_corners: list[int],
     *,
     severity: str = "full",
+    transform: str = "none",
     label: str | None = None,
 ) -> dict:
     rng = np.random.default_rng(12345)
     successes = 0
     times_ms: list[float] = []
     errors_px: list[float] = []
+    alignment_errors: list[float] = []
+    confidence_scores: list[float] = []
+    confidence_medians: list[float] = []
+    confidence_coverages: list[float] = []
+    confidence_rejections = 0
+    pre_counts: list[int] = []
+    failure_count = 0
     for idx, sheet in enumerate(sheets):
         rng_local = np.random.default_rng(rng.integers(0, 1 << 30))
         trial = (
@@ -296,39 +469,128 @@ def run_scenario(
             if occluded_corners
             else sheet
         )
+        trial = apply_transform(trial, transform)
+        pre_counts.append(len(detect_marker_centres(trial)))
         t0 = time.perf_counter()
         try:
             result = cropper._apply_aruco_filter(trial.copy(), f"bench-{idx}.png")
         except Exception:
             result = None
+        confidence = getattr(cropper, "last_warp_bubble_confidence", None)
+        if confidence is not None:
+            confidence_scores.append(float(confidence.score))
+            confidence_medians.append(float(confidence.median_contrast))
+            confidence_coverages.append(float(confidence.coverage))
+            if not confidence.ok:
+                confidence_rejections += 1
         times_ms.append((time.perf_counter() - t0) * 1000.0)
         if result is None:
+            failure_count += 1
             continue
         successes += 1
         err = reprojection_error(result)
         if err is not None:
             errors_px.append(err)
+        alignment_error = _content_alignment_error(sheet, result)
+        if alignment_error is not None:
+            alignment_errors.append(alignment_error)
     n = len(sheets)
-    derived_label = (
-        label
-        or (
-            f"{severity}_" + "+".join(["TL", "TR", "BL", "BR"][c] for c in occluded_corners)
-            if occluded_corners
-            else "clean"
-        )
+    derived_label = label or _scenario_label(occluded_corners, severity, transform)
+    homography_mode = (
+        "similarity_2marker"
+        if median(pre_counts) == 2 and successes
+        else "ransac_3plus"
+        if median(pre_counts) >= 3 and successes
+        else "failed"
     )
     return {
         "scenario": derived_label,
         "n": n,
+        "severity": severity,
+        "transform": transform,
+        "occluded_corners": [CORNER_NAMES[c] for c in occluded_corners],
+        "pair_type": _pair_type(occluded_corners),
+        "pre_detected_marker_count_median": median(pre_counts) if pre_counts else None,
+        "homography_mode_inferred": homography_mode,
         "success_pct": round(100.0 * successes / n, 1) if n else 0.0,
         "successes": successes,
+        "failures": failure_count,
         "median_ms": round(median(times_ms), 1) if times_ms else None,
         "mean_ms": round(mean(times_ms), 1) if times_ms else None,
         "p95_ms": round(float(np.percentile(times_ms, 95)), 1) if times_ms else None,
+        "max_ms": round(max(times_ms), 1) if times_ms else None,
         "warp_reproj_mean_px": round(mean(errors_px), 2) if errors_px else None,
+        "warp_reproj_p95_px": round(float(np.percentile(errors_px, 95)), 2) if errors_px else None,
         "warp_reproj_max_px": round(max(errors_px), 2) if errors_px else None,
         "n_with_warp_reproj_metric": len(errors_px),
+        "content_alignment_mean_absdiff": round(mean(alignment_errors), 2) if alignment_errors else None,
+        "content_alignment_p95_absdiff": round(float(np.percentile(alignment_errors, 95)), 2) if alignment_errors else None,
+        "content_alignment_max_absdiff": round(max(alignment_errors), 2) if alignment_errors else None,
+        "confidence_score_mean": round(mean(confidence_scores), 3) if confidence_scores else None,
+        "confidence_score_min": round(min(confidence_scores), 3) if confidence_scores else None,
+        "confidence_median_contrast_mean": round(mean(confidence_medians), 3) if confidence_medians else None,
+        "confidence_coverage_mean": round(mean(confidence_coverages), 3) if confidence_coverages else None,
+        "confidence_rejections": confidence_rejections,
     }
+
+
+def build_scenarios(profile: str) -> list[tuple[list[int], str, str, str]]:
+    scenarios: list[tuple[list[int], str, str, str]] = [([], "full", "none", "clean")]
+    single_corners = [[idx] for idx in range(4)]
+    two_corner_pairs = [list(pair) for pair in itertools.combinations(range(4), 2)]
+
+    if profile == "quick":
+        scenarios.extend(
+            [
+                ([0], "full", "none", "full_TL"),
+                ([0, 1], "full", "none", "full_TL+TR"),
+                ([2, 3], "full", "none", "full_BL+BR"),
+                ([0, 3], "full", "none", "full_TL+BR"),
+                ([1, 2], "full", "none", "full_TR+BL"),
+                ([0, 1, 2], "full", "none", "full_TL+TR+BL"),
+                ([], "full", "perspective_mild", "clean__perspective_mild"),
+                ([], "full", "xerox_low_contrast", "clean__xerox_low_contrast"),
+                ([0, 1], "full", "perspective_mild", "full_TL+TR__perspective_mild"),
+                ([0, 3], "full", "perspective_mild", "full_TL+BR__perspective_mild"),
+            ]
+        )
+        return scenarios
+
+    for severity in ("partial", "medium", "full", "clip"):
+        scenarios.extend(
+            (corners, severity, "none", _scenario_label(corners, severity, "none"))
+            for corners in single_corners
+        )
+        scenarios.extend(
+            (corners, severity, "none", _scenario_label(corners, severity, "none"))
+            for corners in two_corner_pairs
+        )
+
+    for transform in (
+        "skew_2deg",
+        "skew_5deg",
+        "rotate_180",
+        "perspective_mild",
+        "perspective_strong",
+        "gaussian_blur",
+        "motion_blur",
+        "jpeg_q55",
+        "xerox_low_contrast",
+        "xerox_perspective",
+    ):
+        scenarios.append(([], "full", transform, _scenario_label([], "full", transform)))
+
+    # Combine the riskiest 2-marker topologies with controlled geometry/noise.
+    for corners in ([0, 1], [2, 3], [0, 2], [1, 3], [0, 3], [1, 2]):
+        for transform in ("perspective_mild", "perspective_strong", "xerox_perspective"):
+            scenarios.append(
+                (corners, "full", transform, _scenario_label(corners, "full", transform))
+            )
+
+    # Always include 3-marker-missing fail-closed probes.
+    for corners in ([0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]):
+        scenarios.append((list(corners), "full", "none", _scenario_label(list(corners), "full", "none")))
+    return scenarios
 
 
 def main() -> int:
@@ -336,6 +598,12 @@ def main() -> int:
     parser.add_argument("--rows", type=int, default=30, help="Number of synthetic sheets per scenario.")
     parser.add_argument("--label", type=str, default="run", help="Label for the output JSON file.")
     parser.add_argument("--out", type=Path, default=REPO / "bench_marker_robustness.json")
+    parser.add_argument(
+        "--profile",
+        choices=("quick", "full"),
+        default="quick",
+        help="Scenario matrix size. Use full for comprehensive occlusion + geometry coverage.",
+    )
     args = parser.parse_args()
 
     print(f"Generating {args.rows} synthetic sheets...")
@@ -343,41 +611,39 @@ def main() -> int:
 
     cropper = make_cropper()
 
-    # Scenario taxonomy (graded by damage tier):
-    #   * partial (25%) — small dog-ear, only the page-edge tip of the
-    #     marker is folded away. Inside the recoverable zone for a 24-px
-    #     marker after the upgrade.
-    #   * medium  (50%) — larger fold; on the edge of recoverable.
-    #   * full          — entire marker zone painted white. Only the
-    #     existing 3-of-4 affine extrapolation can save these (works on
-    #     1 corner missing; 2+ corners is fundamentally unrecoverable
-    #     without printing larger markers).
-    #   * clip          — 12-px scanner edge clip (≈5 mm at 200 DPI A4).
-    scenarios: list[tuple[list[int], str, str]] = [
-        ([], "full", "clean"),
-        ([0], "partial", "partial_TL"),
-        ([3], "partial", "partial_BR"),
-        ([0, 1], "partial", "partial_TL+TR"),
-        ([0, 3], "partial", "partial_TL+BR"),
-        ([0, 1, 2], "partial", "partial_TL+TR+BL"),
-        ([0], "medium", "medium_TL"),
-        ([0, 1], "medium", "medium_TL+TR"),
-        ([0], "full", "full_TL"),
-        ([0, 1], "full", "full_TL+TR"),
-        ([0, 3], "full", "full_TL+BR"),
-        ([0], "clip", "clip_TL_edge"),
-        ([0, 1], "clip", "clip_top_edge"),
-    ]
+    # Scenario taxonomy:
+    #   * partial / medium / full / clip cover marker occlusion severity.
+    #   * transform variants isolate skew, perspective, blur, JPEG, and
+    #     Xerox-like low-contrast degradation.
+    #   * full profile enumerates all 1-marker and 2-marker combinations
+    #     so same-edge and diagonal 2-marker recovery are measured separately.
+    scenarios = build_scenarios(args.profile)
     results = []
-    for occluded, severity, label in scenarios:
-        r = run_scenario(cropper, sheets, occluded, severity=severity, label=label)
+    for occluded, severity, transform, label in scenarios:
+        r = run_scenario(
+            cropper,
+            sheets,
+            occluded,
+            severity=severity,
+            transform=transform,
+            label=label,
+        )
         print(
             f"{r['scenario']:>20} | success {r['success_pct']:>5.1f}% "
-            f"| median {r['median_ms']:>6} ms | reproj {r['warp_reproj_mean_px']} px"
+            f"| median {r['median_ms']:>6} ms "
+            f"| align {r['content_alignment_mean_absdiff']} "
+            f"| markers {r['pre_detected_marker_count_median']} "
+            f"| mode {r['homography_mode_inferred']}"
         )
         results.append(r)
 
-    payload = {"label": args.label, "rows": args.rows, "scenarios": results}
+    payload = {
+        "label": args.label,
+        "rows": args.rows,
+        "profile": args.profile,
+        "scenario_count": len(scenarios),
+        "scenarios": results,
+    }
     args.out.write_text(json.dumps(payload, indent=2))
     print(f"\nWrote {args.out}")
     return 0

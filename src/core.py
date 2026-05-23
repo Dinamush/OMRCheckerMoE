@@ -190,6 +190,8 @@ class ImageInstanceOps:
 
         # run pre_processors in sequence
         for pre_processor in template.pre_processors:
+            if hasattr(pre_processor, "set_template_context"):
+                pre_processor.set_template_context(template)
             in_omr = pre_processor.apply_filter(in_omr, file_path)
         return in_omr
 

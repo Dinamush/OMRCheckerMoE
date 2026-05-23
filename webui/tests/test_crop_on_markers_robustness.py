@@ -10,13 +10,18 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from src.core import _auto_orient_to_template
+import src.processors.CropOnMarkers as crop_on_markers_module
+from src.core import ImageInstanceOps, _auto_orient_to_template
+from src.constants.common import FIELD_TYPES
 from src.processors.CropOnMarkers import (
     CropOnMarkers,
+    WarpBubbleConfidence,
     _find_homography_robust,
     _homography_is_sane,
+    _score_warp_bubble_confidence,
     _similarity_homography_from_pairs,
 )
+from src.template import FieldBlock
 
 REPO = Path(__file__).resolve().parents[2]
 PAGE_W, PAGE_H = 666, 515
@@ -34,7 +39,7 @@ class _StubImageOps:
 
         self.tuning_config = DotMap(
             {
-                "outputs": {"show_image_level": 0},
+                "outputs": {"show_image_level": 0, "save_image_level": 0},
                 "dimensions": {
                     "display_width": PAGE_W,
                     "display_height": PAGE_H,
@@ -52,6 +57,12 @@ class _StubImageOps:
 class _StubTemplate:
     def __init__(self, pre_processors: list[CropOnMarkers]) -> None:
         self.pre_processors = pre_processors
+        self.field_blocks: list[FieldBlock] = []
+
+
+class _TemplateContext:
+    def __init__(self, field_blocks: list[FieldBlock]) -> None:
+        self.field_blocks = field_blocks
 
 
 def _make_cropper() -> CropOnMarkers:
@@ -77,6 +88,29 @@ def _render_clean_bgr() -> np.ndarray:
     pil = Image.open(io.BytesIO(png)).convert("RGB")
     bgr = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
     return cv2.resize(bgr, (PAGE_W, PAGE_H), interpolation=cv2.INTER_AREA)
+
+
+def _make_prefilled_template_context() -> _TemplateContext:
+    from webui.api import _PREFILLED_25Q_TEMPLATE
+
+    field_blocks = []
+    for block_name, field_block_object in _PREFILLED_25Q_TEMPLATE[
+        "fieldBlocks"
+    ].items():
+        block_object = dict(field_block_object)
+        if "fieldType" in block_object:
+            block_object = {
+                **FIELD_TYPES[block_object["fieldType"]],
+                **block_object,
+            }
+        block_object = {
+            "direction": "vertical",
+            "emptyValue": "",
+            "bubbleDimensions": _PREFILLED_25Q_TEMPLATE["bubbleDimensions"],
+            **block_object,
+        }
+        field_blocks.append(FieldBlock(block_name, block_object))
+    return _TemplateContext(field_blocks)
 
 
 def test_homography_sanity_accepts_reasonable_transform() -> None:
@@ -145,6 +179,31 @@ def test_auto_orient_rotates_portrait_scan_to_template_aspect() -> None:
     assert float(diff.mean()) < 1.0
 
 
+def test_aruco_cropper_corrects_180_degree_rotation() -> None:
+    cropper = _make_cropper()
+    sheet = _render_clean_bgr()
+    rotated = cv2.rotate(sheet, cv2.ROTATE_180)
+
+    result = cropper._apply_aruco_filter(rotated, "rotated-180.png")
+
+    assert result is not None
+    assert result.shape == sheet.shape
+
+
+def test_bubble_confidence_accepts_clean_generated_sheet() -> None:
+    sheet = _render_clean_bgr()
+    confidence = _score_warp_bubble_confidence(
+        sheet,
+        _make_prefilled_template_context(),
+    )
+
+    assert confidence is not None
+    assert confidence.ok, confidence
+    assert confidence.sample_count >= 100
+    assert confidence.median_contrast >= 0.04
+    assert confidence.coverage >= 0.70
+
+
 def test_aruco_board_is_constructed_when_reference_centers_set() -> None:
     cropper = _make_cropper()
     assert cropper.aruco_board is not None
@@ -171,13 +230,65 @@ def test_similarity_homography_recovers_rotation_and_scale() -> None:
 def test_aruco_cropper_recovers_two_decoded_markers() -> None:
     """Cover two markers entirely; the similarity-transform fallback must align."""
     cropper = _make_cropper()
+    cropper.set_template_context(_make_prefilled_template_context())
     sheet = _render_clean_bgr()
     # Erase the two top markers (IDs 0 and 1) so only IDs 2 and 3 remain.
     sheet[0:35, 0:35] = 255
     sheet[0:35, sheet.shape[1] - 35 :] = 255
     result = cropper._apply_aruco_filter(sheet, "two-missing.png")
+
     assert result is not None
     assert result.shape == sheet.shape
+    assert cropper.last_warp_bubble_confidence is not None
+    assert cropper.last_warp_bubble_confidence.ok
+
+
+def test_aruco_cropper_rejects_low_confidence_two_marker_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cropper = _make_cropper()
+    cropper.set_template_context(_make_prefilled_template_context())
+    sheet = _render_clean_bgr()
+    sheet[0:35, 0:35] = 255
+    sheet[0:35, sheet.shape[1] - 35 :] = 255
+
+    def fake_low_confidence(*_args, **_kwargs) -> WarpBubbleConfidence:
+        return WarpBubbleConfidence(
+            sample_count=200,
+            median_contrast=0.01,
+            coverage=0.20,
+            score=0.12,
+            ok=False,
+            reason="forced low confidence",
+        )
+
+    monkeypatch.setattr(
+        crop_on_markers_module,
+        "_score_warp_bubble_confidence",
+        fake_low_confidence,
+    )
+
+    result = cropper._apply_aruco_filter(sheet, "two-missing-low-confidence.png")
+
+    assert result is None
+
+
+def test_apply_preprocessors_supplies_template_context_for_confidence() -> None:
+    cropper = _make_cropper()
+    template = _StubTemplate([cropper])
+    template.field_blocks = _make_prefilled_template_context().field_blocks
+    sheet = _render_clean_bgr()
+    sheet[0:35, 0:35] = 255
+    sheet[0:35, sheet.shape[1] - 35 :] = 255
+
+    result = ImageInstanceOps(cropper.tuning_config).apply_preprocessors(
+        "two-missing-through-core.png",
+        sheet,
+        template,
+    )
+
+    assert result is not None
+    assert cropper.template_context is template
 
 
 def test_aruco_cropper_rejects_one_decoded_marker() -> None:
