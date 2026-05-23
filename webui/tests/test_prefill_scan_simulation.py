@@ -362,3 +362,33 @@ def test_realism_preset_preserves_all_four_aruco_markers(preset: str) -> None:
         f"preset={preset!r} dropped ArUco markers on "
         f"{len(failed)}/{len(candidate_numbers)} sheets: {failed!r}"
     )
+
+
+def test_aruco_marker_boxes_only_returns_corners_that_were_drawn() -> None:
+    """``aruco_marker_boxes`` must mirror the validity guard used by
+    ``draw_aruco_corners``: every returned box must fit on the canvas and
+    correspond to a marker that was actually stamped, so downstream scan
+    simulation never operates on an off-canvas placeholder."""
+    from prefill_only_package import prefill_answer_sheet_final as m
+
+    canvases = [
+        (666, 515),     # production processing canvas
+        (1426, 1103),   # full-resolution template canvas
+        (200, 150),     # arbitrary small canvas: still fits all 4 markers
+        (40, 40),       # too small to fit any marker after quiet zone
+    ]
+    for w, h in canvases:
+        boxes = m.aruco_marker_boxes(w, h)
+        for box in boxes:
+            assert 0 <= box["x0"] < box["x1"] <= w, (w, h, box)
+            assert 0 <= box["y0"] < box["y1"] <= h, (w, h, box)
+
+        stamped = m.draw_aruco_corners(Image.new("RGB", (w, h), color="white"))
+        stamped_arr = np.array(stamped)
+        for box in boxes:
+            patch = stamped_arr[box["y0"]:box["y1"], box["x0"]:box["x1"]]
+            assert patch.size > 0, (w, h, box)
+            assert patch.min() == 0, (
+                f"canvas={w}x{h} corner={box['corner']}: returned box does "
+                f"not contain a stamped ArUco marker (no black pixel found)"
+            )

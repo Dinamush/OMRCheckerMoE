@@ -150,9 +150,16 @@ def render_sheet(seed: int) -> np.ndarray:
 
 def _marker_box_on_canvas(corner_index: int) -> tuple[int, int, int, int]:
     """Pixel rect of one ArUco marker on the 666x515 processing canvas."""
-    boxes = prefill_module.aruco_marker_boxes(PAGE_W, PAGE_H)
-    box = boxes[corner_index]
-    return box["x0"], box["y0"], box["x1"], box["y1"]
+    # ``aruco_marker_boxes`` may legitimately return fewer than four
+    # entries when a corner does not fit on the canvas, so look the box
+    # up by its ``corner`` field instead of by list position.
+    for box in prefill_module.aruco_marker_boxes(PAGE_W, PAGE_H):
+        if box["corner"] == corner_index:
+            return box["x0"], box["y0"], box["x1"], box["y1"]
+    raise ValueError(
+        f"No ArUco marker box on the {PAGE_W}x{PAGE_H} canvas for corner "
+        f"index {corner_index}; the canvas may be too small to fit a marker."
+    )
 
 
 def _full_dogear(out: np.ndarray, corner_idx: int) -> None:
