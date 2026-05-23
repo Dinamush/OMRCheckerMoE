@@ -52,6 +52,7 @@ from webui.services import batches as batches_service
 from webui.services import omr as omr_service
 from webui.services import prefill as prefill_service
 from webui.services import presets as presets_service
+from webui.services import test_csv as test_csv_service
 from webui.services.scan_simulation import normalize_realism_preset
 from webui import log_stream
 from webui.schemas_settings import (
@@ -211,6 +212,43 @@ def _register_download(tmp_path: Path, media_type: str, filename: str) -> str:
             del _DOWNLOAD_STORE[k]
         _DOWNLOAD_STORE[token] = (tmp_path, media_type, filename, expires_at)
     return token
+
+
+def _pop_download_entry(token: str) -> tuple[Path, str, str, float]:
+    """Return and consume a one-time download entry."""
+    with _DOWNLOAD_STORE_LOCK:
+        entry = _DOWNLOAD_STORE.pop(token, None)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Download link not found or already used.")
+    return entry
+
+
+def _download_entry_response(
+    token: str,
+    background_tasks: BackgroundTasks,
+) -> FileResponse:
+    """Serve a registered one-time download token and clean up its temp file."""
+    tmp_path, media_type, filename, expires_at = _pop_download_entry(token)
+    if not tmp_path.exists():
+        raise HTTPException(status_code=410, detail="File no longer available.")
+    if _time_mod.monotonic() > expires_at:
+        tmp_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=410, detail="Download link has expired.")
+
+    def _cleanup():
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    background_tasks.add_task(_cleanup)
+    return FileResponse(
+        path=str(tmp_path),
+        media_type=media_type,
+        filename=filename,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        background=background_tasks,
+    )
 
 
 def _is_prefilled_sheet_upload(filename: str | None) -> bool:
@@ -1062,6 +1100,82 @@ async def prefill_sample(
     )
 
 
+@router.post("/generate-csv")
+async def generate_test_csv(
+    count: int = Form(...),
+    school_name: str = Form(...),
+    exam_name: str = Form(...),
+    candidate_start: str = Form(...),
+    name_style: str = Form("numbered"),
+) -> dict:
+    """Generate a student-record test CSV as a server-backed download token."""
+    settings = get_settings()
+    row_cap = settings.prefill_zip_max_rows
+    school_name = school_name.strip()
+    exam_name = exam_name.strip()
+    candidate_start = candidate_start.strip()
+    name_style = (name_style or "numbered").strip().lower()
+
+    if count < 1 or count > row_cap:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Number of students must be between 1 and {row_cap:,}.",
+        )
+    if not school_name:
+        raise HTTPException(status_code=422, detail="School name is required.")
+    if not exam_name:
+        raise HTTPException(status_code=422, detail="Exam name is required.")
+    if name_style not in {"numbered", "random"}:
+        raise HTTPException(status_code=422, detail="name_style must be 'numbered' or 'random'.")
+    if not (candidate_start.isdigit() and len(candidate_start) == 10):
+        raise HTTPException(status_code=422, detail="Candidate number start must be exactly 10 digits.")
+
+    last_candidate = int(candidate_start) + count - 1
+    if last_candidate > 9_999_999_999:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Candidate numbers would exceed 10 digits. Lower the row count "
+                "or use a smaller Candidate Number Start."
+            ),
+        )
+
+    suffix = "random" if name_style == "random" else "numbered"
+    filename = f"test_students_{count}_{suffix}_{int(_time_mod.time())}.csv"
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".csv")
+    tmp_path = Path(tmp.name)
+    tmp.close()
+
+    try:
+        meta = test_csv_service.write_test_csv(
+            dst_path=tmp_path,
+            count=count,
+            school_name=school_name,
+            exam_name=exam_name,
+            candidate_start=candidate_start,
+            name_style=name_style,
+        )
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+    token = _register_download(tmp_path, "text/csv; charset=utf-8", filename)
+    return {
+        "download_url": f"/api/v1/generate-csv/download/{token}",
+        "filename": filename,
+        "count": meta["count"],
+        "size_bytes": meta["size_bytes"],
+        "pdf_max_rows": settings.prefill_pdf_max_rows,
+        "zip_max_rows": settings.prefill_zip_max_rows,
+    }
+
+
+@router.get("/generate-csv/download/{token}")
+async def generate_test_csv_download(token: str, background_tasks: BackgroundTasks):
+    """One-time download endpoint for generated test CSV files."""
+    return _download_entry_response(token, background_tasks)
+
+
 @router.post("/prefill/single")
 async def prefill_single(
     student_name: str = Form(...),
@@ -1322,30 +1436,4 @@ async def prefill_batch(
 @router.get("/prefill/batch/download/{token}")
 async def prefill_batch_download(token: str, background_tasks: BackgroundTasks):
     """One-time token download endpoint. Returns the generated file and deletes it."""
-    with _DOWNLOAD_STORE_LOCK:
-        entry = _DOWNLOAD_STORE.pop(token, None)
-
-    if entry is None:
-        raise HTTPException(status_code=404, detail="Download link not found or already used.")
-
-    tmp_path, media_type, filename, expires_at = entry
-    if not tmp_path.exists():
-        raise HTTPException(status_code=410, detail="File no longer available.")
-    if _time_mod.monotonic() > expires_at:
-        tmp_path.unlink(missing_ok=True)
-        raise HTTPException(status_code=410, detail="Download link has expired.")
-
-    def _cleanup():
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-
-    background_tasks.add_task(_cleanup)
-    return FileResponse(
-        path=str(tmp_path),
-        media_type=media_type,
-        filename=filename,
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-        background=background_tasks,
-    )
+    return _download_entry_response(token, background_tasks)

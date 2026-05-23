@@ -39,47 +39,46 @@
         "Thompson","Torres","Turner","Walker","Ward","Watson","White","Williams","Wilson","Wood"
     ];
 
-    let _nameIdx = 0;
-    const _usedNames = new Set();
-
-    function resetNames() {
-        _nameIdx = 0;
-        _usedNames.clear();
-    }
-
-    function randomName() {
-        // Try a fresh combination; fall back to indexed if we exhaust uniqueness
-        for (let attempt = 0; attempt < 10; attempt++) {
-            const f = FIRST_NAMES[Math.floor(Math.random() * FIRST_NAMES.length)];
-            const l = LAST_NAMES[Math.floor(Math.random() * LAST_NAMES.length)];
-            const name = `${f} ${l}`;
-            if (!_usedNames.has(name)) {
-                _usedNames.add(name);
-                return name;
-            }
-        }
-        // Fallback: append index to guarantee uniqueness
-        _nameIdx++;
-        return `${FIRST_NAMES[_nameIdx % FIRST_NAMES.length]} ${LAST_NAMES[_nameIdx % LAST_NAMES.length]} ${_nameIdx}`;
-    }
+    const SETTINGS_URL = "/api/v1/settings";
+    const GENERATE_URL = "/api/v1/generate-csv";
+    const FALLBACK_MAX_ROWS = 40000;
+    const NAME_COMBINATIONS = FIRST_NAMES.length * LAST_NAMES.length;
+    // Prime and coprime with NAME_COMBINATIONS, so we walk every pair before
+    // repeating while still looking random to a user scanning the CSV.
+    const NAME_STEP = 9973;
+    let maxRows = FALLBACK_MAX_ROWS;
+    let pdfMaxRows = 20000;
+    let zipMaxRows = FALLBACK_MAX_ROWS;
 
     // ---------------------------------------------------------------------------
-    // CSV generation (runs in the browser — no server round-trip needed)
+    // Deterministic preview helpers
     // ---------------------------------------------------------------------------
 
-    function buildCsvContent(count, schoolName, examName, candidateStart, nameStyle) {
-        const rows = [["student_name", "school_name", "exam_name", "candidate_number", "output_file"]];
-        resetNames();
-        let candNum = BigInt(candidateStart);
-        for (let i = 1; i <= count; i++) {
-            const name = nameStyle === "random" ? randomName() : `Student ${i}`;
-            const cand = String(candNum).padStart(10, "0");
-            // output_file: slug of student name
-            const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
-            rows.push([name, schoolName, examName, cand, `${slug}.png`]);
-            candNum++;
+    function hashString(value) {
+        let hash = 2166136261;
+        for (let i = 0; i < value.length; i++) {
+            hash ^= value.charCodeAt(i);
+            hash = Math.imul(hash, 16777619);
         }
-        return rows.map(r => r.map(escapeCsv).join(",")).join("\r\n");
+        return hash >>> 0;
+    }
+
+    function realisticName(rowIndex, seed) {
+        const zeroIndex = rowIndex - 1;
+        const combo = (seed + (zeroIndex * NAME_STEP)) % NAME_COMBINATIONS;
+        const first = FIRST_NAMES[combo % FIRST_NAMES.length];
+        const last = LAST_NAMES[Math.floor(combo / FIRST_NAMES.length) % LAST_NAMES.length];
+        if (zeroIndex < NAME_COMBINATIONS) return `${first} ${last}`;
+        return `${first} ${last} ${Math.floor(zeroIndex / NAME_COMBINATIONS) + 1}`;
+    }
+
+    function rowValues(rowIndex, schoolName, examName, candidateStartNum, nameStyle, nameSeed) {
+        const name = nameStyle === "random"
+            ? realisticName(rowIndex, nameSeed)
+            : `Student ${rowIndex}`;
+        const cand = String(candidateStartNum + BigInt(rowIndex - 1)).padStart(10, "0");
+        const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
+        return [name, schoolName, examName, cand, `${slug}.png`];
     }
 
     function escapeCsv(value) {
@@ -88,18 +87,6 @@
             return `"${s.replace(/"/g, '""')}"`;
         }
         return s;
-    }
-
-    function triggerDownload(csvContent, filename) {
-        const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
     }
 
     // ---------------------------------------------------------------------------
@@ -113,24 +100,19 @@
         const labelEl = document.getElementById("preview-label");
         const tbody = document.getElementById("preview-body");
 
-        resetNames();
-        let candNum = BigInt(candidateStart);
-        const names = nameStyle === "random" ? randomName : (i) => `Student ${i}`;
+        const candidateStartNum = BigInt(candidateStart);
+        const nameSeed = hashString(`${schoolName}|${examName}|${candidateStart}`);
 
         tbody.innerHTML = "";
         const shown = Math.min(count, PREVIEW_ROWS);
         for (let i = 1; i <= shown; i++) {
-            const name = nameStyle === "random" ? randomName() : `Student ${i}`;
-            const cand = String(candNum).padStart(10, "0");
-            const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
             const tr = document.createElement("tr");
-            [name, schoolName, examName, cand, `${slug}.png`].forEach(val => {
+            rowValues(i, schoolName, examName, candidateStartNum, nameStyle, nameSeed).forEach(val => {
                 const td = document.createElement("td");
                 td.textContent = val;
                 tr.appendChild(td);
             });
             tbody.appendChild(tr);
-            candNum++;
         }
 
         if (count > PREVIEW_ROWS) {
@@ -158,6 +140,46 @@
         el.style.display = msg ? "" : "none";
     }
 
+    function hasDesktopApi() {
+        return Boolean(window.pywebview && window.pywebview.api);
+    }
+
+    async function saveDesktopUrl(downloadUrl, filename) {
+        const result = await window.pywebview.api.save_download_url(downloadUrl, filename || "test_students.csv");
+        if (!result.ok && !result.cancelled) {
+            throw new Error(result.message || "Download failed.");
+        }
+    }
+
+    function setLoading(button, message) {
+        button.disabled = true;
+        button.textContent = message;
+    }
+
+    function clearLoading(button) {
+        button.disabled = false;
+        button.textContent = "Generate & Download CSV";
+    }
+
+    async function loadRuntimeLimits() {
+        const hint = document.getElementById("gen-limit-hint");
+        const countInput = document.getElementById("g-count");
+        try {
+            const response = await fetch(SETTINGS_URL, { cache: "no-store" });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const settings = await response.json();
+            pdfMaxRows = Number(settings.prefill_pdf_max_rows) || pdfMaxRows;
+            zipMaxRows = Number(settings.prefill_zip_max_rows) || zipMaxRows;
+            maxRows = zipMaxRows;
+            countInput.max = String(maxRows);
+            hint.textContent = `Current defaults: PDF prefill accepts ${pdfMaxRows.toLocaleString()} rows; ZIP prefill and test CSV accept ${zipMaxRows.toLocaleString()} rows. Change these on Settings.`;
+        } catch (err) {
+            maxRows = FALLBACK_MAX_ROWS;
+            countInput.max = String(maxRows);
+            hint.textContent = "Using default limits: PDF prefill accepts 20,000 rows; ZIP prefill and test CSV accept 40,000 rows.";
+        }
+    }
+
     function getFormValues() {
         const count = parseInt(document.getElementById("g-count").value, 10);
         const schoolName = document.getElementById("g-school").value.trim();
@@ -166,15 +188,44 @@
         const nameStyle = document.querySelector('input[name="name_style"]:checked')?.value ?? "numbered";
 
         const errors = [];
-        if (!Number.isInteger(count) || count < 1 || count > 40000) {
-            errors.push("Number of students must be between 1 and 40,000.");
+        if (!Number.isInteger(count) || count < 1 || count > maxRows) {
+            errors.push(`Number of students must be between 1 and ${maxRows.toLocaleString()}.`);
         }
         if (!schoolName) errors.push("School name is required.");
         if (!examName) errors.push("Exam name is required.");
         if (!/^\d{10}$/.test(candidateStart)) {
             errors.push("Candidate number start must be exactly 10 digits.");
+        } else if (Number.isInteger(count) && count > 0) {
+            const lastCandidate = BigInt(candidateStart) + BigInt(count) - 1n;
+            if (lastCandidate > 9999999999n) {
+                errors.push("Candidate numbers would exceed 10 digits. Lower the row count or use a smaller Candidate Number Start.");
+            }
         }
         return { count, schoolName, examName, candidateStart, nameStyle, errors };
+    }
+
+    async function requestCsvDownload(values) {
+        const formData = new FormData();
+        formData.append("count", String(values.count));
+        formData.append("school_name", values.schoolName);
+        formData.append("exam_name", values.examName);
+        formData.append("candidate_start", values.candidateStart);
+        formData.append("name_style", values.nameStyle);
+
+        const response = await fetch(GENERATE_URL, {
+            method: "POST",
+            body: formData,
+            cache: "no-store"
+        });
+        if (!response.ok) {
+            let detail = `Server error ${response.status}`;
+            try {
+                const body = await response.json();
+                detail = body.detail || detail;
+            } catch (_) {}
+            throw new Error(detail);
+        }
+        return response.json();
     }
 
     // ---------------------------------------------------------------------------
@@ -184,35 +235,37 @@
     document.addEventListener("DOMContentLoaded", () => {
         const form = document.getElementById("gen-form");
         const submitBtn = document.getElementById("gen-submit");
+        loadRuntimeLimits();
 
         form.addEventListener("submit", (e) => {
             e.preventDefault();
+        });
+
+        submitBtn.addEventListener("click", async () => {
             showError("");
 
-            const { count, schoolName, examName, candidateStart, nameStyle, errors } = getFormValues();
+            const values = getFormValues();
+            const { count, schoolName, examName, candidateStart, nameStyle, errors } = values;
             if (errors.length) {
                 showError(errors.join(" "));
                 return;
             }
 
-            submitBtn.disabled = true;
-            submitBtn.textContent = "Generating…";
-
-            // Use setTimeout(0) so the browser can repaint "Generating…" before the
-            // synchronous CSV build blocks the main thread for large counts.
-            setTimeout(() => {
-                try {
-                    const csv = buildCsvContent(count, schoolName, examName, candidateStart, nameStyle);
-                    const ts = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
-                    triggerDownload(csv, `test_students_${count}_${ts}.csv`);
-                    renderPreview(count, schoolName, examName, candidateStart, nameStyle);
-                } catch (err) {
-                    showError(`Failed to generate CSV: ${err.message}`);
-                } finally {
-                    submitBtn.disabled = false;
-                    submitBtn.textContent = "Generate & Download CSV";
+            try {
+                renderPreview(count, schoolName, examName, candidateStart, nameStyle);
+                setLoading(submitBtn, `Preparing ${count.toLocaleString()} rows on server…`);
+                const payload = await requestCsvDownload(values);
+                setLoading(submitBtn, "Opening download…");
+                if (hasDesktopApi()) {
+                    await saveDesktopUrl(payload.download_url, payload.filename);
+                    return;
                 }
-            }, 0);
+                window.location.href = payload.download_url;
+            } catch (err) {
+                showError(`Failed to generate CSV: ${err.message}`);
+            } finally {
+                clearLoading(submitBtn);
+            }
         });
     });
 })();
