@@ -240,6 +240,12 @@ def _thread_render(payload: dict) -> bytes:
         payload['exam_name'],
         payload['candidate_number'],
     )
+    page_number = payload.get('page_number')
+    if page_number is not None:
+        # Stamp BEFORE simulation so the number degrades like any other
+        # printed mark. Placement guarantees no overlap with bubbles or
+        # ArUco markers (see prefill_answer_sheet_final.page_number_anchor).
+        img = m.draw_page_number(img, page_number)
     img = _simulate_scan_if_needed(
         img,
         m,
@@ -359,6 +365,9 @@ def _iter_pngs_fast(payloads: list[dict], *, preserve_order: bool = True):
                 payloads[idx]['exam_name'],
                 payloads[idx]['candidate_number'],
             )
+            fallback_page = payloads[idx].get('page_number')
+            if fallback_page is not None:
+                img = m2.draw_page_number(img, fallback_page)
             img = _simulate_scan_if_needed(
                 img,
                 m2,
@@ -443,24 +452,36 @@ def generate_batch_pdf_to_file(
     rows: list[dict[str, Any]],
     dst_path: Path,
     realism_preset: str = "none",
+    include_page_numbers: bool = False,
 ) -> dict:
     """Stream PDF generation directly to ``dst_path``.
 
     Workers output JPEG bytes; JPEG is stored natively in PDF as DCT so no
     re-encoding or deflate pass is needed.  Progress is logged every 500 sheets.
     Returns a metadata dict: ``{count, successes, errors, elapsed_s, size_bytes}``.
+
+    When ``include_page_numbers`` is ``True``, each rendered sheet receives
+    a sequential page-number stamp (1, 2, 3, …) in the bottom-right corner,
+    matching the order of ``rows``. Output ordering is guaranteed by
+    :func:`_iter_pngs_fast` so the stamp on each PDF page matches its
+    physical position in the document.
     """
     import fitz  # PyMuPDF
 
     count = len(rows)
-    logger.info("Prefill batch PDF started | count=%d", count)
+    logger.info(
+        "Prefill batch PDF started | count=%d | page_numbers=%s",
+        count, include_page_numbers,
+    )
     t_batch = time.perf_counter()
 
     realism_preset = normalize_realism_preset(realism_preset)
-    payloads = [
-        _build_fast_payload(row, output_format="jpeg", realism_preset=realism_preset)
-        for row in rows
-    ]
+    payloads = []
+    for idx, row in enumerate(rows, start=1):
+        payload = _build_fast_payload(row, output_format="jpeg", realism_preset=realism_preset)
+        if include_page_numbers:
+            payload["page_number"] = idx
+        payloads.append(payload)
 
     dst_path.parent.mkdir(parents=True, exist_ok=True)
     doc = fitz.open()
@@ -585,11 +606,20 @@ def generate_batch_zip_to_file(
 # Backwards-compatible in-memory wrappers (still used by older callers / tests).
 # These now stream to a temp file first then read it back, so peak memory matches
 # the streaming path even when the caller wants raw bytes.
-def generate_batch_pdf(rows: list[dict[str, Any]], realism_preset: str = "none") -> bytes:
+def generate_batch_pdf(
+    rows: list[dict[str, Any]],
+    realism_preset: str = "none",
+    include_page_numbers: bool = False,
+) -> bytes:
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
         tmp_path = Path(tmp.name)
     try:
-        generate_batch_pdf_to_file(rows, tmp_path, realism_preset=realism_preset)
+        generate_batch_pdf_to_file(
+            rows,
+            tmp_path,
+            realism_preset=realism_preset,
+            include_page_numbers=include_page_numbers,
+        )
         return tmp_path.read_bytes()
     finally:
         try:

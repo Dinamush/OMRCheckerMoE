@@ -323,10 +323,17 @@ function parseCsv(text) {
 }
 
 let uploadedCsvText = null;
+let uploadedCsvFile = null;
 
 csvUpload.addEventListener('change', () => {
     const file = csvUpload.files[0];
-    if (!file) { uploadedCsvText = null; csvPreview.style.display = 'none'; return; }
+    if (!file) {
+        uploadedCsvText = null;
+        uploadedCsvFile = null;
+        csvPreview.style.display = 'none';
+        return;
+    }
+    uploadedCsvFile = file;
     const reader = new FileReader();
     reader.onload = e => {
         uploadedCsvText = e.target.result;
@@ -347,6 +354,24 @@ const batchSubmit = document.getElementById('batch-submit');
 const batchError  = document.getElementById('batch-error');
 const batchOutputMode = document.getElementById('batch-output-mode');
 const batchRealismPreset = document.getElementById('batch-realism-preset');
+const batchIncludePageNumbers = document.getElementById('batch-include-page-numbers');
+const batchPageNumbersHint = document.getElementById('batch-page-numbers-hint');
+
+const syncPageNumbersAvailability = () => {
+    if (!batchIncludePageNumbers) return;
+    const isPdf = batchOutputMode.value === 'pdf';
+    batchIncludePageNumbers.disabled = !isPdf;
+    if (!isPdf) batchIncludePageNumbers.checked = false;
+    if (batchPageNumbersHint) {
+        batchPageNumbersHint.classList.toggle('muted', isPdf);
+        batchPageNumbersHint.style.opacity = isPdf ? '' : '0.55';
+    }
+};
+
+if (batchOutputMode) {
+    batchOutputMode.addEventListener('change', syncPageNumbersAvailability);
+    syncPageNumbersAvailability();
+}
 
 batchSubmit.addEventListener('click', async () => {
     showError(batchError, '');
@@ -354,6 +379,9 @@ batchSubmit.addEventListener('click', async () => {
     const fd = new FormData();
     fd.append('output_mode', batchOutputMode.value);
     fd.append('realism_preset', batchRealismPreset.value);
+    if (batchIncludePageNumbers && batchIncludePageNumbers.checked && batchOutputMode.value === 'pdf') {
+        fd.append('include_page_numbers', 'true');
+    }
 
     if (activeSubtab === 'manual') {
         const rows = getTableRows().filter(r =>
@@ -375,11 +403,15 @@ batchSubmit.addEventListener('click', async () => {
         }
         fd.append('csv_text', rowsToCsvText(rows));
     } else {
-        if (!uploadedCsvText) {
+        if (!uploadedCsvFile) {
             showError(batchError, 'Please upload a CSV file first.');
             return;
         }
-        fd.append('csv_text', uploadedCsvText);
+        // Submit the original File object instead of re-posting the whole
+        // CSV as a giant text field. Starlette applies a strict 1 MiB cap
+        // to multipart text fields, while file parts are streamed and then
+        // checked by the server's own prefill_csv_max_bytes limit.
+        fd.append('csv_file', uploadedCsvFile, uploadedCsvFile.name);
     }
 
     await postFormAndDownload('/api/v1/prefill/batch', fd, batchSubmit, batchError);

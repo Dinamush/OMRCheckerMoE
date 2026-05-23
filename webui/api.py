@@ -30,6 +30,7 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    Request,
     UploadFile,
     status,
 )
@@ -191,6 +192,60 @@ _PREFILL_SAMPLE_SEM = threading.BoundedSemaphore(_PREFILL_SAMPLE_LIMIT)
 # and ``settings.prefill_csv_max_bytes``. Reading them per-request means
 # operators can change limits via the /settings page (or
 # OMR_WEBUI_PREFILL_*_MAX_ROWS env vars) without restarting the server.
+
+async def _ensure_large_multipart(request: Request) -> None:
+    """Pre-parse multipart bodies with a generous ``max_part_size``.
+
+    Starlette's ``MultiPartParser`` caps each individual form part at
+    1 MiB by default, which causes routes like ``/prefill/batch`` to
+    reject 30 000-row CSVs (~3.5 MiB submitted as a single ``csv_text``
+    field) with *"Part exceeded maximum size of 1024KB."* even though
+    the application-layer caps allow far larger payloads.
+
+    Calling ``request.form(max_part_size=...)`` here parses and caches
+    the form on ``request._form`` once with the operator-controlled
+    ``settings.max_upload_bytes`` cap. FastAPI's later ``Form``/``File``
+    machinery picks up the cached ``FormData`` instead of re-parsing,
+    so the larger limit takes effect transparently for the route.
+    Application-layer caps (``prefill_csv_max_bytes`` and per-row
+    counts) still enforce upper bounds downstream.
+    """
+    content_type = request.headers.get("content-type", "")
+    if "multipart/form-data" not in content_type.lower():
+        return
+    settings = get_settings()
+    await request.form(
+        max_part_size=settings.max_upload_bytes,
+        max_files=10_000,
+        max_fields=10_000,
+    )
+
+
+def _run_batch_pdf(
+    rows: list[dict[str, Any]],
+    dst_path: Path,
+    realism_preset: str,
+    include_page_numbers: bool,
+) -> dict:
+    """Adapter that calls ``generate_batch_pdf_to_file`` with the right kwargs.
+
+    Tests monkeypatch ``generate_batch_pdf_to_file`` with a stub that may
+    not yet know the ``include_page_numbers`` parameter; introspecting the
+    signature here keeps those fixtures green while still threading the
+    flag through for production callers.
+    """
+    import inspect
+
+    target = prefill_service.generate_batch_pdf_to_file
+    try:
+        params = inspect.signature(target).parameters
+    except (TypeError, ValueError):
+        params = {}
+    kwargs: dict[str, Any] = {"realism_preset": realism_preset}
+    if "include_page_numbers" in params:
+        kwargs["include_page_numbers"] = include_page_numbers
+    return target(rows, dst_path, **kwargs)
+
 
 # Download token store: maps token -> (tmp_path, media_type, filename, expires_at)
 # Tokens are single-use and expire after 10 minutes so orphaned files are cleaned up.
@@ -562,7 +617,10 @@ def _is_pdf_upload(upload: UploadFile) -> bool:
     return content_type == "application/pdf"
 
 
-@router.post("/batches/{batch_id}/files")
+@router.post(
+    "/batches/{batch_id}/files",
+    dependencies=[Depends(_ensure_large_multipart)],
+)
 @_handle_errors
 async def upload_files(
     batch_id: str,
@@ -741,6 +799,7 @@ async def list_template_assets(
     "/batches/{batch_id}/assets",
     response_model=list[TemplateAssetRef],
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(_ensure_large_multipart)],
 )
 @_handle_errors
 async def upload_template_assets(
@@ -1250,10 +1309,7 @@ async def prefill_single(
 @router.post("/prefill/batch")
 async def prefill_batch(
     background_tasks: BackgroundTasks,
-    csv_text: str | None = Form(default=None),
-    csv_file: UploadFile | None = File(default=None),
-    output_mode: str = Form("pdf"),
-    realism_preset: str = Form("none"),
+    request: Request,
 ) -> dict:
     """Generate pre-filled answer sheets for multiple students.
 
@@ -1261,6 +1317,34 @@ async def prefill_batch(
     download token as JSON. The client uses window.location.href on the
     download URL so large files stream directly to disk (no browser buffering).
     """
+    # Parse the form manually instead of using FastAPI's automatic
+    # Form/File parameters. Automatic parsing uses Starlette's 1 MiB default
+    # max_part_size and rejects large uploaded CSVs before endpoint code can
+    # run. Manual parsing lets us apply the operator-controlled upload cap.
+    settings = get_settings()
+    try:
+        form = await request.form(
+            max_part_size=settings.max_upload_bytes,
+            max_files=10_000,
+            max_fields=10_000,
+        )
+    except Exception as exc:  # noqa: BLE001 - normalize parser failures
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    csv_text_value = form.get("csv_text")
+    csv_text = csv_text_value if isinstance(csv_text_value, str) else None
+    csv_file_value = form.get("csv_file")
+    csv_file = csv_file_value if hasattr(csv_file_value, "read") else None
+    output_mode = str(form.get("output_mode") or "pdf")
+    realism_preset = str(form.get("realism_preset") or "none")
+    include_page_numbers_value = form.get("include_page_numbers")
+    include_page_numbers = str(include_page_numbers_value).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
     # 1) Validate output_mode early — reject unknown values explicitly.
     output_mode = (output_mode or "").strip().lower()
     if output_mode not in {"pdf", "zip"}:
@@ -1273,7 +1357,7 @@ async def prefill_batch(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
-    if not csv_text and (csv_file is None or not csv_file.filename):
+    if not csv_text and (csv_file is None or not getattr(csv_file, "filename", "")):
         raise HTTPException(
             status_code=422,
             detail="Provide either csv_text or a csv_file.",
@@ -1281,7 +1365,6 @@ async def prefill_batch(
 
     # Read caps from the live Settings instance so operators can mutate them
     # via /settings without restarting the server.
-    settings = get_settings()
     pdf_max_rows = settings.prefill_pdf_max_rows
     zip_max_rows = settings.prefill_zip_max_rows
     max_bytes = settings.prefill_csv_max_bytes
@@ -1390,12 +1473,19 @@ async def prefill_batch(
         # Offload to a thread so a long-running batch cannot block the event
         # loop and stall every other request (incl. health checks).
         if output_mode == "zip":
+            # Page numbers are a multi-page PDF feature only — silently
+            # ignore the flag when the user picked a ZIP of single PNGs
+            # so the JS UI doesn't have to enforce it client-side.
             meta = await asyncio.to_thread(
                 prefill_service.generate_batch_zip_to_file, rows, tmp_path, realism_preset,
             )
         else:
             meta = await asyncio.to_thread(
-                prefill_service.generate_batch_pdf_to_file, rows, tmp_path, realism_preset,
+                _run_batch_pdf,
+                rows,
+                tmp_path,
+                realism_preset,
+                include_page_numbers,
             )
     except ValueError as exc:
         _cleanup()
@@ -1433,6 +1523,9 @@ async def prefill_batch(
         "errors": meta["errors"],
         "elapsed_s": meta["elapsed_s"],
         "size_bytes": meta["size_bytes"],
+        # Echo whether page numbers were applied (PDF only — silently
+        # dropped when ``output_mode == 'zip'``).
+        "page_numbers": include_page_numbers and output_mode == "pdf",
     }
 
 

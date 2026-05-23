@@ -180,6 +180,67 @@ def candidate_region_box(w: int, h: int) -> tuple[int, int, int, int]:
     return relative_box(CFG['candidate_grid'], w, h)
 
 
+def page_number_anchor(w: int, h: int) -> tuple[int, int]:
+    """Return ``(x_right_edge, y_center)`` for stamping a page number.
+
+    The anchor sits in the empty band just left of the bottom-right ArUco
+    marker, vertically aligned with that marker. Layout properties:
+
+    *   ``y`` is the center of the BR ArUco marker, well below the answer
+        bubble grid (whose last row sits around ``y ≈ 0.65 * h``), so the
+        page number cannot collide with bubbles.
+    *   The right edge is set to ``marker.x0 - marker_px`` — a clearance
+        of one full marker width. This keeps the stamp clear of the
+        ~45 %-of-box restoration pad that
+        :func:`webui.services.scan_simulation._protect_markers` paints
+        back from the pristine snapshot, so the page number is allowed
+        to degrade naturally with the rest of the page instead of being
+        clamped to the pristine background.
+
+    Callers must still left-align the actual text to ``x_right_edge``
+    (``x = x_right_edge - text_width``).
+    """
+    marker_px = max(24, int(max(w, h) * _ARUCO_MARKER_SIZE_RATIO))
+    quiet_zone = max(6, marker_px // 8)
+    rel_cx, rel_cy = _REF_CENTERS_RELATIVE[3]  # BR corner
+    cx, cy = round(rel_cx * w), round(rel_cy * h)
+    half = marker_px // 2
+    marker_x0 = max(quiet_zone, min(cx - half, w - marker_px - quiet_zone))
+    x_right = max(0, marker_x0 - marker_px)
+    return x_right, cy
+
+
+def draw_page_number(img: Image.Image, page_number: int | None) -> Image.Image:
+    """Stamp a plain page-number digit (e.g. ``"1"``) in the bottom-right corner.
+
+    The stamp is rendered with a bold font sized to ~2.4 % of the page
+    height (clamped to ≥14 pt) so it is legible on both the 666×515
+    processing canvas and the 1426×1103 reference template. The text is
+    right-aligned at :func:`page_number_anchor` and vertically centered
+    on the BR ArUco marker — chosen to keep page numbers in the empty
+    band below the answer bubbles and clear of every fiducial.
+
+    ``page_number`` may be ``None`` or non-positive, in which case the
+    image is returned unmodified. Modifies ``img`` in-place and also
+    returns it for chained call sites.
+    """
+    if page_number is None or page_number < 1:
+        return img
+    w, h = img.size
+    x_right, y_center = page_number_anchor(w, h)
+    font_size = max(14, round(h * 0.024))
+    font = load_font(font_size, bold=True)
+    draw = ImageDraw.Draw(img)
+    text = str(int(page_number))
+    bbox = draw.textbbox((0, 0), text, font=font)
+    tw = bbox[2] - bbox[0]
+    th = bbox[3] - bbox[1]
+    x = max(0, x_right - tw)
+    y = max(0, y_center - th // 2 - bbox[1])
+    draw.text((x, y), text, fill='black', font=font)
+    return img
+
+
 def aruco_marker_boxes(w: int, h: int) -> list[dict]:
     """Return pixel-space ArUco marker boxes for a rendered sheet.
 
