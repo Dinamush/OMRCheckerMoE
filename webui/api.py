@@ -185,14 +185,11 @@ _PREFILL_SINGLE_SEM = threading.BoundedSemaphore(_PREFILL_SINGLE_LIMIT)
 _PREFILL_SAMPLE_LIMIT = max(2, int(os.environ.get("OMR_WEBUI_PREFILL_SAMPLE_CONCURRENCY", "6")))
 _PREFILL_SAMPLE_SEM = threading.BoundedSemaphore(_PREFILL_SAMPLE_LIMIT)
 
-# Hard caps on prefill batch sizes. PDF assembly is heavier than ZIP because
-# each page incurs PyMuPDF parsing overhead; ZIP just stores PNG bytes
-# verbatim — so the ZIP cap stays at 2x the PDF cap. The 200 MiB CSV body
-# is sized to hold ~20 000 rows of comfortable column widths (well under
-# 10 KB/row) with headroom for UTF-8 BOM / quoting overhead.
-_PREFILL_PDF_MAX_ROWS = int(os.environ.get("OMR_WEBUI_PREFILL_PDF_MAX_ROWS", "20000"))
-_PREFILL_ZIP_MAX_ROWS = int(os.environ.get("OMR_WEBUI_PREFILL_ZIP_MAX_ROWS", "40000"))
-_PREFILL_CSV_MAX_BYTES = int(os.environ.get("OMR_WEBUI_PREFILL_CSV_MAX_BYTES", str(200 * 1024 * 1024)))
+# Hard caps on prefill batch sizes are now sourced from the runtime
+# Settings model: ``settings.prefill_pdf_max_rows``, ``settings.prefill_zip_max_rows``,
+# and ``settings.prefill_csv_max_bytes``. Reading them per-request means
+# operators can change limits via the /settings page (or
+# OMR_WEBUI_PREFILL_*_MAX_ROWS env vars) without restarting the server.
 
 # Download token store: maps token -> (tmp_path, media_type, filename, expires_at)
 # Tokens are single-use and expire after 10 minutes so orphaned files are cleaned up.
@@ -1165,9 +1162,15 @@ async def prefill_batch(
             detail="Provide either csv_text or a csv_file.",
         )
 
+    # Read caps from the live Settings instance so operators can mutate them
+    # via /settings without restarting the server.
+    settings = get_settings()
+    pdf_max_rows = settings.prefill_pdf_max_rows
+    zip_max_rows = settings.prefill_zip_max_rows
+    max_bytes = settings.prefill_csv_max_bytes
+
     # 2) Bound the CSV body size BEFORE materialising it. For uploads we read
     # in chunks so a hostile client can't blow up RAM by sending a multi-GB file.
-    max_bytes = _PREFILL_CSV_MAX_BYTES
     if csv_text and csv_text.strip():
         encoded = csv_text.strip().encode("utf-8")
         if len(encoded) > max_bytes:
@@ -1223,14 +1226,14 @@ async def prefill_batch(
         )
 
     # 5) Row-count cap so a runaway batch can't dominate the server.
-    row_cap = _PREFILL_PDF_MAX_ROWS if output_mode == "pdf" else _PREFILL_ZIP_MAX_ROWS
+    row_cap = pdf_max_rows if output_mode == "pdf" else zip_max_rows
     if len(rows) > row_cap:
         raise HTTPException(
             status_code=422,
             detail=(
                 f"CSV has {len(rows)} rows but the per-batch limit for "
                 f"{output_mode.upper()} output is {row_cap}. Split the file into "
-                "smaller batches or set the OMR_WEBUI_PREFILL_*_MAX_ROWS env var."
+                "smaller batches or raise the cap on the /settings page."
             ),
         )
 

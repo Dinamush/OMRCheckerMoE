@@ -43,6 +43,11 @@ class RuntimeSettingsResponse(BaseModel):
     pdf_split_min_pages_for_parallel: int = Field(ge=1)
     default_preset: Optional[str] = None
     allow_directory_import: bool
+    # Prefill / upload limits
+    prefill_pdf_max_rows: int = Field(ge=1, le=200_000)
+    prefill_zip_max_rows: int = Field(ge=1, le=400_000)
+    prefill_csv_max_bytes: int = Field(ge=1 * 1024 * 1024, le=4 * 1024 * 1024 * 1024)
+    max_upload_bytes: int = Field(ge=1 * 1024 * 1024, le=64 * 1024 * 1024 * 1024)
 
 
 class RuntimeSettingsUpdate(BaseModel):
@@ -73,6 +78,15 @@ class RuntimeSettingsUpdate(BaseModel):
     pdf_split_min_pages_for_parallel: Optional[int] = Field(default=None, ge=1)
     default_preset: Optional[str] = None
     allow_directory_import: Optional[bool] = None
+    # Prefill / upload limits
+    prefill_pdf_max_rows: Optional[int] = Field(default=None, ge=1, le=200_000)
+    prefill_zip_max_rows: Optional[int] = Field(default=None, ge=1, le=400_000)
+    prefill_csv_max_bytes: Optional[int] = Field(
+        default=None, ge=1 * 1024 * 1024, le=4 * 1024 * 1024 * 1024
+    )
+    max_upload_bytes: Optional[int] = Field(
+        default=None, ge=1 * 1024 * 1024, le=64 * 1024 * 1024 * 1024
+    )
 
 
 class SettingsMetaResponse(BaseModel):

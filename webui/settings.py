@@ -47,6 +47,12 @@ RUNTIME_MUTABLE_SETTINGS: frozenset[str] = frozenset({
     "pdf_split_min_pages_for_parallel",
     "default_preset",
     "allow_directory_import",
+    # Prefill / upload limits — exposed on /settings so operators can tune
+    # batch sizes without restarting the server or rebuilding the bundle.
+    "prefill_pdf_max_rows",
+    "prefill_zip_max_rows",
+    "prefill_csv_max_bytes",
+    "max_upload_bytes",
 })
 
 OVERRIDES_FILENAME = "settings_overrides.json"
@@ -98,11 +104,52 @@ class Settings(BaseSettings):
 
     max_upload_bytes: int = Field(
         default=4 * 1024 * 1024 * 1024,
+        ge=1 * 1024 * 1024,            # 1 MiB minimum
+        le=64 * 1024 * 1024 * 1024,    # 64 GiB ceiling (paranoid cap)
         description=(
             "Per-file upload limit in bytes (default 4 GiB). Sized to "
             "comfortably hold a 20 000-row generated prefill PDF (≈100 MB) "
             "plus any user-supplied scanned PDFs, with margin for AV and "
-            "filesystem overhead. Override with OMR_WEBUI_MAX_UPLOAD_BYTES."
+            "filesystem overhead. Override with OMR_WEBUI_MAX_UPLOAD_BYTES "
+            "or via the /settings page (input shown in MiB)."
+        ),
+    )
+
+    prefill_pdf_max_rows: int = Field(
+        default=20_000,
+        ge=1,
+        le=200_000,
+        description=(
+            "Maximum rows accepted by /api/v1/prefill/batch when output_mode="
+            "'pdf'. PDF assembly is heavier than ZIP (each page incurs PyMuPDF "
+            "parsing overhead) so this cap is intentionally lower than the "
+            "ZIP cap. Override with OMR_WEBUI_PREFILL_PDF_MAX_ROWS or via "
+            "the /settings page."
+        ),
+    )
+
+    prefill_zip_max_rows: int = Field(
+        default=40_000,
+        ge=1,
+        le=400_000,
+        description=(
+            "Maximum rows accepted by /api/v1/prefill/batch when output_mode="
+            "'zip'. ZIPs just store PNG bytes verbatim so this cap is "
+            "permitted to be ~2x the PDF cap. Override with "
+            "OMR_WEBUI_PREFILL_ZIP_MAX_ROWS or via the /settings page."
+        ),
+    )
+
+    prefill_csv_max_bytes: int = Field(
+        default=200 * 1024 * 1024,
+        ge=1 * 1024 * 1024,            # 1 MiB minimum
+        le=4 * 1024 * 1024 * 1024,     # 4 GiB ceiling (CSV is parsed in RAM)
+        description=(
+            "Maximum size in bytes for the CSV body submitted to "
+            "/api/v1/prefill/batch (default 200 MiB). Sized to hold ~20 000 "
+            "rows comfortably with UTF-8 / quoting overhead. Override with "
+            "OMR_WEBUI_PREFILL_CSV_MAX_BYTES or via the /settings page "
+            "(input shown in MiB)."
         ),
     )
 

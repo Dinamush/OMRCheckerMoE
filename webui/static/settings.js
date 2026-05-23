@@ -40,6 +40,18 @@
     // Type coercion (form <-> JSON)
     // ────────────────────────────────────────────────────────────────────────
 
+    const MIB = 1024 * 1024
+
+    /**
+     * Multiplier for inputs that store bytes but display a friendlier unit.
+     * data-unit="mib" means: form shows MiB, JSON sends bytes.
+     */
+    const unitMultiplier = (input) => {
+        const unit = (input.dataset.unit || "").toLowerCase()
+        if (unit === "mib") return MIB
+        return 1
+    }
+
     /** Read the current value of an input element as JSON-shaped data. */
     const readInputValue = (input) => {
         const type = input.dataset.type || "str"
@@ -48,12 +60,13 @@
         if (type === "int") {
             if (raw === "" || raw === null) return null
             const n = Number(raw)
-            return Number.isFinite(n) ? Math.trunc(n) : null
+            if (!Number.isFinite(n)) return null
+            return Math.trunc(n) * unitMultiplier(input)
         }
         if (type === "float") {
             if (raw === "" || raw === null) return null
             const n = Number(raw)
-            return Number.isFinite(n) ? n : null
+            return Number.isFinite(n) ? n * unitMultiplier(input) : null
         }
         // str fields: treat empty string as null so default_preset="" disables
         if (raw === "") return null
@@ -68,6 +81,12 @@
         }
         if (value === null || value === undefined) {
             input.value = ""
+            return
+        }
+        const mult = unitMultiplier(input)
+        if (mult > 1 && typeof value === "number") {
+            // Bytes -> MiB for display. Round to int because the input has step=1.
+            input.value = String(Math.round(value / mult))
             return
         }
         input.value = String(value)

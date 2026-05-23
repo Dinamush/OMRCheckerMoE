@@ -230,6 +230,99 @@
             </div>
         </fieldset>
 
+        <!-- ─── Prefill & upload limits ────────────────────────────────────── -->
+        <fieldset class="settings-group" data-group="prefill">
+            <legend>Prefill &amp; upload limits</legend>
+
+            <div class="settings-row" data-row="prefill_pdf_max_rows">
+                <div class="form-inline">
+                    <label for="f-prefill_pdf_max_rows">Prefill PDF max rows</label>
+                    <input id="f-prefill_pdf_max_rows"
+                           name="prefill_pdf_max_rows"
+                           type="number"
+                           min="1"
+                           max="200000"
+                           step="1"
+                           data-key="prefill_pdf_max_rows"
+                           data-type="int" />
+                    <button type="button"
+                            class="btn small"
+                            data-reset="prefill_pdf_max_rows"
+                            aria-label="Reset Prefill PDF max rows to default">
+                        Reset to default
+                    </button>
+                </div>
+                <p class="muted small" data-description="prefill_pdf_max_rows"></p>
+            </div>
+
+            <div class="settings-row" data-row="prefill_zip_max_rows">
+                <div class="form-inline">
+                    <label for="f-prefill_zip_max_rows">Prefill ZIP max rows</label>
+                    <input id="f-prefill_zip_max_rows"
+                           name="prefill_zip_max_rows"
+                           type="number"
+                           min="1"
+                           max="400000"
+                           step="1"
+                           data-key="prefill_zip_max_rows"
+                           data-type="int" />
+                    <button type="button"
+                            class="btn small"
+                            data-reset="prefill_zip_max_rows"
+                            aria-label="Reset Prefill ZIP max rows to default">
+                        Reset to default
+                    </button>
+                </div>
+                <p class="muted small" data-description="prefill_zip_max_rows"></p>
+            </div>
+
+            <div class="settings-row" data-row="prefill_csv_max_bytes">
+                <div class="form-inline">
+                    <label for="f-prefill_csv_max_bytes">Prefill CSV max size</label>
+                    <input id="f-prefill_csv_max_bytes"
+                           name="prefill_csv_max_bytes"
+                           type="number"
+                           min="1"
+                           max="4096"
+                           step="1"
+                           data-key="prefill_csv_max_bytes"
+                           data-type="int"
+                           data-unit="mib" />
+                    <span class="muted small">MiB</span>
+                    <button type="button"
+                            class="btn small"
+                            data-reset="prefill_csv_max_bytes"
+                            aria-label="Reset Prefill CSV max size to default">
+                        Reset to default
+                    </button>
+                </div>
+                <p class="muted small" data-description="prefill_csv_max_bytes"></p>
+            </div>
+
+            <div class="settings-row" data-row="max_upload_bytes">
+                <div class="form-inline">
+                    <label for="f-max_upload_bytes">Per-file upload limit</label>
+                    <input id="f-max_upload_bytes"
+                           name="max_upload_bytes"
+                           type="number"
+                           min="1"
+                           max="65536"
+                           step="1"
+                           data-key="max_upload_bytes"
+                           data-type="int"
+                           data-unit="mib" />
+                    <span class="muted small">MiB</span>
+                    <button type="button"
+                            class="btn small"
+                            data-reset="max_upload_bytes"
+                            aria-label="Reset Per-file upload limit to default">
+                        Reset to default
+                    </button>
+                </div>
+                <p class="muted small" data-description="max_upload_bytes"></p>
+            </div>
+        </fieldset>
+
         <!-- ─── OMR engine ─────────────────────────────────────────────────── -->
         <fieldset class="settings-group" data-group="engine">
             <legend>OMR engine</legend>
