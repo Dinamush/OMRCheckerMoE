@@ -208,12 +208,17 @@ def _simulate_scan_if_needed(
         )
         for item in prefill_module.aruco_marker_boxes(w, h)
     ]
+    # Treat the candidate-number block as "printed and never written
+    # over" — keep it pristine even when the rest of the page is heavily
+    # degraded by moderate/adversarial scan effects.
+    candidate_region = prefill_module.candidate_region_box(w, h)
     return apply_scan_simulation(
         image,
         preset=preset,
         candidate_number=candidate_number,
         bubbles=bubbles,
         markers=markers,
+        candidate_region=candidate_region,
     )
 
 

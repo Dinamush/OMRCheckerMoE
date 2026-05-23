@@ -42,6 +42,13 @@ class MarkerBox:
     y1: int
 
 
+# Pre-warp pixel-space rectangle ``(x0, y0, x1, y1)`` of a region that should
+# survive the lighting/noise/JPEG/artifact passes. Used today for the
+# candidate-number block so the printed grid + filled bubbles look pristine
+# even at moderate/adversarial realism.
+ProtectRegion = tuple[int, int, int, int]
+
+
 def normalize_realism_preset(preset: str | None) -> str:
     """Return a supported preset name or raise ``ValueError``."""
     value = (preset or "none").strip().lower()
@@ -258,6 +265,50 @@ def _aruco_marker_for_protect(marker_id: int, size_px: int) -> np.ndarray:
     return rgb
 
 
+def _protect_region(
+    pristine: np.ndarray,
+    damaged: np.ndarray,
+    region: ProtectRegion,
+    transform: np.ndarray,
+) -> np.ndarray:
+    """Restore an arbitrary rectangular region from the pristine snapshot.
+
+    Mirrors :func:`_protect_markers` but for a single content rectangle:
+
+    1.  Project the four pre-warp corners through the homography to get
+        the post-warp quad inside the damaged image.
+    2.  Build a binary mask covering that quad.
+    3.  Copy pristine pixels back into the damaged image only where the
+        mask is set.
+
+    Restoring a quad (instead of an axis-aligned bounding rectangle)
+    means we don't accidentally heal page content immediately outside
+    the candidate-number grid when the page is rotated.
+    """
+    x0, y0, x1, y1 = region
+    if x1 <= x0 or y1 <= y0:
+        return damaged
+
+    src = np.array(
+        [
+            [x0, y0],
+            [x1, y0],
+            [x1, y1],
+            [x0, y1],
+        ],
+        dtype=np.float32,
+    ).reshape(-1, 1, 2)
+    warped = cv2.perspectiveTransform(src, transform).reshape(-1, 2)
+    poly = np.round(warped).astype(np.int32)
+
+    mask = np.zeros(damaged.shape[:2], dtype=np.uint8)
+    cv2.fillConvexPoly(mask, poly, 255)
+
+    out = damaged.copy()
+    out[mask > 0] = pristine[mask > 0]
+    return out
+
+
 def _protect_markers(
     pristine: np.ndarray,
     damaged: np.ndarray,
@@ -347,7 +398,14 @@ def _protect_markers(
         if stamp_size < 12:
             continue
 
-        quiet_zone = max(quiet_zone_px_default, stamp_size // 8)
+        # ≥1 ArUco bit-cell of white margin around the restamp. Research
+        # (see docs/research_brief_scan_simulation_2026.md and the 2024
+        # planar-fiducial comparative study) puts the minimum reliable
+        # quiet zone at ~1 cell; for our 4×4 markers that is stamp_size/4.
+        # A slightly tighter ratio (stamp_size/5) keeps the stamp away
+        # from edge content on small canvases without crossing into the
+        # region we just restored.
+        quiet_zone = max(quiet_zone_px_default, stamp_size // 5)
 
         # Clamp the stamp so it (plus quiet zone) stays inside the image.
         # If the warp pushed the marker past the image edge, slide it back.
@@ -449,6 +507,7 @@ def _apply_page_artifacts(
     *,
     preset: str,
     rng: np.random.Generator,
+    candidate_region: ProtectRegion | None = None,
 ) -> np.ndarray:
     if preset == "none":
         return arr
@@ -491,12 +550,26 @@ def _apply_page_artifacts(
             )
             cv2.fillPoly(out, [pts], (250, 250, 250), lineType=cv2.LINE_AA)
 
-        # Pencil scribble / X line across the candidate number area.
-        y = int(h * rng.uniform(0.22, 0.38))
+        # Pencil scribble: relocated to the answer-grid band on the lower
+        # half of the page so it never crosses the candidate-number block.
+        # The candidate number is "printed and never written over" in real
+        # life; the rest of the page is fair game for adversarial stress.
+        scribble_y = int(h * rng.uniform(0.55, 0.85))
+        scribble_x0 = int(w * rng.uniform(0.05, 0.10))
+        scribble_x1 = int(w * rng.uniform(0.45, 0.58))
+        if candidate_region is not None:
+            cx0, cy0, cx1, cy1 = candidate_region
+            # Belt-and-braces: if the random y happens to land inside the
+            # candidate band (e.g. callers pass a region that spans most
+            # of the page), nudge the line outside it.
+            if cy0 - 12 <= scribble_y <= cy1 + 12:
+                scribble_y = max(int(h * 0.55), cy1 + 24)
+            if scribble_x1 >= cx0 - 12:
+                scribble_x1 = max(scribble_x0 + 40, cx0 - 24)
         cv2.line(
             out,
-            (int(w * 0.60), y),
-            (int(w * 0.97), y + int(rng.integers(-20, 21))),
+            (scribble_x0, scribble_y),
+            (scribble_x1, scribble_y + int(rng.integers(-15, 16))),
             (65, 65, 65),
             thickness=2,
             lineType=cv2.LINE_AA,
@@ -536,27 +609,80 @@ def apply_scan_simulation(
     candidate_number: str | None = None,
     bubbles: Iterable[BubbleGeometry] | None = None,
     markers: Iterable[MarkerBox] | None = None,
+    candidate_region: ProtectRegion | None = None,
     seed: int | None = None,
 ) -> Image.Image:
-    """Apply a deterministic scan-realism preset to a PIL image."""
+    """Apply a deterministic scan-realism preset to a PIL image.
+
+    ``candidate_region`` is an optional ``(x0, y0, x1, y1)`` pre-warp
+    rectangle whose contents must be preserved exactly as printed. When
+    set, the moderate and adversarial presets restore that region from a
+    snapshot taken BEFORE bubble-imperfection drawing — so the
+    candidate-number digits and filled circles look perfectly machine
+    printed even though the rest of the page is degraded. Subtle skips
+    this (its bubble damage is already mild) and adversarial keeps its
+    other stressors elsewhere on the page.
+    """
     preset = normalize_realism_preset(preset)
     if preset == "none":
         return image
 
     rng = _rng_for(candidate_number, preset, seed)
     arr = _to_rgb_array(image)
+
+    needs_marker_protect = preset in {"subtle", "moderate"}
+    needs_region_protect = candidate_region is not None and preset in {"moderate", "adversarial"}
+
+    # Snapshot before bubble-imperfection drawing. Required for region
+    # protection because we want the candidate-number bubbles to look
+    # "as printed" (perfect black circles) rather than hand-drawn.
+    pristine_pre_bubbles = arr.copy() if needs_region_protect else None
+
     arr = _draw_imperfect_bubbles(arr, bubbles or (), preset=preset, rng=rng)
     arr, geo_transform = _apply_geometry(arr, preset=preset, rng=rng)
+
     # Snapshot the post-geometry image while markers are still pristine.
     # The `subtle` and `moderate` presets restore these patches at the end
     # of the pipeline so vignette / noise / JPEG can't blow up ArUco
     # detection. `adversarial` intentionally skips the restore: the whole
     # point of that preset is to stress-test the engine.
-    pristine_post_geo = arr.copy() if preset in {"subtle", "moderate"} else None
+    pristine_post_geo = arr.copy() if needs_marker_protect else None
+
+    # Warp the pre-simulation snapshot through the same homography so
+    # ``_protect_region`` can paste pristine pixels into the post-warp
+    # candidate-region quad. ``borderValue=255`` keeps the page white
+    # outside the original frame in case rotation pushes content off
+    # the canvas edge.
+    pristine_region_warped: np.ndarray | None = None
+    if needs_region_protect and pristine_pre_bubbles is not None:
+        h_img, w_img = arr.shape[:2]
+        pristine_region_warped = cv2.warpPerspective(
+            pristine_pre_bubbles,
+            geo_transform,
+            (w_img, h_img),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(255, 255, 255),
+        )
+
     arr = _apply_lighting(arr, preset=preset, rng=rng)
     arr = _apply_noise_texture(arr, preset=preset, rng=rng)
-    arr = _apply_page_artifacts(arr, markers or (), preset=preset, rng=rng)
+    arr = _apply_page_artifacts(
+        arr,
+        markers or (),
+        preset=preset,
+        rng=rng,
+        candidate_region=candidate_region,
+    )
     arr = _apply_jpeg_roundtrip(arr, preset=preset, rng=rng)
+
+    if pristine_region_warped is not None and candidate_region is not None:
+        arr = _protect_region(
+            pristine_region_warped,
+            arr,
+            candidate_region,
+            geo_transform,
+        )
     if pristine_post_geo is not None:
         arr = _protect_markers(
             pristine_post_geo,

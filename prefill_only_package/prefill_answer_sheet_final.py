@@ -168,6 +168,18 @@ def draw_aruco_corners(img: Image.Image) -> Image.Image:
     return Image.fromarray(img_cv[:, :, ::-1])
 
 
+def candidate_region_box(w: int, h: int) -> tuple[int, int, int, int]:
+    """Return the pixel-space bounding box of the candidate-number block.
+
+    The box covers both the printed digit headers and all 100 candidate
+    bubbles. Downstream scan simulation can use it to keep this region
+    pristine while still degrading the rest of the page (the candidate
+    number is "printed" in real life and therefore should never look
+    smudged or occluded in synthetic scans).
+    """
+    return relative_box(CFG['candidate_grid'], w, h)
+
+
 def aruco_marker_boxes(w: int, h: int) -> list[dict]:
     """Return pixel-space ArUco marker boxes for a rendered sheet.
 
