@@ -1117,3 +1117,95 @@ body.log-panel-collapsed .footer {
     padding-bottom: 3.5rem;
 }
 
+/* Collapsible panel toggle (Template / config / evaluation, etc.) */
+.panel-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    width: 100%;
+    background: transparent;
+    border: 0;
+    padding: 0.25rem 0;
+    margin: 0;
+    color: var(--text);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    border-radius: 6px;
+}
+.panel-toggle:hover { background: rgba(255, 255, 255, 0.02); }
+.panel-toggle h2 { margin: 0; flex: 1; }
+.panel-toggle-summary {
+    color: var(--muted);
+    font-size: 0.85rem;
+    font-weight: 400;
+    margin-inline-end: 0.25rem;
+    text-align: right;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 50%;
+}
+.panel-toggle-chevron {
+    display: inline-block;
+    width: 1.25rem;
+    flex-shrink: 0;
+    color: var(--muted);
+    text-align: center;
+    font-size: 0.85rem;
+    transition: transform 150ms ease;
+}
+.panel-toggle[aria-expanded="true"] .panel-toggle-chevron {
+    transform: rotate(90deg);
+}
+.panel-toggle:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+.panel-collapsible-body { margin-block-start: 1rem; }
+@media (prefers-reduced-motion: reduce) {
+    .panel-toggle-chevron { transition: none; }
+}
+
+/* Live preset comparison gallery */
+.preset-preview {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.75rem 1rem;
+    background: rgba(255, 255, 255, 0.02);
+}
+.preset-preview > summary {
+    cursor: pointer;
+    padding-block: 0.25rem;
+    user-select: none;
+}
+.preset-preview-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 1rem;
+    margin-block: 1rem;
+}
+.preset-preview-card {
+    margin: 0;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+    background: #fff;
+    display: flex;
+    flex-direction: column;
+}
+.preset-preview-card img {
+    width: 100%;
+    height: auto;
+    display: block;
+    background: #f3f3f3;
+}
+.preset-preview-card figcaption {
+    padding: 0.5rem 0.75rem;
+    border-block-start: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    background: var(--panel, #1b1f24);
+}
+.preset-preview-card figcaption strong { font-size: 0.95rem; }

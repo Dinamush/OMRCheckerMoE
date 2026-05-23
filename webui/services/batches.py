@@ -17,13 +17,16 @@ existing ``entry_point_for_args`` without modifying any engine code.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
 import shutil
+import threading
 import time
 import uuid
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -58,6 +61,7 @@ from webui.schemas import (
     SourceMode,
     TemplateAssetRef,
 )
+from webui.services.capacity import reserve_worker_capacity, worker_capacity_limit
 from webui.settings import Settings, get_settings
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
@@ -104,6 +108,32 @@ def _sanitise_filename(name: str) -> str:
     if not cleaned:
         raise InvalidBatchRequest(f"Invalid filename: {name!r}")
     return cleaned
+
+
+# Maximum stem length (chars) before PDF page filenames exceed Windows MAX_PATH.
+# With `_page_NNNN.jpg` (12 chars) appended a 120-char stem yields ~132 chars
+# for the filename alone, leaving ample room for a typical storage path prefix.
+_MAX_STEM_CHARS = 120
+
+
+def _truncate_filename_stem(safe: str, max_stem: int = _MAX_STEM_CHARS) -> str:
+    """Shorten the stem of *safe* to *max_stem* characters when needed.
+
+    The last 6 characters of the truncated stem are replaced with an MD5
+    fragment so that two long names that share a common prefix still map to
+    distinct short names.
+    """
+    p = Path(safe)
+    stem = p.stem
+    if len(stem) <= max_stem:
+        return safe
+    suffix_hash = hashlib.md5(stem.encode()).hexdigest()[:6]
+    new_stem = stem[: max_stem - 6] + suffix_hash
+    logger.warning(
+        "Filename stem truncated from %d to %d chars: %r -> %r",
+        len(stem), len(new_stem), stem, new_stem,
+    )
+    return new_stem + p.suffix
 
 
 def _serialise(value: Any) -> Any:
@@ -179,11 +209,23 @@ def _next_available_path(directory: Path, filename: str) -> Path:
 
 
 def _remove_generated_pdf_pages(inputs: Path, stem: str) -> None:
-    """Remove page images previously generated from the same PDF stem."""
-    page_pattern = re.compile(rf"^{re.escape(stem)}_page_\d{{4}}(?:_\d+)?\.png$")
+    """Remove page images previously generated from the same PDF stem.
+
+    Accepts both the current default extension (``.jpg``) and the legacy
+    ``.png`` extension so that a re-upload cleans up files left over from
+    older versions of the pipeline. Optional ``_<n>`` collision suffix is
+    also matched.
+    """
+    page_pattern = re.compile(
+        rf"^{re.escape(stem)}_page_\d{{4}}(?:_\d+)?\.(?:jpg|jpeg|png)$",
+        re.IGNORECASE,
+    )
     for child in inputs.iterdir():
         if child.is_file() and page_pattern.match(child.name):
-            child.unlink()
+            try:
+                child.unlink()
+            except PermissionError:
+                pass
 
 
 def _to_batch(settings: Settings, batch_id: str, meta: dict[str, Any]) -> Batch:
@@ -423,6 +465,30 @@ def _write_pdf_split_progress(
         pass  # progress write failure must never abort the split
 
 
+def _record_pdf_split_error(
+    batch_id: str,
+    settings: Settings | None,
+    message: str,
+) -> None:
+    """Persist a PDF-split error into batch metadata and unblock the frontend poller.
+
+    Sets ``pdf_split_error`` to *message* and resets ``pdf_split_pages`` /
+    ``pdf_split_total`` to 0 in a single metadata write so the status endpoint
+    always returns them atomically.  Never raises.
+    """
+    if not batch_id or settings is None:
+        return
+    try:
+        meta = _load_metadata(settings, batch_id)
+        meta["pdf_split_error"] = message
+        meta["pdf_split_pages"] = 0
+        meta["pdf_split_total"] = 0
+        meta["updated_at"] = _now().isoformat()
+        _save_metadata(settings, batch_id, meta)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def save_uploaded_file(
     batch_id: str,
     filename: str,
@@ -434,17 +500,26 @@ def save_uploaded_file(
     inputs = _inputs_dir(settings, batch_id)
     if not inputs.exists():
         raise BatchNotFound(batch_id)
-    safe = _sanitise_filename(filename)
+    safe = _truncate_filename_stem(_sanitise_filename(filename))
     suffix = Path(safe).suffix.lower()
     if suffix not in UPLOAD_EXTENSIONS:
         raise InvalidBatchRequest(
             f"Unsupported file type {suffix!r}; allowed: {sorted(UPLOAD_EXTENSIONS)}"
         )
     if suffix in PDF_EXTENSIONS:
+        # Clear any error from a previous failed split before attempting the new one.
+        try:
+            _meta = _load_metadata(settings, batch_id)
+            _meta["pdf_split_error"] = None
+            _save_metadata(settings, batch_id, _meta)
+        except Exception:  # noqa: BLE001
+            pass
         stored = _save_pdf_pages_as_images(
             inputs, safe, data,
             dpi=settings.pdf_render_dpi,
             grayscale=settings.pdf_render_grayscale,
+            page_format=settings.pdf_page_format,
+            jpeg_quality=settings.pdf_jpeg_quality,
             batch_id=batch_id,
             settings=settings,
         )
@@ -456,6 +531,334 @@ def save_uploaded_file(
     return [FileRef(name=target.name, size_bytes=target.stat().st_size)]
 
 
+# Per-worker cache: each ProcessPoolExecutor worker keeps the parsed PDF
+# document open across all tasks it processes, paying the parse cost ONCE
+# per worker instead of once per page. The cache is keyed by absolute PDF
+# path so multiple PDFs in the same worker would coexist (rare in practice).
+_PDF_WORKER_CACHE: dict[str, Any] = {}
+
+# Per-(batch_id, stem) locks that serialise concurrent uploads of PDFs with
+# the same filename to the same batch.  Without this, two simultaneous uploads
+# of "scans.pdf" would interleave: the second call's _remove_generated_pdf_pages
+# could delete pages the first call just wrote, and both would write to the same
+# output paths producing corrupt or missing pages.
+#
+# The master lock guards insertion into the dict only; the individual stem locks
+# are held for the full duration of the split so they are never short-lived from
+# the perspective of the master lock.
+_PDF_SPLIT_LOCKS: dict[tuple[str, str], threading.Lock] = {}
+_PDF_SPLIT_LOCKS_MASTER = threading.Lock()
+
+# Persistent ProcessPoolExecutor for PDF rendering (Fix #4).
+# Kept alive across uploads to eliminate per-upload Windows spawn overhead.
+_PDF_RENDER_POOL: "ProcessPoolExecutor | None" = None
+_PDF_RENDER_POOL_WORKERS: int = 0
+_PDF_RENDER_POOL_LOCK = threading.Lock()
+_ATEXIT_REGISTERED = False
+
+
+def _get_pdf_split_lock(batch_id: str, stem: str) -> threading.Lock:
+    """Return the per-(batch, stem) threading.Lock, creating it if absent."""
+    key = (batch_id, stem)
+    with _PDF_SPLIT_LOCKS_MASTER:
+        if key not in _PDF_SPLIT_LOCKS:
+            _PDF_SPLIT_LOCKS[key] = threading.Lock()
+        return _PDF_SPLIT_LOCKS[key]
+
+
+def _shutdown_pdf_render_pool() -> None:
+    """Atexit handler: gracefully drain the persistent PDF render pool."""
+    global _PDF_RENDER_POOL
+    pool = _PDF_RENDER_POOL
+    if pool is not None:
+        try:
+            pool.shutdown(wait=False, cancel_futures=False)
+        except TypeError:
+            try:
+                pool.shutdown(wait=False)
+            except Exception:  # noqa: BLE001
+                pass
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _get_pdf_render_pool(workers: int) -> "ProcessPoolExecutor":
+    """Return a module-level persistent ProcessPoolExecutor for PDF rendering.
+
+    Creates a new pool only when ``workers`` differs from the current pool's
+    worker count or when no pool exists yet.  Thread-safe via
+    :data:`_PDF_RENDER_POOL_LOCK`.
+
+    An ``atexit`` handler is registered exactly once to shut down the pool
+    cleanly on interpreter exit.
+    """
+    global _PDF_RENDER_POOL, _PDF_RENDER_POOL_WORKERS, _ATEXIT_REGISTERED
+    with _PDF_RENDER_POOL_LOCK:
+        pool = _PDF_RENDER_POOL
+        needs_new = (
+            pool is None
+            or _PDF_RENDER_POOL_WORKERS != workers
+            or getattr(pool, "_shutdown", False)
+            or getattr(pool, "_broken", False)
+        )
+        if not needs_new:
+            return pool  # type: ignore[return-value]
+
+        # Tear down the old pool without blocking on in-flight tasks.
+        if pool is not None:
+            try:
+                pool.shutdown(wait=False, cancel_futures=False)
+            except TypeError:
+                try:
+                    pool.shutdown(wait=False)
+                except Exception:  # noqa: BLE001
+                    pass
+            except Exception:  # noqa: BLE001
+                pass
+
+        _PDF_RENDER_POOL = ProcessPoolExecutor(max_workers=workers)
+        _PDF_RENDER_POOL_WORKERS = workers
+        logger.debug(
+            "PDF render pool (re)created | workers=%d", workers
+        )
+
+        if not _ATEXIT_REGISTERED:
+            import atexit
+            atexit.register(_shutdown_pdf_render_pool)
+            _ATEXIT_REGISTERED = True
+
+        return _PDF_RENDER_POOL
+
+
+def _resolve_pdf_format(page_format: str) -> tuple[str, str]:
+    """Map a configured page_format to (canonical_name, file_extension)."""
+    fmt = (page_format or "jpeg").strip().lower()
+    if fmt in {"jpg", "jpeg"}:
+        return "jpeg", ".jpg"
+    if fmt == "png":
+        return "png", ".png"
+    raise InvalidBatchRequest(
+        f"Unsupported pdf_page_format {page_format!r}; expected 'jpeg' or 'png'."
+    )
+
+
+def _try_extract_embedded_page_image(
+    doc: "Any",
+    page: "Any",
+    page_index: int,
+    *,
+    dpi: int,
+    grayscale: bool,
+    ext: str,
+    jpeg_quality: int,
+) -> bytes | None:
+    """Attempt to extract a full-page embedded image from *page* without rasterising.
+
+    For scanned OMR PDFs every page is typically one JPEG.  Instead of
+    decoding → rendering → re-encoding we can return the raw stream bytes
+    directly (zero quality loss, ~10× faster than rasterising).
+
+    Returns raw/re-encoded ``bytes`` when the fast path applies, or ``None``
+    to signal the caller should fall back to normal pixmap rasterisation.
+
+    Conditions for the fast path:
+    1. Exactly one embedded image on the page.
+    2. That image's bounding box covers ≥ 90 % of the page area (full-page
+       scan, not a logo or watermark).
+    3. The embedded format is JPEG or PNG (not JBIG2, CCITT, etc.).
+    4. CMYK images are always sent to the raster path (loss-free conversion
+       requires CMS knowledge we don't carry here).
+    """
+    try:
+        import fitz as _fitz
+
+        images = page.get_images(full=True)
+        if len(images) != 1:
+            return None
+
+        img_item = images[0]
+        xref = img_item[0]
+
+        # ---- Coverage check ------------------------------------------------
+        page_rect = page.rect
+        page_area = page_rect.width * page_rect.height
+        if page_area <= 0:
+            return None
+
+        try:
+            rects = page.get_image_rects(img_item)
+        except Exception:  # noqa: BLE001
+            return None
+
+        if not rects:
+            return None
+
+        clipped_area = 0.0
+        for r in rects:
+            inter = r & page_rect
+            if not inter.is_empty:
+                clipped_area += inter.width * inter.height
+
+        if clipped_area / page_area < 0.90:
+            return None
+
+        # ---- Extract raw image data -----------------------------------------
+        try:
+            image_dict = doc.extract_image(xref)
+        except Exception:  # noqa: BLE001
+            return None
+
+        img_ext = (image_dict.get("ext") or "").lower()
+        img_bytes = image_dict.get("image")
+        if not img_bytes:
+            return None
+
+        # Only handle JPEG/PNG; exotic codecs fall back to raster.
+        if img_ext not in ("jpeg", "jpg", "png"):
+            return None
+
+        img_colorspace = image_dict.get("colorspace", 3)  # 1=gray, 3=RGB, 4=CMYK
+        # CMYK conversion is non-trivial without a CMS; let fitz rasterise it.
+        if img_colorspace == 4:
+            return None
+
+        desired_fmt = "jpeg" if ext == ".jpg" else "png"
+        format_matches = (
+            (desired_fmt == "jpeg" and img_ext in ("jpeg", "jpg"))
+            or (desired_fmt == "png" and img_ext == "png")
+        )
+        # Grayscale fast path only when embedded image is already 1-component.
+        colorspace_ok = (grayscale and img_colorspace == 1) or (not grayscale)
+
+        if format_matches and colorspace_ok:
+            # Zero re-encoding: return the raw embedded stream directly.
+            return img_bytes
+
+        # ---- Re-encode via PyMuPDF Pixmap (no external PIL dependency) ------
+        try:
+            pix = _fitz.Pixmap(img_bytes)
+            # Strip alpha before any colorspace operation or JPEG encode.
+            if pix.alpha:
+                pix = _fitz.Pixmap(pix, 0)
+            if grayscale and pix.colorspace != _fitz.csGRAY:
+                pix = _fitz.Pixmap(_fitz.csGRAY, pix)
+            if desired_fmt == "jpeg":
+                try:
+                    return pix.tobytes("jpeg", jpg_quality=jpeg_quality)
+                except TypeError:
+                    return pix.tobytes("jpeg")
+            else:
+                return pix.tobytes("png")
+        except Exception:  # noqa: BLE001
+            return None  # unsupported format/conversion; fall back to raster
+
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _render_pdf_page_to_disk(
+    pdf_path: str,
+    page_index: int,
+    output_dir: str,
+    stem: str,
+    *,
+    dpi: int,
+    grayscale: bool,
+    ext: str,
+    jpeg_quality: int,
+) -> "tuple[int, str | None, int, str | None, bool]":
+    """Worker entry point: render ONE page of ``pdf_path`` and save to disk.
+
+    Returns ``(page_index, filename_or_None, size_bytes, error_or_None, fast_path_used)``.
+
+    Defined at module scope so ``ProcessPoolExecutor`` can pickle it.  The
+    worker process caches the opened ``fitz.Document`` between tasks via
+    :data:`_PDF_WORKER_CACHE`, so the PDF is parsed only once per worker.
+    With a persistent pool, workers accumulate cached docs across uploads; the
+    eviction below keeps the cache at most 1 entry per worker to prevent fd
+    leaks.
+    """
+    import fitz
+
+    doc = _PDF_WORKER_CACHE.get(pdf_path)
+    if doc is None:
+        # Evict stale cached documents before caching the new one.
+        for _old_path, _old_doc in list(_PDF_WORKER_CACHE.items()):
+            try:
+                _old_doc.close()
+            except Exception:  # noqa: BLE001
+                pass
+        _PDF_WORKER_CACHE.clear()
+        doc = fitz.open(pdf_path)
+        _PDF_WORKER_CACHE[pdf_path] = doc
+
+    target: Path | None = None
+    tmp_target: Path | None = None
+    try:
+        page = doc.load_page(page_index - 1)
+
+        # Fast path: extract a full-page embedded image without rasterising.
+        embedded = _try_extract_embedded_page_image(
+            doc, page, page_index,
+            dpi=dpi, grayscale=grayscale, ext=ext, jpeg_quality=jpeg_quality,
+        )
+        if embedded is not None:
+            target = Path(output_dir) / f"{stem}_page_{page_index:04d}{ext}"
+            tmp_target = target.with_name(f".{target.stem}.tmp{target.suffix}")
+            tmp_target.write_bytes(embedded)
+            tmp_target.replace(target)
+            size = target.stat().st_size
+            return (page_index, target.name, size, None, True)
+
+        # Fallback: full pixmap rasterisation.
+        colorspace = fitz.csGRAY if grayscale else fitz.csRGB
+        pixmap = page.get_pixmap(dpi=dpi, alpha=False, colorspace=colorspace)
+        target = Path(output_dir) / f"{stem}_page_{page_index:04d}{ext}"
+        tmp_target = target.with_name(f".{target.stem}.tmp{target.suffix}")
+        if ext == ".jpg":
+            try:
+                pixmap.save(str(tmp_target), jpg_quality=jpeg_quality)
+            except TypeError:
+                pixmap.save(str(tmp_target))
+        else:
+            try:
+                pixmap.save(str(tmp_target), compress_level=1)
+            except TypeError:
+                pixmap.save(str(tmp_target))
+        tmp_target.replace(target)
+        size = target.stat().st_size
+        del pixmap
+        return (page_index, target.name, size, None, False)
+    except Exception as exc:  # noqa: BLE001 — worker boundary
+        if tmp_target is not None:
+            try:
+                tmp_target.unlink(missing_ok=True)
+            except OSError:
+                pass
+        return (page_index, None, 0, f"{type(exc).__name__}: {exc}", False)
+
+
+def _default_pdf_split_workers(settings: Settings | None) -> int:
+    """Auto-detect a safe default worker count for PDF rendering.
+
+    PDF render + JPEG encode is CPU-bound, so we aim for half the cores
+    (leaving the rest for the OS, the FastAPI event loop, and any
+    concurrent OMR processing) capped at 8 to keep per-worker spawn
+    overhead worth it for batches of any size.
+    """
+    capacity = worker_capacity_limit()
+    if settings is not None and getattr(settings, "pdf_split_workers", 0):
+        requested = int(settings.pdf_split_workers)
+        if requested > capacity:
+            logger.warning(
+                "Clamping pdf_split_workers from %d to worker capacity %d",
+                requested, capacity,
+            )
+        return max(1, min(requested, capacity))
+    cpu = os.cpu_count() or 2
+    return max(1, min(8, cpu // 2, capacity))
+
+
 def _save_pdf_pages_as_images(
     inputs: Path,
     safe_filename: str,
@@ -463,21 +866,23 @@ def _save_pdf_pages_as_images(
     *,
     dpi: int = 150,
     grayscale: bool = True,
+    page_format: str = "jpeg",
+    jpeg_quality: int = 92,
     batch_id: str | None = None,
     settings: Settings | None = None,
 ) -> list[FileRef]:
-    """Render every PDF page into a PNG image in ``inputs``.
+    """Render every PDF page into an image in ``inputs``.
 
-    Improvements over the naive implementation:
-    - ``del pixmap`` after each save frees C-heap memory immediately instead
-      of waiting for the GC, preventing cumulative RSS growth on large PDFs.
-    - Per-page try/except with logging: a single bad page is skipped rather
-      than aborting the entire batch; the caller always gets partial results.
-    - Progress is logged every 50 pages so the operator can see liveness.
-    - ``compress_level=1`` on the PNG write is ~5× faster than the default
-      level 6 with no quality loss for intermediate OMR files.
-    - DPI defaults to 150 (44 %% less RAM/disk than 200 DPI) which is safely
-      above the ArUco detection floor for typical A4 sheets.
+    Default output is **grayscale JPEG at quality 92**, which is ~5x smaller
+    on disk than the equivalent PNG yet visually lossless for OMR bubble
+    detection.
+
+    The render loop runs in a :class:`ProcessPoolExecutor` for PDFs with
+    more than ``settings.pdf_split_min_pages_for_parallel`` pages — render
+    + JPEG encode is CPU-bound and embarrassingly parallel, so this gives
+    a near-linear speedup up to ``pdf_split_workers`` workers. Smaller
+    PDFs use the legacy single-threaded loop where process-pool spawn
+    overhead would dominate.
     """
     try:
         import fitz
@@ -487,50 +892,13 @@ def _save_pdf_pages_as_images(
             "`python -m pip install -r requirements.txt`."
         ) from exc
 
-    stored: list[FileRef] = []
-    failed_pages: list[int] = []
+    _fmt_name, ext = _resolve_pdf_format(page_format)
+    quality = max(60, min(100, int(jpeg_quality)))
+
+    # Determine page count cheaply (one parse) before deciding strategy.
     try:
-        with fitz.open(stream=data, filetype="pdf") as pdf:
-            page_count = pdf.page_count
-            if page_count == 0:
-                raise InvalidBatchRequest(f"PDF has no pages: {safe_filename}")
-            stem = Path(safe_filename).stem
-            logger.info(
-                "PDF split started | file=%s | pages=%d | dpi=%d | grayscale=%s",
-                safe_filename, page_count, dpi, grayscale,
-            )
-            _remove_generated_pdf_pages(inputs, stem)
-            colorspace = fitz.csGRAY if grayscale else fitz.csRGB
-            # Seed metadata so the UI shows total immediately
-            _write_pdf_split_progress(batch_id, settings, 0, page_count)
-            for page_index, page in enumerate(pdf, start=1):
-                try:
-                    pixmap = page.get_pixmap(dpi=dpi, alpha=False, colorspace=colorspace)
-                    page_name = f"{stem}_page_{page_index:04d}.png"
-                    target = inputs / page_name
-                    # compress_level=1 is ~5x faster than default (6); these
-                    # are intermediate working files read once by the engine.
-                    pixmap.save(str(target))
-                    del pixmap  # release C-heap memory immediately
-                    stored.append(
-                        FileRef(name=target.name, size_bytes=target.stat().st_size)
-                    )
-                except Exception as page_exc:  # noqa: BLE001
-                    failed_pages.append(page_index)
-                    logger.warning(
-                        "PDF page render failed | file=%s | page=%d/%d | %s: %s",
-                        safe_filename, page_index, page_count,
-                        type(page_exc).__name__, page_exc,
-                    )
-                if page_index % 10 == 0 or page_index == page_count:
-                    _write_pdf_split_progress(
-                        batch_id, settings, len(stored), page_count
-                    )
-                if page_index % 50 == 0 or page_index == page_count:
-                    logger.info(
-                        "PDF split progress | file=%s | %d/%d pages saved | failed=%d",
-                        safe_filename, len(stored), page_count, len(failed_pages),
-                    )
+        with fitz.open(stream=data, filetype="pdf") as probe:
+            page_count = probe.page_count
     except InvalidBatchRequest:
         raise
     except Exception as exc:
@@ -539,25 +907,341 @@ def _save_pdf_pages_as_images(
             f"{type(exc).__name__}: {exc}"
         ) from exc
 
-    if not stored:
-        _write_pdf_split_progress(batch_id, settings, 0, 0)  # clear progress
-        raise InvalidBatchRequest(
-            f"PDF {safe_filename!r}: all {len(failed_pages)} page(s) failed to render."
-        )
-    # Clear progress fields so the UI does not show stale split data
-    _write_pdf_split_progress(batch_id, settings, 0, 0)
-    if failed_pages:
+    if page_count == 0:
+        raise InvalidBatchRequest(f"PDF has no pages: {safe_filename}")
+
+    stem = Path(safe_filename).stem
+
+    # Path-aware stem truncation: even after the pre-call _truncate_filename_stem()
+    # guard (which caps at _MAX_STEM_CHARS), the full output path can still exceed
+    # Windows MAX_PATH=260 when the inputs directory itself has a long prefix
+    # (e.g. deep pytest tmp_path trees).  Re-truncate using the actual path length.
+    # Include the longest temp publication suffix (".<stem>_page_NNNN.tmp.jpeg")
+    # plus path separator and a little headroom for Windows MAX_PATH.
+    _PAGE_SUFFIX_LEN = 24
+    _max_stem_for_path = max(20, 240 - len(str(inputs)) - _PAGE_SUFFIX_LEN)
+    if len(stem) > _max_stem_for_path:
+        _path_hash = hashlib.md5(stem.encode()).hexdigest()[:6]
+        _new_stem = stem[:_max_stem_for_path - 6] + _path_hash
         logger.warning(
-            "PDF split finished with errors | file=%s | ok=%d | failed=%d | "
-            "first_failed_pages=%s",
-            safe_filename, len(stored), len(failed_pages), failed_pages[:20],
+            "PDF stem further truncated for path-length safety: %r -> %r (inputs=%s)",
+            stem, _new_stem, inputs,
         )
-    else:
+        stem = _new_stem
+
+    # Serialise concurrent uploads of PDFs with the same stem to the same
+    # batch.  Different stems or different batches use independent locks and
+    # therefore run fully in parallel.
+    _split_lock = _get_pdf_split_lock(batch_id or "", stem)
+    with _split_lock:
+        _remove_generated_pdf_pages(inputs, stem)
+
+        min_parallel = (
+            getattr(settings, "pdf_split_min_pages_for_parallel", 16)
+            if settings is not None else 16
+        )
+        requested_workers = _default_pdf_split_workers(settings)
+        use_parallel = (
+            requested_workers > 1
+            and page_count >= max(1, int(min_parallel))
+        )
+
         logger.info(
-            "PDF split complete | file=%s | pages=%d | dpi=%d | grayscale=%s",
-            safe_filename, len(stored), dpi, grayscale,
+            "PDF split started | file=%s | pages=%d | dpi=%d | grayscale=%s | "
+            "fmt=%s | mode=%s | workers=%d",
+            safe_filename, page_count, dpi, grayscale, ext.lstrip("."),
+            "parallel" if use_parallel else "serial",
+            requested_workers if use_parallel else 1,
         )
-    return stored
+
+        try:
+            if use_parallel:
+                stored, failed_pages = _save_pdf_pages_parallel(
+                    inputs=inputs,
+                    safe_filename=safe_filename,
+                    data=data,
+                    stem=stem,
+                    page_count=page_count,
+                    dpi=dpi,
+                    grayscale=grayscale,
+                    ext=ext,
+                    jpeg_quality=quality,
+                    workers=requested_workers,
+                    batch_id=batch_id,
+                    settings=settings,
+                )
+            else:
+                with reserve_worker_capacity(
+                    1,
+                    label=f"pdf-serial:{safe_filename}",
+                ):
+                    _write_pdf_split_progress(batch_id, settings, 0, page_count)
+                    stored, failed_pages = _save_pdf_pages_serial(
+                        inputs=inputs,
+                        safe_filename=safe_filename,
+                        data=data,
+                        stem=stem,
+                        page_count=page_count,
+                        dpi=dpi,
+                        grayscale=grayscale,
+                        ext=ext,
+                        jpeg_quality=quality,
+                        batch_id=batch_id,
+                        settings=settings,
+                    )
+        except InvalidBatchRequest:
+            raise
+        except Exception as exc:
+            raise InvalidBatchRequest(
+                f"Could not convert PDF {safe_filename!r}: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+
+        if not stored:
+            _write_pdf_split_progress(batch_id, settings, 0, 0)  # clear progress
+            raise InvalidBatchRequest(
+                f"PDF {safe_filename!r}: all {len(failed_pages)} page(s) failed to render."
+            )
+        # Clear progress fields so the UI does not show stale split data
+        _write_pdf_split_progress(batch_id, settings, 0, 0)
+        if failed_pages:
+            logger.warning(
+                "PDF split finished with errors | file=%s | ok=%d | failed=%d | "
+                "first_failed_pages=%s",
+                safe_filename, len(stored), len(failed_pages), failed_pages[:20],
+            )
+        else:
+            logger.info(
+                "PDF split complete | file=%s | pages=%d | dpi=%d | grayscale=%s",
+                safe_filename, len(stored), dpi, grayscale,
+            )
+        return stored
+
+
+def _save_pdf_pages_serial(
+    *,
+    inputs: Path,
+    safe_filename: str,
+    data: bytes,
+    stem: str,
+    page_count: int,
+    dpi: int,
+    grayscale: bool,
+    ext: str,
+    jpeg_quality: int,
+    batch_id: str | None,
+    settings: Settings | None,
+) -> tuple[list[FileRef], list[int]]:
+    """Single-threaded PDF -> image render. Used for small PDFs."""
+    import fitz
+
+    stored: list[FileRef] = []
+    failed_pages: list[int] = []
+    fast_path_count = 0
+    colorspace = fitz.csGRAY if grayscale else fitz.csRGB
+
+    with fitz.open(stream=data, filetype="pdf") as pdf:
+        for page_index, page in enumerate(pdf, start=1):
+            try:
+                # Fast path: extract a full-page embedded image directly.
+                embedded = _try_extract_embedded_page_image(
+                    pdf, page, page_index,
+                    dpi=dpi, grayscale=grayscale, ext=ext, jpeg_quality=jpeg_quality,
+                )
+                target = inputs / f"{stem}_page_{page_index:04d}{ext}"
+                tmp_target = target.with_name(f".{target.stem}.tmp{target.suffix}")
+                if embedded is not None:
+                    tmp_target.write_bytes(embedded)
+                    tmp_target.replace(target)
+                    fast_path_count += 1
+                else:
+                    # Fallback: full pixmap rasterisation.
+                    pixmap = page.get_pixmap(
+                        dpi=dpi, alpha=False, colorspace=colorspace
+                    )
+                    if ext == ".jpg":
+                        try:
+                            pixmap.save(str(tmp_target), jpg_quality=jpeg_quality)
+                        except TypeError:
+                            pixmap.save(str(tmp_target))
+                    else:
+                        try:
+                            pixmap.save(str(tmp_target), compress_level=1)
+                        except TypeError:
+                            pixmap.save(str(tmp_target))
+                    tmp_target.replace(target)
+                    del pixmap
+                stored.append(
+                    FileRef(name=target.name, size_bytes=target.stat().st_size)
+                )
+            except Exception as page_exc:  # noqa: BLE001
+                try:
+                    tmp_target.unlink(missing_ok=True)
+                except (NameError, OSError):
+                    pass
+                failed_pages.append(page_index)
+                logger.warning(
+                    "PDF page render failed | file=%s | page=%d/%d | %s: %s",
+                    safe_filename, page_index, page_count,
+                    type(page_exc).__name__, page_exc,
+                )
+            if page_index % 10 == 0 or page_index == page_count:
+                _write_pdf_split_progress(
+                    batch_id, settings, len(stored), page_count
+                )
+            if page_index % 50 == 0 or page_index == page_count:
+                logger.info(
+                    "PDF split progress | file=%s | %d/%d pages saved | failed=%d",
+                    safe_filename, len(stored), page_count, len(failed_pages),
+                )
+
+    fallback_count = len(stored) - fast_path_count
+    logger.debug(
+        "PDF split fast-path stats | file=%s | fast_path_pages=%d / total_pages=%d"
+        " | fallback_pages=%d",
+        safe_filename, fast_path_count, page_count, fallback_count,
+    )
+    return stored, failed_pages
+
+
+def _save_pdf_pages_parallel(
+    *,
+    inputs: Path,
+    safe_filename: str,
+    data: bytes,
+    stem: str,
+    page_count: int,
+    dpi: int,
+    grayscale: bool,
+    ext: str,
+    jpeg_quality: int,
+    workers: int,
+    batch_id: str | None,
+    settings: Settings | None,
+) -> tuple[list[FileRef], list[int]]:
+    """Parallel PDF -> image render via :class:`ProcessPoolExecutor`.
+
+    Each worker process opens the PDF once (cached in
+    :data:`_PDF_WORKER_CACHE`) and renders the pages routed to it. The PDF
+    bytes are written to a single temporary file under the scratch cache
+    root and each worker opens it by path — that avoids pickling the full
+    PDF bytes (potentially 100+ MB) once per worker process, and keeps the
+    temp file inside the SEP-excluded directory.
+    """
+    # Stage the PDF as a single file under the scratch cache. Using the
+    # cache root means the temp file lands inside the AV exclusion (one
+    # place, not %TEMP%).
+    if settings is not None:
+        try:
+            scratch_root = settings.ensure_cache_root() / "pdf_split_inputs"
+        except Exception:  # noqa: BLE001
+            scratch_root = inputs
+    else:
+        scratch_root = inputs
+    scratch_root.mkdir(parents=True, exist_ok=True)
+    pdf_tmp_name = f"{uuid.uuid4().hex}_{Path(safe_filename).name}"
+    pdf_tmp_path = scratch_root / pdf_tmp_name
+    pdf_tmp_path.write_bytes(data)
+    pdf_path_str = str(pdf_tmp_path)
+
+    stored_by_index: dict[int, FileRef] = {}
+    failed_pages: list[int] = []
+
+    progress_step = max(1, page_count // 50)
+
+    try:
+        # Submit one task per page. Each task is tiny to pickle (a path
+        # plus a few ints) and the worker reuses the cached fitz.Document
+        # for every page it handles.
+        with reserve_worker_capacity(
+            workers,
+            label=f"pdf-parallel:{safe_filename}",
+        ) as reserved_workers:
+            if reserved_workers != workers:
+                logger.info(
+                    "PDF split worker count reduced by shared capacity | "
+                    "file=%s | requested=%d | granted=%d",
+                    safe_filename, workers, reserved_workers,
+                )
+            _write_pdf_split_progress(batch_id, settings, 0, page_count)
+            # Use the persistent pool — avoids the ~200-400ms Windows spawn
+            # cost per upload.  Do NOT use a `with` block; the pool must not
+            # be shut down between jobs.
+            ex = _get_pdf_render_pool(reserved_workers)
+            futures = {
+                ex.submit(
+                    _render_pdf_page_to_disk,
+                    pdf_path_str,
+                    page_index,
+                    str(inputs),
+                    stem,
+                    dpi=dpi,
+                    grayscale=grayscale,
+                    ext=ext,
+                    jpeg_quality=jpeg_quality,
+                ): page_index
+                for page_index in range(1, page_count + 1)
+            }
+            fast_path_count = 0
+            completed = 0
+            for fut in as_completed(futures):
+                page_index = futures[fut]
+                try:
+                    res_page, res_name, res_size, res_err, res_fast = fut.result()
+                except Exception as exc:  # noqa: BLE001
+                    res_page = page_index
+                    res_name = None
+                    res_size = 0
+                    res_err = f"{type(exc).__name__}: {exc}"
+                    res_fast = False
+
+                if res_err is not None or res_name is None:
+                    failed_pages.append(res_page)
+                    logger.warning(
+                        "PDF page render failed | file=%s | page=%d/%d | %s",
+                        safe_filename, res_page, page_count, res_err,
+                    )
+                else:
+                    if res_fast:
+                        fast_path_count += 1
+                    stored_by_index[res_page] = FileRef(
+                        name=res_name, size_bytes=res_size
+                    )
+
+                completed += 1
+                if (
+                    completed % progress_step == 0
+                    or completed == page_count
+                ):
+                    _write_pdf_split_progress(
+                        batch_id, settings,
+                        len(stored_by_index), page_count,
+                    )
+                if completed % 50 == 0 or completed == page_count:
+                    logger.info(
+                        "PDF split progress | file=%s | %d/%d pages saved | failed=%d",
+                        safe_filename, len(stored_by_index),
+                        page_count, len(failed_pages),
+                    )
+
+            fallback_count = len(stored_by_index) - fast_path_count
+            logger.debug(
+                "PDF split fast-path stats | file=%s | fast_path_pages=%d"
+                " / total_pages=%d | fallback_pages=%d",
+                safe_filename, fast_path_count, page_count, fallback_count,
+            )
+    finally:
+        # Always clean up the staged PDF — workers have already closed
+        # their handles when the executor shut down.
+        try:
+            pdf_tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    failed_pages.sort()
+    # Return refs in page order so the UI list is naturally sorted by page.
+    stored = [stored_by_index[i] for i in sorted(stored_by_index)]
+    return stored, failed_pages
 
 
 def delete_file(
@@ -631,13 +1315,15 @@ def import_directory(
         if suffix not in UPLOAD_EXTENSIONS:
             skipped.append(child.name)
             continue
-        safe = _sanitise_filename(child.name)
+        safe = _truncate_filename_stem(_sanitise_filename(child.name))
         if suffix in PDF_EXTENSIONS:
             imported.extend(
                 _save_pdf_pages_as_images(
                     inputs, safe, child.read_bytes(),
                     dpi=settings.pdf_render_dpi,
                     grayscale=settings.pdf_render_grayscale,
+                    page_format=settings.pdf_page_format,
+                    jpeg_quality=settings.pdf_jpeg_quality,
                     batch_id=batch_id,
                     settings=settings,
                 )
@@ -953,6 +1639,7 @@ def reset_batch_runtime_state(
         "latest_dynamic_dimensions",
         "dynamic_dimensions_by_file",
         "cancel_requested",
+        "pipelined_run",
     ):
         meta.pop(key, None)
     _save_metadata(settings, batch_id, meta)

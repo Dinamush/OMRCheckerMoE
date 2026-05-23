@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{% block title %}OMRChecker Web UI{% endblock %}</title>
-    <link rel="stylesheet" href="/static/app.css" />
+    <link rel="stylesheet" href="/static/app.css?v={{ STATIC_VERSION }}" />
 </head>
 <body>
     <header class="topbar">
@@ -14,6 +14,7 @@
                 <a href="/">Batches</a>
                 <a href="/prefill">Prefill Sheets</a>
                 <a href="/generate-csv">Generate Test CSV</a>
+                <a href="/settings">Settings</a>
                 <a href="/docs" target="_blank" rel="noopener">API docs</a>
             </nav>
         </div>
@@ -42,7 +43,7 @@
     </div>
     <!-- ────────────────────────────────────────────────────────────── -->
 
-    <script src="/static/app.js" defer></script>
+    <script src="/static/app.js?v={{ STATIC_VERSION }}" defer></script>
     {% block scripts %}{% endblock %}
 </body>
 </html>

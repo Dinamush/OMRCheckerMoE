@@ -7,11 +7,15 @@ and any third-party API consumer go through identical codepaths.
 from __future__ import annotations
 
 import asyncio
+import copy
+import logging
 import secrets
 import threading
 import time as _time_mod
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 import csv
 import io
@@ -48,10 +52,116 @@ from webui.services import batches as batches_service
 from webui.services import omr as omr_service
 from webui.services import prefill as prefill_service
 from webui.services import presets as presets_service
+from webui.services.scan_simulation import normalize_realism_preset
+from webui import log_stream
+from webui.schemas_settings import (
+    RuntimeSettingsResponse,
+    RuntimeSettingsUpdate,
+    SettingsMetaResponse,
+    build_meta_response,
+)
 from webui.services.batches import BatchNotFound, InvalidBatchRequest
-from webui.settings import Settings, get_settings
+from webui.settings import (
+    RUNTIME_MUTABLE_SETTINGS,
+    Settings,
+    _load_overrides,
+    get_settings,
+    reload_settings,
+    write_overrides,
+)
 
 router = APIRouter(prefix="/api/v1", tags=["omr"])
+
+
+# Built-in template/config for sheets produced by the Prefill page.
+#
+# The generated sheets include four ArUco corner markers, but the OMR engine
+# still needs a template to map the cropped page into fields and bubbles.
+# Auto-attaching these documents keeps the generated-sheet workflow one-click:
+# generate/download prefilled sheets -> upload/process without manually adding
+# template.json/config.json.
+_PREFILLED_25Q_TEMPLATE: dict[str, Any] = {
+    "pageDimensions": [666, 515],
+    "bubbleDimensions": [10, 10],
+    "customLabels": {"CandidateNumber": ["cand1..10"]},
+    "outputColumns": ["CandidateNumber", "q1..25"],
+    "fieldBlocks": {
+        "CandidateNumber": {
+            "origin": [430, 103],
+            "bubblesGap": 10.0,
+            "labelsGap": 21.5,
+            "fieldLabels": ["cand1..10"],
+            "fieldType": "QTYPE_INT",
+        },
+        "q01block": {
+            "origin": [53, 257],
+            "bubblesGap": 20.0,
+            "labelsGap": 42.0,
+            "fieldLabels": ["q1..5"],
+            "emptyValue": "NR",
+            "fieldType": "QTYPE_MCQ4",
+        },
+        "q06block": {
+            "origin": [181, 257],
+            "bubblesGap": 20.0,
+            "labelsGap": 42.0,
+            "fieldLabels": ["q6..10"],
+            "emptyValue": "NR",
+            "fieldType": "QTYPE_MCQ4",
+        },
+        "q11block": {
+            "origin": [310, 257],
+            "bubblesGap": 19.5,
+            "labelsGap": 42.0,
+            "fieldLabels": ["q11..15"],
+            "emptyValue": "NR",
+            "fieldType": "QTYPE_MCQ4",
+        },
+        "q16block": {
+            "origin": [435, 257],
+            "bubblesGap": 20.3,
+            "labelsGap": 42.0,
+            "fieldLabels": ["q16..20"],
+            "emptyValue": "NR",
+            "fieldType": "QTYPE_MCQ4",
+        },
+        "q21block": {
+            "origin": [566, 257],
+            "bubblesGap": 19.7,
+            "labelsGap": 42.0,
+            "fieldLabels": ["q21..25"],
+            "emptyValue": "NR",
+            "fieldType": "QTYPE_MCQ4",
+        },
+    },
+    "preProcessors": [
+        {
+            "name": "CropOnMarkers",
+            "options": {
+                "type": "aruco",
+                "arucoDictionary": "DICT_4X4_50",
+                "arucoCornerIds": [0, 1, 2, 3],
+                "preserveFullImage": True,
+                "referenceMarkerCenters": [
+                    [13.5, 13.2],
+                    [651.5, 13.2],
+                    [13.5, 499.0],
+                    [651.5, 499.0],
+                ],
+            },
+        }
+    ],
+}
+
+_PREFILLED_25Q_CONFIG: dict[str, Any] = {
+    "dimensions": {
+        "display_height": 515,
+        "display_width": 666,
+        "processing_height": 515,
+        "processing_width": 666,
+    },
+    "outputs": {"show_image_level": 0},
+}
 
 # ---------------------------------------------------------------------------
 # Prefill backpressure: cap concurrent batch jobs server-side. A 5k-row PDF
@@ -67,6 +177,13 @@ _PREFILL_BATCH_SEM = threading.BoundedSemaphore(_PREFILL_BATCH_LIMIT)
 # Allow a higher limit than batches but still bounded.
 _PREFILL_SINGLE_LIMIT = max(2, int(os.environ.get("OMR_WEBUI_PREFILL_SINGLE_CONCURRENCY", "8")))
 _PREFILL_SINGLE_SEM = threading.BoundedSemaphore(_PREFILL_SINGLE_LIMIT)
+
+# /prefill/sample is fired in parallel by the in-page comparison gallery
+# (4 concurrent requests on page load). Cap server-side concurrency so a
+# misbehaving client (or a tight retry loop) can't pile up dozens of PNG
+# renders simultaneously.
+_PREFILL_SAMPLE_LIMIT = max(2, int(os.environ.get("OMR_WEBUI_PREFILL_SAMPLE_CONCURRENCY", "6")))
+_PREFILL_SAMPLE_SEM = threading.BoundedSemaphore(_PREFILL_SAMPLE_LIMIT)
 
 # Hard caps on prefill batch sizes. PDF assembly is heavier than ZIP because
 # each page incurs PyMuPDF parsing overhead; ZIP just stores PNG bytes verbatim.
@@ -96,6 +213,109 @@ def _register_download(tmp_path: Path, media_type: str, filename: str) -> str:
     return token
 
 
+def _is_prefilled_sheet_upload(filename: str | None) -> bool:
+    """Return true for files produced by this app's Prefill page."""
+    name = (filename or "").lower()
+    return "prefilled_sheet" in name or "prefilled_sheets" in name
+
+
+def _attach_prefilled_25q_defaults(
+    batch_id: str,
+    settings: Settings,
+    *,
+    reason: str,
+) -> None:
+    """Attach the built-in 25Q prefill template/config if absent.
+
+    We never overwrite user-supplied documents. This only fills the common
+    gap where the upload was generated by the app's Prefill page and therefore
+    has ArUco markers but no explicit batch template yet.
+    """
+    attached: list[str] = []
+    if batches_service.get_json_document(batch_id, "template", settings) is None:
+        batches_service.save_json_document(
+            batch_id,
+            "template",
+            copy.deepcopy(_PREFILLED_25Q_TEMPLATE),
+            settings,
+        )
+        attached.append("template.json")
+    if batches_service.get_json_document(batch_id, "config", settings) is None:
+        batches_service.save_json_document(
+            batch_id,
+            "config",
+            copy.deepcopy(_PREFILLED_25Q_CONFIG),
+            settings,
+        )
+        attached.append("config.json")
+
+    batches_service.update_batch_metadata(
+        batch_id,
+        {
+            "input_profile": "prefilled_25q",
+            "auto_attached_template": True,
+            "auto_attached_template_reason": reason,
+        },
+        settings,
+    )
+    if attached:
+        logger.info(
+            "Auto-attached prefilled 25Q defaults | batch=%s | files=%s | reason=%s",
+            batch_id,
+            ", ".join(attached),
+            reason,
+        )
+
+
+def _maybe_attach_prefilled_25q_defaults(
+    batch_id: str,
+    settings: Settings,
+    *,
+    reason: str,
+) -> bool:
+    """Attach defaults for known prefilled-sheet batches.
+
+    Returns ``True`` when the batch is or has been marked as a prefilled 25Q
+    batch. This is used by the process guard to repair existing batches that
+    were uploaded before the template was auto-attached.
+    """
+    metadata = batches_service.get_batch_metadata(batch_id, settings)
+    if metadata.get("input_profile") != "prefilled_25q":
+        return False
+    _attach_prefilled_25q_defaults(batch_id, settings, reason=reason)
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Log streaming
+# ---------------------------------------------------------------------------
+
+
+@router.get("/logs/poll")
+async def logs_poll(since: int = -1) -> dict:
+    """Return log entries with sequence number > ``since``.
+
+    Used by the front-end log panel which polls once per second over plain
+    HTTP. WebView2 has known SSE buffering issues so this is the preferred
+    transport in the desktop wrapper.
+    """
+    return log_stream.poll(since=since)
+
+
+@router.get("/logs/stream")
+async def logs_stream() -> StreamingResponse:
+    """Server-Sent Events stream of log lines (non-WebView2 clients)."""
+    return StreamingResponse(
+        log_stream.stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
 # ---------------------------------------------------------------------------
 # System info
 # ---------------------------------------------------------------------------
@@ -113,6 +333,76 @@ async def system_info() -> dict:
         "cpu_count": os.cpu_count(),
         "default_max_workers": _default_max_workers(),
     }
+
+
+# ---------------------------------------------------------------------------
+# Runtime-mutable settings (used by the /settings UI)
+# ---------------------------------------------------------------------------
+
+
+def _settings_response(settings: Settings) -> RuntimeSettingsResponse:
+    """Project the live :class:`Settings` instance into the API response."""
+    return RuntimeSettingsResponse(
+        **{key: getattr(settings, key) for key in RUNTIME_MUTABLE_SETTINGS}
+    )
+
+
+@router.get("/settings", response_model=RuntimeSettingsResponse)
+async def get_runtime_settings(
+    settings: Settings = Depends(get_settings),
+) -> RuntimeSettingsResponse:
+    """Return the current value of every runtime-mutable setting."""
+    return _settings_response(settings)
+
+
+@router.put("/settings", response_model=RuntimeSettingsResponse)
+async def update_runtime_settings(
+    payload: RuntimeSettingsUpdate,
+    settings: Settings = Depends(get_settings),
+) -> RuntimeSettingsResponse:
+    """Persist runtime overrides, reload settings, and return the new state.
+
+    Only fields explicitly present in the request body are written. This
+    lets the UI send PATCH-style partial updates (toggle a single switch)
+    without round-tripping every setting on every save. Unknown keys are
+    rejected by ``RuntimeSettingsUpdate`` (``extra=\"forbid\"``) so the
+    allowlist is enforced at the schema layer, not by post-hoc filtering.
+    """
+    new_values = payload.model_dump(exclude_unset=True)
+    if not new_values:
+        # No-op PUT: don't touch the overrides file, just echo current state.
+        return _settings_response(settings)
+
+    # Storage_root is the SEP-friendly default location for the overrides
+    # file (see ``Settings.overrides_path``). ``_load_overrides`` and
+    # ``write_overrides`` both accept either storage_root or cache_root
+    # and resolve the actual path through the live Settings instance.
+    overrides_root = settings.storage_root
+    merged = _load_overrides(overrides_root)
+    # Log every actual change before writing so a failed disk write still
+    # produces an audit trail of what the operator attempted.
+    for key, new_val in new_values.items():
+        old_val = getattr(settings, key)
+        if old_val != new_val:
+            logger.info(
+                "Settings updated | key=%s | old=%s | new=%s",
+                key, old_val, new_val,
+            )
+        merged[key] = new_val
+
+    write_overrides(merged, overrides_root)
+    fresh = reload_settings()
+    return _settings_response(fresh)
+
+
+@router.get("/settings/meta", response_model=SettingsMetaResponse)
+async def get_runtime_settings_meta() -> SettingsMetaResponse:
+    """Return descriptions + defaults for every mutable setting.
+
+    The ``/settings`` UI uses this to render field labels, helper text
+    under each input, and a per-field \"Reset to default\" button.
+    """
+    return build_meta_response()
 
 
 # ---------------------------------------------------------------------------
@@ -225,20 +515,45 @@ async def list_files(
     return batches_service.list_files(batch_id, settings)
 
 
-@router.post(
-    "/batches/{batch_id}/files",
-    response_model=list[FileRef],
-    status_code=status.HTTP_201_CREATED,
-)
+def _is_pdf_upload(upload: UploadFile) -> bool:
+    """Return True when the uploaded file is a PDF by name or content-type."""
+    name = (upload.filename or "").lower()
+    if name.endswith(".pdf"):
+        return True
+    content_type = (upload.content_type or "").lower()
+    return content_type == "application/pdf"
+
+
+@router.post("/batches/{batch_id}/files")
 @_handle_errors
 async def upload_files(
     batch_id: str,
+    background_tasks: BackgroundTasks,
     files: list[UploadFile] = File(...),
     settings: Settings = Depends(get_settings),
-) -> list[FileRef]:
+):
+    """Accept image + PDF uploads.
+
+    Image uploads (PNG / JPG / JPEG) are written synchronously and the
+    endpoint returns ``201`` with the resulting :class:`FileRef` list.
+
+    PDF uploads are scheduled as a background task because a 5000-page PDF
+    can take minutes to render; the endpoint returns ``202`` with
+    ``{"processing": True, "files": [...image refs already saved...]}``.
+    The frontend polls ``/batches/{batch_id}/status`` for the split
+    progress and refreshes its file list when ``pdf_split_total`` returns
+    to zero (i.e. the background task finished).
+    """
+    from fastapi.responses import JSONResponse
+
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
-    stored: list[FileRef] = []
+    # Read all upload bytes up front: we need to know each file's size for
+    # the size check anyway, and the UploadFile stream is consumed once.
+    image_refs: list[FileRef] = []
+    pdf_jobs: list[tuple[str, bytes]] = []
+    inferred_preset: str | None = None
+    has_prefilled_sheet_upload = False
     for upload in files:
         data = await upload.read()
         if len(data) > settings.max_upload_bytes:
@@ -249,9 +564,23 @@ async def upload_files(
                     f"({settings.max_upload_bytes} bytes)"
                 ),
             )
-        # Run the synchronous (CPU + disk I/O) conversion in a thread so the
-        # event loop stays free.  Large PDFs take seconds to minutes; without
-        # this the entire uvicorn worker stalls and other requests are blocked.
+        # Try to infer the realism preset from the filename so we have an
+        # audit trail when a prefill-generated file is later debugged. This
+        # is best-effort only; legitimate user uploads with these names are
+        # rare. ``adversarial`` matches first because both ``moderate`` and
+        # ``adversarial`` contain ``a``.
+        name_lower = (upload.filename or "").lower()
+        if _is_prefilled_sheet_upload(upload.filename):
+            has_prefilled_sheet_upload = True
+        for candidate in ("adversarial", "moderate", "subtle"):
+            if candidate in name_lower:
+                if inferred_preset is None:
+                    inferred_preset = candidate
+                break
+        if _is_pdf_upload(upload):
+            pdf_jobs.append((upload.filename or "upload.pdf", data))
+            continue
+        # Synchronous image save (fast, no rendering).
         refs = await asyncio.to_thread(
             batches_service.save_uploaded_file,
             batch_id,
@@ -259,8 +588,63 @@ async def upload_files(
             data,
             settings,
         )
-        stored.extend(refs)
-    return stored
+        image_refs.extend(refs)
+
+    if inferred_preset is not None:
+        batches_service.update_batch_metadata(
+            batch_id,
+            {"inferred_realism_preset": inferred_preset},
+            settings,
+        )
+        logger.info(
+            "Inferred realism preset from upload filename | batch=%s | preset=%s",
+            batch_id,
+            inferred_preset,
+        )
+
+    if has_prefilled_sheet_upload:
+        _attach_prefilled_25q_defaults(
+            batch_id,
+            settings,
+            reason="upload filename matched prefilled_sheet(s)",
+        )
+
+    if pdf_jobs:
+        # Schedule PDF rendering as background work. BackgroundTasks runs
+        # after the response is sent in production; in TestClient it runs
+        # synchronously, which is exactly what the test harness expects.
+        #
+        # Each task is wrapped in a closure so that any exception (corrupt
+        # PDF, disk full, etc.) is caught and persisted into batch metadata
+        # rather than silently swallowed by the BackgroundTasks runner.
+        for filename, data in pdf_jobs:
+            stem = Path(filename).stem
+
+            def _run_pdf_split(fn=filename, d=data, s=stem):
+                try:
+                    batches_service.save_uploaded_file(batch_id, fn, d, settings)
+                except Exception as exc:  # noqa: BLE001
+                    error_msg = f"{s}: {type(exc).__name__}: {exc}"
+                    logger.exception(
+                        "Background PDF split failed | batch=%s | file=%s",
+                        batch_id, fn,
+                    )
+                    batches_service._record_pdf_split_error(batch_id, settings, error_msg)
+
+            background_tasks.add_task(_run_pdf_split)
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content={
+                "processing": True,
+                "files": [ref.model_dump() for ref in image_refs],
+                "pdf_count": len(pdf_jobs),
+            },
+        )
+
+    return JSONResponse(
+        status_code=status.HTTP_201_CREATED,
+        content=[ref.model_dump() for ref in image_refs],
+    )
 
 
 @router.post(
@@ -407,10 +791,25 @@ def _assert_batch_ready_to_run(batch: Batch, settings: Settings) -> None:
     if batch.file_count == 0:
         raise HTTPException(status_code=400, detail="Batch has no input images.")
     if not batch.has_template:
-        raise HTTPException(
-            status_code=400,
-            detail="Batch is missing template.json; upload one before processing.",
-        )
+        if _maybe_attach_prefilled_25q_defaults(
+            batch.id,
+            settings,
+            reason="process requested for prefilled_25q batch without template",
+        ):
+            # The process guard is called with a Batch snapshot that was
+            # loaded before this repair, so do not inspect batch.has_template
+            # again here. The following missing-asset check reads from disk.
+            pass
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Batch is missing template.json. If this batch came from "
+                    "the Prefill page, upload the original file whose name "
+                    "starts with 'prefilled_sheet' so the built-in 25Q "
+                    "template can be attached automatically."
+                ),
+            )
     missing = batches_service.missing_template_assets(batch.id, settings)
     if missing:
         names = ", ".join(missing)
@@ -528,6 +927,16 @@ async def batch_status(
         eta_s=eta_s,
         pdf_split_pages=int(metadata.get("pdf_split_pages", 0)),
         pdf_split_total=int(metadata.get("pdf_split_total", 0)),
+        pdf_split_error=metadata.get("pdf_split_error") or None,
+        pipelined_run=bool(metadata.get("pipelined_run", False)),
+        # Mirror runtime-mutable auto-start settings so the frontend
+        # poller can decide whether to auto-fire /process without
+        # making a separate /api/v1/settings request per tick.
+        auto_start_omr_with_split=settings.auto_start_omr_with_split,
+        auto_start_omr_min_pages=settings.auto_start_omr_min_pages,
+        auto_start_omr_require_config=settings.auto_start_omr_require_config,
+        has_template=batch.has_template,
+        has_config=batch.has_config,
     )
 
 
@@ -601,6 +1010,58 @@ async def get_checked_output_image(
 # Prefill endpoints
 # ---------------------------------------------------------------------------
 
+@router.get("/prefill/sample")
+async def prefill_sample(
+    preset: str = "none",
+    candidate_number: str = "9010690012",
+    student_name: str = "Jane Doe",
+    school_name: str = "Sample School",
+    exam_name: str = "Sample Exam",
+) -> StreamingResponse:
+    """Return an inline PNG preview of a single preset.
+
+    Used by the in-page "Compare presets" gallery so users can see exactly
+    what each realism preset produces without downloading anything. Response
+    is marked ``Cache-Control: no-store`` so WebView2 / browser caches cannot
+    serve a stale version after the simulator code changes.
+    """
+    try:
+        preset_norm = normalize_realism_preset(preset)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    if not _PREFILL_SAMPLE_SEM.acquire(blocking=False):
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Sample renderer busy; try again shortly "
+                f"(max {_PREFILL_SAMPLE_LIMIT} concurrent previews)."
+            ),
+        )
+    try:
+        try:
+            data = await asyncio.to_thread(
+                prefill_service.generate_single_png,
+                student_name, school_name, exam_name, candidate_number, preset_norm,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(
+                status_code=500,
+                detail=f"Sample render failed: {type(exc).__name__}: {exc}",
+            )
+    finally:
+        _PREFILL_SAMPLE_SEM.release()
+    return StreamingResponse(
+        io.BytesIO(data),
+        media_type="image/png",
+        headers={
+            "Content-Disposition": f'inline; filename="preview_{preset_norm}.png"',
+            "Cache-Control": "no-store, max-age=0",
+        },
+    )
+
+
 @router.post("/prefill/single")
 async def prefill_single(
     student_name: str = Form(...),
@@ -608,6 +1069,7 @@ async def prefill_single(
     exam_name: str = Form(...),
     candidate_number: str = Form(...),
     output_format: str = Form("png"),
+    realism_preset: str = Form("none"),
 ) -> StreamingResponse:
     """Generate a single pre-filled answer sheet and stream it as a download."""
     output_format = (output_format or "").strip().lower()
@@ -616,6 +1078,10 @@ async def prefill_single(
             status_code=422,
             detail="output_format must be 'png' or 'pdf'.",
         )
+    try:
+        realism_preset = normalize_realism_preset(realism_preset)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     # Backpressure: bounded concurrency so a flood of requests cannot exhaust
     # the threadpool / RAM. Excess requests get a fast 429 with Retry-After.
     if not _PREFILL_SINGLE_SEM.acquire(blocking=False):
@@ -630,20 +1096,23 @@ async def prefill_single(
     try:
         # Offload CPU-heavy rendering off the event loop so a flood of
         # /prefill/single requests cannot block other endpoints (e.g. health).
+        # Suffix the filename with the preset (when not "none") so users can
+        # immediately tell which realism preset produced a given download.
+        preset_suffix = "" if realism_preset == "none" else f"_{realism_preset}"
         if output_format == "pdf":
             data = await asyncio.to_thread(
                 prefill_service.generate_single_pdf,
-                student_name, school_name, exam_name, candidate_number,
+                student_name, school_name, exam_name, candidate_number, realism_preset,
             )
             media_type = "application/pdf"
-            filename = "prefilled_sheet.pdf"
+            filename = f"prefilled_sheet{preset_suffix}.pdf"
         else:
             data = await asyncio.to_thread(
                 prefill_service.generate_single_png,
-                student_name, school_name, exam_name, candidate_number,
+                student_name, school_name, exam_name, candidate_number, realism_preset,
             )
             media_type = "image/png"
-            filename = "prefilled_sheet.png"
+            filename = f"prefilled_sheet{preset_suffix}.png"
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     except Exception as exc:  # noqa: BLE001 - never leak stack traces
@@ -667,6 +1136,7 @@ async def prefill_batch(
     csv_text: str | None = Form(default=None),
     csv_file: UploadFile | None = File(default=None),
     output_mode: str = Form("pdf"),
+    realism_preset: str = Form("none"),
 ) -> dict:
     """Generate pre-filled answer sheets for multiple students.
 
@@ -681,6 +1151,10 @@ async def prefill_batch(
             status_code=422,
             detail="output_mode must be 'pdf' or 'zip'.",
         )
+    try:
+        realism_preset = normalize_realism_preset(realism_preset)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
 
     if not csv_text and (csv_file is None or not csv_file.filename):
         raise HTTPException(
@@ -770,7 +1244,8 @@ async def prefill_batch(
 
     suffix = ".pdf" if output_mode == "pdf" else ".zip"
     media_type = "application/pdf" if output_mode == "pdf" else "application/zip"
-    filename = "prefilled_sheets" + suffix
+    preset_suffix = "" if realism_preset == "none" else f"_{realism_preset}"
+    filename = f"prefilled_sheets{preset_suffix}{suffix}"
 
     # 7) Write to a temp file the response will stream from. The file is
     # deleted after the response finishes via background_tasks.
@@ -793,11 +1268,11 @@ async def prefill_batch(
         # loop and stall every other request (incl. health checks).
         if output_mode == "zip":
             meta = await asyncio.to_thread(
-                prefill_service.generate_batch_zip_to_file, rows, tmp_path,
+                prefill_service.generate_batch_zip_to_file, rows, tmp_path, realism_preset,
             )
         else:
             meta = await asyncio.to_thread(
-                prefill_service.generate_batch_pdf_to_file, rows, tmp_path,
+                prefill_service.generate_batch_pdf_to_file, rows, tmp_path, realism_preset,
             )
     except ValueError as exc:
         _cleanup()
@@ -836,38 +1311,6 @@ async def prefill_batch(
         "elapsed_s": meta["elapsed_s"],
         "size_bytes": meta["size_bytes"],
     }
-
-
-@router.get("/prefill/batch/download/{token}")
-async def prefill_batch_download(token: str, background_tasks: BackgroundTasks):
-    """One-time token download endpoint. Returns the generated file and deletes it."""
-    with _DOWNLOAD_STORE_LOCK:
-        entry = _DOWNLOAD_STORE.pop(token, None)
-
-    if entry is None:
-        raise HTTPException(status_code=404, detail="Download link not found or already used.")
-
-    tmp_path, media_type, filename, expires_at = entry
-    if not tmp_path.exists():
-        raise HTTPException(status_code=410, detail="File no longer available.")
-    if _time_mod.monotonic() > expires_at:
-        tmp_path.unlink(missing_ok=True)
-        raise HTTPException(status_code=410, detail="Download link has expired.")
-
-    def _cleanup():
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-
-    background_tasks.add_task(_cleanup)
-    return FileResponse(
-        path=str(tmp_path),
-        media_type=media_type,
-        filename=filename,
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-        background=background_tasks,
-    )
 
 
 @router.get("/prefill/batch/download/{token}")
