@@ -50,6 +50,16 @@
                 </div>
             </div>
 
+            <div class="form-group">
+                <label class="radio-label" for="g-include-output">
+                    <input id="g-include-output" name="include_output_file" type="checkbox" />
+                    Include <span class="mono">output_file</span> column
+                </label>
+                <span class="muted small" style="display:block;margin-block-start:0.25rem;">
+                    Optional. Only used when the prefill batch is generated as a ZIP of individual PNGs to set per-row PNG filenames. Combined PDF output ignores it.
+                </span>
+            </div>
+
         </div>
 
         <div id="gen-error" class="error small" style="display:none; margin-block-end:0.75rem;"></div>
@@ -64,12 +74,12 @@
         <div class="table-scroll">
             <table class="table" id="preview-table">
                 <thead>
-                    <tr>
+                    <tr id="preview-head">
                         <th>student_name</th>
                         <th>school_name</th>
                         <th>exam_name</th>
                         <th>candidate_number</th>
-                        <th>output_file</th>
+                        <th id="preview-output-col">output_file</th>
                     </tr>
                 </thead>
                 <tbody id="preview-body"></tbody>

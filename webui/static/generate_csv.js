@@ -72,13 +72,17 @@
         return `${first} ${last} ${Math.floor(zeroIndex / NAME_COMBINATIONS) + 1}`;
     }
 
-    function rowValues(rowIndex, schoolName, examName, candidateStartNum, nameStyle, nameSeed) {
+    function rowValues(rowIndex, schoolName, examName, candidateStartNum, nameStyle, nameSeed, includeOutputFile) {
         const name = nameStyle === "random"
             ? realisticName(rowIndex, nameSeed)
             : `Student ${rowIndex}`;
         const cand = String(candidateStartNum + BigInt(rowIndex - 1)).padStart(10, "0");
-        const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
-        return [name, schoolName, examName, cand, `${slug}.png`];
+        const row = [name, schoolName, examName, cand];
+        if (includeOutputFile) {
+            const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
+            row.push(`${slug}.png`);
+        }
+        return row;
     }
 
     function escapeCsv(value) {
@@ -95,19 +99,22 @@
 
     const PREVIEW_ROWS = 5;
 
-    function renderPreview(count, schoolName, examName, candidateStart, nameStyle) {
+    function renderPreview(count, schoolName, examName, candidateStart, nameStyle, includeOutputFile) {
         const previewEl = document.getElementById("gen-preview");
         const labelEl = document.getElementById("preview-label");
         const tbody = document.getElementById("preview-body");
+        const outputCol = document.getElementById("preview-output-col");
+        if (outputCol) outputCol.style.display = includeOutputFile ? "" : "none";
 
         const candidateStartNum = BigInt(candidateStart);
         const nameSeed = hashString(`${schoolName}|${examName}|${candidateStart}`);
+        const colCount = includeOutputFile ? 5 : 4;
 
         tbody.innerHTML = "";
         const shown = Math.min(count, PREVIEW_ROWS);
         for (let i = 1; i <= shown; i++) {
             const tr = document.createElement("tr");
-            rowValues(i, schoolName, examName, candidateStartNum, nameStyle, nameSeed).forEach(val => {
+            rowValues(i, schoolName, examName, candidateStartNum, nameStyle, nameSeed, includeOutputFile).forEach(val => {
                 const td = document.createElement("td");
                 td.textContent = val;
                 tr.appendChild(td);
@@ -118,7 +125,7 @@
         if (count > PREVIEW_ROWS) {
             const tr = document.createElement("tr");
             const td = document.createElement("td");
-            td.colSpan = 5;
+            td.colSpan = colCount;
             td.className = "muted small";
             td.style.textAlign = "center";
             td.textContent = `… and ${count - PREVIEW_ROWS} more rows`;
@@ -186,6 +193,7 @@
         const examName = document.getElementById("g-exam").value.trim();
         const candidateStart = document.getElementById("g-start").value.trim();
         const nameStyle = document.querySelector('input[name="name_style"]:checked')?.value ?? "numbered";
+        const includeOutputFile = Boolean(document.getElementById("g-include-output")?.checked);
 
         const errors = [];
         if (!Number.isInteger(count) || count < 1 || count > maxRows) {
@@ -201,7 +209,7 @@
                 errors.push("Candidate numbers would exceed 10 digits. Lower the row count or use a smaller Candidate Number Start.");
             }
         }
-        return { count, schoolName, examName, candidateStart, nameStyle, errors };
+        return { count, schoolName, examName, candidateStart, nameStyle, includeOutputFile, errors };
     }
 
     async function requestCsvDownload(values) {
@@ -211,6 +219,7 @@
         formData.append("exam_name", values.examName);
         formData.append("candidate_start", values.candidateStart);
         formData.append("name_style", values.nameStyle);
+        formData.append("include_output_file", values.includeOutputFile ? "true" : "false");
 
         const response = await fetch(GENERATE_URL, {
             method: "POST",
@@ -245,14 +254,14 @@
             showError("");
 
             const values = getFormValues();
-            const { count, schoolName, examName, candidateStart, nameStyle, errors } = values;
+            const { count, schoolName, examName, candidateStart, nameStyle, includeOutputFile, errors } = values;
             if (errors.length) {
                 showError(errors.join(" "));
                 return;
             }
 
             try {
-                renderPreview(count, schoolName, examName, candidateStart, nameStyle);
+                renderPreview(count, schoolName, examName, candidateStart, nameStyle, includeOutputFile);
                 setLoading(submitBtn, `Preparing ${count.toLocaleString()} rows on server…`);
                 const payload = await requestCsvDownload(values);
                 setLoading(submitBtn, "Opening download…");

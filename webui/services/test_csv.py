@@ -82,17 +82,25 @@ def row_values(
     candidate_start: int,
     name_style: str,
     name_seed: int,
+    include_output_file: bool = False,
 ) -> list[str]:
-    """Return one CSV row using the same deterministic naming as the preview."""
+    """Return one CSV row using the same deterministic naming as the preview.
+
+    The optional ``output_file`` column is omitted by default because the
+    prefill PDF mode does not use it; only the ZIP-of-PNGs mode honours it.
+    """
     if name_style == "random":
         name = realistic_name(row_index, name_seed)
     else:
         name = f"Student {row_index}"
     candidate_number = f"{candidate_start + row_index - 1:010d}"
-    slug = "_".join(part for part in "".join(
-        char.lower() if char.isalnum() else " " for char in name
-    ).split())
-    return [name, school_name, exam_name, candidate_number, f"{slug}.png"]
+    row = [name, school_name, exam_name, candidate_number]
+    if include_output_file:
+        slug = "_".join(part for part in "".join(
+            char.lower() if char.isalnum() else " " for char in name
+        ).split())
+        row.append(f"{slug}.png")
+    return row
 
 
 def write_test_csv(
@@ -103,19 +111,22 @@ def write_test_csv(
     exam_name: str,
     candidate_start: str,
     name_style: str,
+    include_output_file: bool = False,
 ) -> dict[str, int]:
     """Write a generated student CSV to *dst_path* without buffering all rows."""
     candidate_start_int = int(candidate_start)
     name_seed = hash_string(f"{school_name}|{exam_name}|{candidate_start}")
+    headers = [
+        "student_name",
+        "school_name",
+        "exam_name",
+        "candidate_number",
+    ]
+    if include_output_file:
+        headers.append("output_file")
     with dst_path.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow([
-            "student_name",
-            "school_name",
-            "exam_name",
-            "candidate_number",
-            "output_file",
-        ])
+        writer.writerow(headers)
         for row_index in range(1, count + 1):
             writer.writerow(row_values(
                 row_index,
@@ -124,5 +135,6 @@ def write_test_csv(
                 candidate_start_int,
                 name_style,
                 name_seed,
+                include_output_file,
             ))
     return {"count": count, "size_bytes": dst_path.stat().st_size}

@@ -1107,6 +1107,7 @@ async def generate_test_csv(
     exam_name: str = Form(...),
     candidate_start: str = Form(...),
     name_style: str = Form("numbered"),
+    include_output_file: bool = Form(False),
 ) -> dict:
     """Generate a student-record test CSV as a server-backed download token."""
     settings = get_settings()
@@ -1154,6 +1155,7 @@ async def generate_test_csv(
             exam_name=exam_name,
             candidate_start=candidate_start,
             name_style=name_style,
+            include_output_file=include_output_file,
         )
     except Exception:
         tmp_path.unlink(missing_ok=True)
@@ -1165,6 +1167,7 @@ async def generate_test_csv(
         "filename": filename,
         "count": meta["count"],
         "size_bytes": meta["size_bytes"],
+        "include_output_file": include_output_file,
         "pdf_max_rows": settings.prefill_pdf_max_rows,
         "zip_max_rows": settings.prefill_zip_max_rows,
     }
