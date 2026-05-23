@@ -168,12 +168,31 @@ def draw_aruco_corners(img: Image.Image) -> Image.Image:
     return Image.fromarray(img_cv[:, :, ::-1])
 
 
+def candidate_region_box(w: int, h: int) -> tuple[int, int, int, int]:
+    """Return the pixel-space bounding box of the candidate-number block.
+
+    The box covers both the printed digit headers and all 100 candidate
+    bubbles. Downstream scan simulation can use it to keep this region
+    pristine while still degrading the rest of the page (the candidate
+    number is "printed" in real life and therefore should never look
+    smudged or occluded in synthetic scans).
+    """
+    return relative_box(CFG['candidate_grid'], w, h)
+
+
 def aruco_marker_boxes(w: int, h: int) -> list[dict]:
     """Return pixel-space ArUco marker boxes for a rendered sheet.
 
     Kept in sync with :func:`draw_aruco_corners` so downstream scan
     simulation can occlude / blur markers intentionally for robustness
     testing without duplicating the placement math.
+
+    A corner is omitted when it would extend past the canvas
+    (``x1 > w`` or ``y1 > h``) or when the marker would render below the
+    minimum stampable size, mirroring the same guard used by
+    ``draw_aruco_corners``. Callers must therefore tolerate fewer than
+    four entries on extremely small canvases instead of receiving a box
+    that was never actually drawn.
     """
     marker_px = max(24, int(max(w, h) * _ARUCO_MARKER_SIZE_RATIO))
     quiet_zone = max(6, marker_px // 8)
@@ -184,13 +203,17 @@ def aruco_marker_boxes(w: int, h: int) -> list[dict]:
         half = marker_px // 2
         x0 = max(quiet_zone, min(cx - half, w - marker_px - quiet_zone))
         y0 = max(quiet_zone, min(cy - half, h - marker_px - quiet_zone))
+        x1 = x0 + marker_px
+        y1 = y0 + marker_px
+        if x1 > w or y1 > h or marker_px < 8:
+            continue
         boxes.append({
             'corner': corner_idx,
             'marker_id': marker_id,
             'x0': x0,
             'y0': y0,
-            'x1': x0 + marker_px,
-            'y1': y0 + marker_px,
+            'x1': x1,
+            'y1': y1,
         })
     return boxes
 

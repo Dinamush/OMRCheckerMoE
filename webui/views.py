@@ -46,10 +46,24 @@ def _compute_static_version() -> str:
     return str(int(time.time()))
 
 
-STATIC_VERSION = _compute_static_version()
+class _DynamicStaticVersion:
+    """String-like cache-busting token for static assets.
+
+    Uvicorn's reload watcher may not restart the app when only ``webui/static``
+    changes. Since versioned static files are cached as immutable, computing
+    this token at template-render time ensures a normal page navigation picks
+    up changed JS/CSS without requiring a server restart.
+    """
+
+    def __str__(self) -> str:
+        return _compute_static_version()
+
+    def __html__(self) -> str:
+        return str(self)
+
 
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
-templates.env.globals["STATIC_VERSION"] = STATIC_VERSION
+templates.env.globals["STATIC_VERSION"] = _DynamicStaticVersion()
 
 router = APIRouter(tags=["ui"])
 
