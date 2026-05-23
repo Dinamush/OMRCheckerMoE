@@ -186,10 +186,13 @@ _PREFILL_SAMPLE_LIMIT = max(2, int(os.environ.get("OMR_WEBUI_PREFILL_SAMPLE_CONC
 _PREFILL_SAMPLE_SEM = threading.BoundedSemaphore(_PREFILL_SAMPLE_LIMIT)
 
 # Hard caps on prefill batch sizes. PDF assembly is heavier than ZIP because
-# each page incurs PyMuPDF parsing overhead; ZIP just stores PNG bytes verbatim.
-_PREFILL_PDF_MAX_ROWS = int(os.environ.get("OMR_WEBUI_PREFILL_PDF_MAX_ROWS", "5000"))
-_PREFILL_ZIP_MAX_ROWS = int(os.environ.get("OMR_WEBUI_PREFILL_ZIP_MAX_ROWS", "10000"))
-_PREFILL_CSV_MAX_BYTES = int(os.environ.get("OMR_WEBUI_PREFILL_CSV_MAX_BYTES", str(50 * 1024 * 1024)))
+# each page incurs PyMuPDF parsing overhead; ZIP just stores PNG bytes
+# verbatim — so the ZIP cap stays at 2x the PDF cap. The 200 MiB CSV body
+# is sized to hold ~20 000 rows of comfortable column widths (well under
+# 10 KB/row) with headroom for UTF-8 BOM / quoting overhead.
+_PREFILL_PDF_MAX_ROWS = int(os.environ.get("OMR_WEBUI_PREFILL_PDF_MAX_ROWS", "20000"))
+_PREFILL_ZIP_MAX_ROWS = int(os.environ.get("OMR_WEBUI_PREFILL_ZIP_MAX_ROWS", "40000"))
+_PREFILL_CSV_MAX_BYTES = int(os.environ.get("OMR_WEBUI_PREFILL_CSV_MAX_BYTES", str(200 * 1024 * 1024)))
 
 # Download token store: maps token -> (tmp_path, media_type, filename, expires_at)
 # Tokens are single-use and expire after 10 minutes so orphaned files are cleaned up.
@@ -537,7 +540,7 @@ async def upload_files(
     Image uploads (PNG / JPG / JPEG) are written synchronously and the
     endpoint returns ``201`` with the resulting :class:`FileRef` list.
 
-    PDF uploads are scheduled as a background task because a 5000-page PDF
+    PDF uploads are scheduled as a background task because a 20 000-page PDF
     can take minutes to render; the endpoint returns ``202`` with
     ``{"processing": True, "files": [...image refs already saved...]}``.
     The frontend polls ``/batches/{batch_id}/status`` for the split

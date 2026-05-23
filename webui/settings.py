@@ -97,8 +97,13 @@ class Settings(BaseSettings):
     )
 
     max_upload_bytes: int = Field(
-        default=1024 * 1024 * 1024,
-        description="Per-file upload limit in bytes (default 1 GiB).",
+        default=4 * 1024 * 1024 * 1024,
+        description=(
+            "Per-file upload limit in bytes (default 4 GiB). Sized to "
+            "comfortably hold a 20 000-row generated prefill PDF (≈100 MB) "
+            "plus any user-supplied scanned PDFs, with margin for AV and "
+            "filesystem overhead. Override with OMR_WEBUI_MAX_UPLOAD_BYTES."
+        ),
     )
 
     pdf_render_dpi: int = Field(

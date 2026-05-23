@@ -166,8 +166,8 @@
         const nameStyle = document.querySelector('input[name="name_style"]:checked')?.value ?? "numbered";
 
         const errors = [];
-        if (!Number.isInteger(count) || count < 1 || count > 10000) {
-            errors.push("Number of students must be between 1 and 10,000.");
+        if (!Number.isInteger(count) || count < 1 || count > 40000) {
+            errors.push("Number of students must be between 1 and 40,000.");
         }
         if (!schoolName) errors.push("School name is required.");
         if (!examName) errors.push("Exam name is required.");
