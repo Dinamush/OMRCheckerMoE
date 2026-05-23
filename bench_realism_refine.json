@@ -1,0 +1,42 @@
+{
+  "label": "refine-final",
+  "rows": 50,
+  "presets": [
+    {
+      "preset": "none",
+      "rows": 50,
+      "success_pct": 100.0,
+      "successes": 50,
+      "median_ms": 6.6,
+      "mean_ms": 6.8,
+      "p95_ms": 8.4
+    },
+    {
+      "preset": "subtle",
+      "rows": 50,
+      "success_pct": 100.0,
+      "successes": 50,
+      "median_ms": 6.7,
+      "mean_ms": 6.8,
+      "p95_ms": 8.0
+    },
+    {
+      "preset": "moderate",
+      "rows": 50,
+      "success_pct": 100.0,
+      "successes": 50,
+      "median_ms": 6.5,
+      "mean_ms": 6.6,
+      "p95_ms": 7.6
+    },
+    {
+      "preset": "adversarial",
+      "rows": 50,
+      "success_pct": 4.0,
+      "successes": 2,
+      "median_ms": 11.1,
+      "mean_ms": 10.6,
+      "p95_ms": 14.0
+    }
+  ]
+}

@@ -29,6 +29,105 @@ from src.utils.interaction import InteractionUtils
 _CORNER_NAMES = ("top-left", "top-right", "bottom-left", "bottom-right")
 
 
+# Tolerance band for the post-warp aspect-ratio sanity check. The warped
+# page should match the template's expected aspect ratio (page_w / page_h)
+# closely; allowing ±10% covers JPEG artefacts and 1-2 px detection noise
+# without admitting badly-degenerate homographies.
+_HOMOGRAPHY_ASPECT_TOLERANCE = 0.10
+# Quad area must fall within these fractions of the full page area.
+# Together with the convexity check this catches "page collapsed to a
+# sliver" homographies produced by collinear / near-collinear marker sets.
+_HOMOGRAPHY_AREA_MIN = 0.30
+_HOMOGRAPHY_AREA_MAX = 1.50
+
+
+def _homography_is_sane(
+    homography: np.ndarray,
+    image_shape: tuple[int, int],
+    expected_aspect: float,
+) -> tuple[bool, str]:
+    """Validate a marker-derived homography is geometrically reasonable.
+
+    Returns ``(ok, reason)``. Used as a guardrail when ``refineDetectedMarkers``
+    pulls a noisy candidate out of ``rejectedCorners`` and produces a
+    technically valid but wildly skewed transform. Cheap to run (just a
+    handful of numpy ops on 4 points), so it is safe to call on every
+    successful detection.
+    """
+    if homography is None or homography.shape != (3, 3):
+        return False, "homography is None or wrong shape"
+
+    h, w = image_shape[:2]
+    src = np.array(
+        [[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]],
+        dtype=np.float32,
+    ).reshape(-1, 1, 2)
+    try:
+        warped = cv2.perspectiveTransform(src, homography).reshape(-1, 2)
+    except cv2.error as err:
+        return False, f"perspectiveTransform failed: {err}"
+
+    # Convexity: cross-product sign must agree across all 4 vertices.
+    signs = []
+    for i in range(4):
+        a = warped[i]
+        b = warped[(i + 1) % 4]
+        c = warped[(i + 2) % 4]
+        cross = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0])
+        signs.append(np.sign(cross))
+    if len(set(signs)) > 1:
+        return False, "warped page corners are not convex"
+
+    # Aspect-ratio drift: average top/bottom side / left/right side.
+    top = float(np.linalg.norm(warped[1] - warped[0]))
+    bottom = float(np.linalg.norm(warped[2] - warped[3]))
+    left = float(np.linalg.norm(warped[3] - warped[0]))
+    right = float(np.linalg.norm(warped[2] - warped[1]))
+    horiz = (top + bottom) * 0.5
+    vert = (left + right) * 0.5
+    if horiz <= 1.0 or vert <= 1.0:
+        return False, "warped quad is degenerate (zero side)"
+    aspect = horiz / vert
+    if abs(aspect / expected_aspect - 1.0) > _HOMOGRAPHY_ASPECT_TOLERANCE:
+        return False, (
+            f"aspect drift: got {aspect:.3f} vs expected "
+            f"{expected_aspect:.3f} (>±{int(_HOMOGRAPHY_ASPECT_TOLERANCE * 100)}%)"
+        )
+
+    # Warped area must be in the same ballpark as the source page.
+    polygon = warped.reshape(-1, 1, 2).astype(np.float32)
+    area = float(cv2.contourArea(polygon))
+    page_area = float(w * h)
+    if not (_HOMOGRAPHY_AREA_MIN * page_area <= area <= _HOMOGRAPHY_AREA_MAX * page_area):
+        return False, (
+            f"warped area {area:.0f}px² is outside "
+            f"{int(_HOMOGRAPHY_AREA_MIN * 100)}-{int(_HOMOGRAPHY_AREA_MAX * 100)}% "
+            "of the source page"
+        )
+
+    return True, "ok"
+
+
+def _find_homography_robust(src_pts: np.ndarray, dst_pts: np.ndarray) -> np.ndarray | None:
+    """Compute a homography with RANSAC, falling back gracefully on older OpenCVs.
+
+    With 4 correspondences the RANSAC step degenerates into the same
+    least-squares solution as ``getPerspectiveTransform``, but it returns
+    a 3x3 ``None`` instead of raising on degenerate input — matching the
+    rest of the pipeline's error-handling style. With more correspondences
+    (e.g. all 16 marker corners after a board refinement, see future work)
+    RANSAC actively rejects mismatched outliers.
+    """
+    method = getattr(cv2, "USAC_MAGSAC", cv2.RANSAC)
+    homography, _ = cv2.findHomography(src_pts, dst_pts, method=method, ransacReprojThreshold=3.0)
+    if homography is None:
+        # MAGSAC sometimes refuses noisy 4-point sets; fall back to the
+        # plain DLT solver (``method=0``) which always returns something
+        # if the points are not all collinear.
+        homography, _ = cv2.findHomography(src_pts, dst_pts, method=0)
+    return homography
+
+
 class CropOnMarkers(ImagePreprocessor):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -77,6 +176,51 @@ class CropOnMarkers(ImagePreprocessor):
             params.minMarkerPerimeterRate = 0.02
             params.maxMarkerPerimeterRate = 0.5
             self.aruco_detector = cv2.aruco.ArucoDetector(aruco_dict, params)
+            # ----------------------------------------------------------------
+            # Board-based recovery for partially occluded sheets.
+            #
+            # Construct a planar ``cv2.aruco.Board`` from the four reference
+            # marker centres so ``refineDetectedMarkers`` can reproject any
+            # markers that the initial pass missed (commonly: dog-ears on
+            # one or two corners, partial scanner clipping, or finger
+            # occlusion during phone scans). With the board, 2 detected
+            # markers can frequently be promoted back to 3-4 by re-examining
+            # ``rejectedCorners`` near the homography-projected positions of
+            # the missing IDs. This is a pure code change — no template
+            # update or reprint required.
+            # ----------------------------------------------------------------
+            half_size = float(marker_ops.get("referenceMarkerHalfSize", 12.0))
+            self.reference_marker_half_size = half_size
+            if self.reference_marker_centers is not None:
+                obj_points = np.zeros((4, 4, 3), dtype=np.float32)
+                # ArUco corner ordering inside one marker: TL, TR, BR, BL.
+                offsets = np.array(
+                    [
+                        [-half_size, -half_size],
+                        [half_size, -half_size],
+                        [half_size, half_size],
+                        [-half_size, half_size],
+                    ],
+                    dtype=np.float32,
+                )
+                for i, (cx, cy) in enumerate(self.reference_marker_centers):
+                    for j in range(4):
+                        obj_points[i, j, 0] = cx + offsets[j, 0]
+                        obj_points[i, j, 1] = cy + offsets[j, 1]
+                        obj_points[i, j, 2] = 0.0
+                board_ids = np.array(self.aruco_corner_ids, dtype=np.int32)
+                self.aruco_board = cv2.aruco.Board(obj_points, aruco_dict, board_ids)
+                # Permissive refine parameters: paper sheets are flat, the
+                # marker layout is known to within sub-pixel accuracy, so we
+                # accept candidates within ~30% of expected error and any
+                # rotation order (the IDs disambiguate orientation).
+                refine_params = cv2.aruco.RefineParameters()
+                refine_params.minRepDistance = 10.0
+                refine_params.errorCorrectionRate = 3.0
+                refine_params.checkAllOrders = True
+                self.aruco_detector.setRefineParameters(refine_params)
+            else:
+                self.aruco_board = None
             # template_matching fields not needed in ArUco mode
             self.marker = None
         else:
@@ -281,9 +425,55 @@ class CropOnMarkers(ImagePreprocessor):
         gray_padded = cv2.copyMakeBorder(
             gray, _PAD, _PAD, _PAD, _PAD, cv2.BORDER_CONSTANT, value=255
         )
-        corners_raw, ids_raw, _ = self.aruco_detector.detectMarkers(gray_padded)
+        corners_raw, ids_raw, rejected = self.aruco_detector.detectMarkers(gray_padded)
+
+        initial_count = 0 if ids_raw is None else len(ids_raw)
+
+        # ----------------------------------------------------------------
+        # Pass 2 — Board-based refinement.
+        #
+        # ``refineDetectedMarkers`` interpolates each missing marker's
+        # projected position from the markers we *did* find (using a
+        # global homography on the planar board), then searches
+        # ``rejectedCorners`` near that projection for a candidate that
+        # decodes correctly with the loose ``errorCorrectionRate`` we set
+        # in ``__init__``. Only triggered when at least 1 marker was
+        # detected and at least 1 rejected candidate exists, so the fast
+        # path on clean sheets pays virtually nothing.
+        # ----------------------------------------------------------------
+        if (
+            self.aruco_board is not None
+            and ids_raw is not None
+            and 0 < initial_count < 4
+            and rejected is not None
+            and len(rejected) > 0
+        ):
+            try:
+                corners_raw, ids_raw, rejected, recovered = (
+                    self.aruco_detector.refineDetectedMarkers(
+                        gray_padded,
+                        self.aruco_board,
+                        list(corners_raw),
+                        ids_raw,
+                        list(rejected),
+                        None,
+                        None,
+                    )
+                )
+                if recovered is not None and len(recovered) > 0:
+                    logger.info(
+                        file_path,
+                        f"\nArUco: refineDetectedMarkers recovered "
+                        f"{len(recovered)} marker(s).",
+                    )
+            except cv2.error as err:
+                logger.warning(
+                    file_path,
+                    f"\nArUco: refineDetectedMarkers raised: {err}",
+                )
+
         # Shift detected corner coordinates back to unpadded image space.
-        if corners_raw:
+        if corners_raw is not None and len(corners_raw) > 0:
             corners_raw = [c - [[[_PAD, _PAD]]] for c in corners_raw]
 
         if ids_raw is None or len(ids_raw) == 0:
@@ -367,11 +557,30 @@ class CropOnMarkers(ImagePreprocessor):
         if self.preserve_full_image:
             src_pts = np.array(centres, dtype=np.float32)
             dst_pts = np.array(self.reference_marker_centers, dtype=np.float32)
-            homography, _ = cv2.findHomography(src_pts, dst_pts, method=0)
+            homography = _find_homography_robust(src_pts, dst_pts)
             if homography is None:
                 logger.error(
                     file_path,
                     "\nArUco: could not compute homography from detected markers.",
+                )
+                return None
+            # Sanity check: with refineDetectedMarkers occasionally promoting a
+            # noisy candidate from ``rejectedCorners``, validate the resulting
+            # homography geometrically before using it. A failed sanity check
+            # most often means an extrapolated/recovered marker was wildly off,
+            # in which case we'd rather drop the sheet to ErrorFiles than emit
+            # mis-aligned (and silently wrong) OMR results.
+            expected_aspect = (
+                config.dimensions.processing_width
+                / max(1, config.dimensions.processing_height)
+            )
+            ok, reason = _homography_is_sane(
+                homography, image.shape, expected_aspect
+            )
+            if not ok:
+                logger.error(
+                    file_path,
+                    f"\nArUco: rejected homography failed sanity check ({reason}).",
                 )
                 return None
             image = gpu_warp_perspective(
