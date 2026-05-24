@@ -6,6 +6,17 @@ Read OMR sheets fast and accurately using a scanner 🖨 or your phone 🤳.
 
 OMR stands for Optical Mark Recognition, used to detect and interpret human-marked data on documents. OMR refers to the process of reading and evaluating OMR sheets, commonly used in exams, surveys, and other forms.
 
+## What this fork adds
+
+This repository is a fork of [Udayraj123/OMRChecker](https://github.com/Udayraj123/OMRChecker). The upstream engine handles the hard work of image alignment, bubble detection, and CSV output. On top of that foundation this fork adds:
+
+- **FastAPI web UI + JSON API** — a full-featured browser interface and REST API for creating batches, uploading scans, editing templates, running OMR, and downloading results (see [Web UI and JSON API](#web-ui-and-json-api)).
+- **Prefill Sheets workflow** — generate personalised pre-filled answer sheets from a blank landscape template using a calibrated 25-question OMR template (`custom_25_definitive_final/`) and a standalone prefill library (`prefill_only_package/`).
+- **Student-style bubble fill** — simulate how real students mark bubbles, with ten distinct marking profiles and flexible answer-key shortcuts, enabling end-to-end pipeline testing without manual scanning (see [Student-style bubble fill](#student-style-bubble-fill)).
+- **High-throughput pipelined processing** — per-image dimension inference and background-task processing for large batch runs without blocking (see [`docs/research_brief_omr_throughput_2026.md`](docs/research_brief_omr_throughput_2026.md)).
+- **Scan simulation** — realistic degradation and scan-artefact injection for synthetic test datasets (see [`docs/research_brief_scan_simulation_2026.md`](docs/research_brief_scan_simulation_2026.md)).
+- **Codebase audit** — a documented review of the codebase with tracked fixes (see [`docs/audit_report_20260524.md`](docs/audit_report_20260524.md)).
+
 #### **Quick Links**
 
 - [Installation](#getting-started)
@@ -112,7 +123,7 @@ We now support [colored outputs](https://github.com/Udayraj123/OMRChecker/wiki/%
 
 ### 1. Install global dependencies
 
-![opencv 4.0.0](https://img.shields.io/badge/opencv-4.0.0-blue.svg) ![python 3.5+](https://img.shields.io/badge/python-3.5+-blue.svg)
+![opencv-python ≥4.8.0](https://img.shields.io/badge/opencv--python-%E2%89%A54.8.0-blue.svg) ![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)
 
 To check if python3 and pip is already installed:
 
@@ -199,7 +210,7 @@ Alternatively you can also use `python3 main.py -i ./samples/sample1`.
 
 Each example in the samples folder demonstrates different ways in which OMRChecker can be used.
 
-### Web UI and JSON API
+## Web UI and JSON API
 
 A thin FastAPI wrapper around the same engine is available for batch-style workflows. It serves both a minimal HTML UI and a JSON API from a single process.
 
@@ -272,7 +283,7 @@ Processing is handled in-process via FastAPI `BackgroundTasks`, which is fine fo
 
 Tests for the web UI live in `webui/tests/` and run as part of the standard `pytest` invocation.
 
-### Prefill Sheets
+## Prefill Sheets
 
 The `/prefill` page generates pre-filled answer sheets from the blank landscape template, bubbling in a student's candidate number and printing their name, school, and exam name into the text boxes. It is useful for issuing personalised sheets before an exam.
 
@@ -298,6 +309,76 @@ Johnathan Ragnauth Brigmohan,The New Sapodilla Primary,Grade 4 Reading,901069001
 ```
 
 Candidate numbers must be exactly 10 digits. Bubble placement is calibrated to `prefill_only_package/blank_template_reference.png` — do not swap in a different template without re-calibrating the `CFG` values in `prefill_answer_sheet_final.py`.
+
+## Student-style bubble fill
+
+The student-fill feature lets you simulate how real students mark bubbles on answer sheets, producing realistic synthetic scans for end-to-end pipeline testing — no physical scanning required.
+
+### Marking profiles
+
+Ten profiles control how each bubble is drawn:
+
+| Profile | Description |
+| --- | --- |
+| `none` | Leave bubbles blank (useful for blank-sheet generation) |
+| `light_pencil` | Faint grey fill, as if marked with a soft pencil stroke |
+| `medium_pencil` | Standard HB-pencil darkness |
+| `heavy_pencil` | Dark, heavy pencil fill |
+| `pen_ballpoint` | Solid, dark ballpoint-pen fill |
+| `check_mark` | A ✓ drawn inside the bubble |
+| `cross_mark` | An ✗ drawn inside the bubble |
+| `partial_fill` | Only part of the bubble is filled |
+| `messy_student` | Irregular, smudged fill with slight overruns |
+| `careful_student` | Neat, well-centred fill |
+
+### Answer-key formats
+
+**Shortcut strings**
+
+| Shortcut | Meaning |
+| --- | --- |
+| `all_a` / `all_b` / `all_c` / `all_d` | All 25 questions answered with that option |
+| `alternating` | A, B, A, B, … |
+| `random` | Deterministically random per candidate number |
+| `random_with_skips` | Like `random` but some questions left blank |
+| `blank` | All questions skipped |
+| 25-letter string e.g. `ABCD-ABCD-ABCDA-BCDAB-CDABC` | Explicit per-question answers; `-` means skip |
+
+**JSON object**
+
+```json
+{"q1": "A", "q3": "BC"}
+```
+
+Keys are question names; values are one or more option letters (multi-mark is supported). Questions not listed are left blank.
+
+### Per-row CSV override
+
+When running a batch, each CSV row may include an `answers` or `answers_json` column to override the answer spec for that individual candidate:
+
+```csv
+student_name,school_name,exam_name,candidate_number,answers
+Jane Smith,Riverview Primary,Grade 5 Maths,1234567890,ABCDABCDABCDABCDABCDABCDABC
+```
+
+### Determinism
+
+Fills are **deterministic** per `(candidate_number, answer_spec)` pair — the same inputs always produce identical output. This makes the feature well-suited for regression testing.
+
+### API surface
+
+```
+GET  /api/v1/prefill/marking-profiles   — list available profile names
+POST /api/v1/prefill/single             — single sheet (add marking_profile + answers form fields)
+POST /api/v1/prefill/batch              — batch (add marking_profile + answers column in CSV)
+```
+
+Pass `marking_profile=heavy_pencil` (or any profile name from the list endpoint) and `answers=all_a` (or any format described above) as additional form fields alongside the existing prefill parameters.
+
+### Further reading
+
+- [`docs/student_fill_feature_design.md`](docs/student_fill_feature_design.md) — full feature specification
+- [`docs/student_fill_e2e_report_20260524.md`](docs/student_fill_e2e_report_20260524.md) — end-to-end test report
 
 ### Common Issues
 
@@ -355,6 +436,63 @@ Low Quality Dataset(For CV Based methods)) (1.5 GB)
 Standard Quality Dataset(For ML Based methods) (3 GB)
 High Quality Dataset(For custom processing) (6 GB)
 -->
+
+## Repository layout
+
+```
+OMRCheckerMoE/
+├── src/                          # Core OMR engine (image processing, template parsing, evaluation)
+│   └── tests/                    # Unit tests for the engine
+├── webui/                        # FastAPI service + Jinja templates + JS for the web UI
+│   └── tests/                    # Web UI test suite (runs as part of pytest)
+├── prefill_only_package/         # Standalone answer-sheet prefill module (used as a library by webui too)
+├── custom_25_definitive_final/   # Current calibrated 25-question OMR template + sample inputs
+├── old_custom25_answer_sheet_v1/ # Legacy 25Q template variant (kept for reference)
+├── samples/                      # Example sheets and templates for the core engine
+├── scripts/                      # One-off tools, benchmarks, smoke tests, and bubble-geometry calibration helpers
+└── docs/                         # Markdown reports, design docs, and research briefs
+```
+
+## Development
+
+**Runtime dependencies**
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+**Dev / test dependencies**
+
+```bash
+python -m pip install -r requirements.dev.txt
+```
+
+**Running the test suite**
+
+```bash
+pytest
+```
+
+`pytest.ini` is configured to discover tests in both `src/tests/` and `webui/tests/`. The test `webui/tests/test_student_fill_omr_roundtrip.py` exercises the full prefill → OMR → CSV roundtrip.
+
+**Pre-commit hooks**
+
+```bash
+pre-commit install
+```
+
+Hooks are defined in `.pre-commit-config.yaml` and run Black, isort, and other linters automatically before each commit.
+
+## Additional documentation
+
+| Document | Description |
+| --- | --- |
+| [`docs/audit_report_20260524.md`](docs/audit_report_20260524.md) | Codebase audit and documented fixes |
+| [`docs/student_fill_feature_design.md`](docs/student_fill_feature_design.md) | Student-fill feature specification |
+| [`docs/student_fill_e2e_report_20260524.md`](docs/student_fill_e2e_report_20260524.md) | End-to-end validation report for student-fill |
+| [`docs/research_brief_omr_throughput_2026.md`](docs/research_brief_omr_throughput_2026.md) | High-throughput OMR pipeline research |
+| [`docs/research_brief_scan_simulation_2026.md`](docs/research_brief_scan_simulation_2026.md) | Scan simulation research |
+| [`docs/marker_robustness_benchmark_20260523.md`](docs/marker_robustness_benchmark_20260523.md) | ArUco marker robustness benchmark |
 
 ## FAQ
 
