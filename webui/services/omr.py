@@ -17,6 +17,7 @@ import re
 import shutil
 import threading
 import time
+import weakref
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from pathlib import Path
 from typing import Any
@@ -83,7 +84,13 @@ def _batch_workers_root(outputs_dir: Path, settings: Settings | None = None) -> 
     batch_root = outputs_dir.parent
     return _batch_scratch_root(batch_root, settings) / "_workers"
 
-_batch_locks: dict[str, threading.Lock] = {}
+# Audit fix API-4: previously this dict grew without bound (one Lock per
+# batch_id observed for the life of the worker process). Switch to a
+# WeakValueDictionary so locks are GC'd once no caller still references
+# them between ``with _lock_for(batch_id):`` blocks.
+_batch_locks: "weakref.WeakValueDictionary[str, threading.Lock]" = (
+    weakref.WeakValueDictionary()
+)
 _locks_guard = threading.Lock()
 
 _QC_Q_COL = re.compile(r"^q\d+", re.IGNORECASE)
@@ -316,17 +323,25 @@ def _write_runtime_template(template_payload: dict[str, Any], dst: Path) -> None
         json.dump(_with_runtime_template_defaults(template_payload), fh, indent=2, sort_keys=True)
 
 
-def _collect_relative_paths(value: Any) -> list[str]:
+_MAX_TEMPLATE_DEPTH = 32
+
+
+def _collect_relative_paths(value: Any, _depth: int = 0) -> list[str]:
+    # Audit fix API-5: cap recursion depth so a hostile or accidentally
+    # deeply-nested template JSON cannot trigger Python's ~1000-frame
+    # RecursionError on PUT /batches/{id}/template.
+    if _depth > _MAX_TEMPLATE_DEPTH:
+        return []
     found: list[str] = []
     if isinstance(value, dict):
         for key, item in value.items():
             if key == "relativePath" and isinstance(item, str):
                 found.append(item)
             else:
-                found.extend(_collect_relative_paths(item))
+                found.extend(_collect_relative_paths(item, _depth + 1))
     elif isinstance(value, list):
         for item in value:
-            found.extend(_collect_relative_paths(item))
+            found.extend(_collect_relative_paths(item, _depth + 1))
     return found
 
 
@@ -337,13 +352,38 @@ def _get_template_relative_assets(batch_root: Path) -> list[str]:
 
 
 def _resolve_batch_asset(batch_root: Path, relative_path: str) -> Path:
-    """Resolve a template-referenced relative asset from batch root or inputs."""
+    """Resolve a template-referenced relative asset from batch root or inputs.
+
+    Audit fix API-1 (path traversal): previously a malicious template
+    ``relativePath`` value such as ``../../etc/passwd`` would resolve to a
+    location outside ``batch_root`` and be returned. ``_copy_runtime_assets``
+    then copied that file into the worker runtime. After resolve(), assert
+    that the resolved path is still under ``batch_root``.
+    """
+    if not isinstance(relative_path, str) or not relative_path:
+        raise FileNotFoundError("Template asset path is empty.")
+    # Reject absolute paths and Windows drive prefixes outright.
+    rp = Path(relative_path)
+    if rp.is_absolute() or (len(relative_path) >= 2 and relative_path[1] == ":"):
+        raise FileNotFoundError(
+            f"Template asset path must be relative: '{relative_path}'"
+        )
+
+    batch_root_resolved = batch_root.resolve()
+
+    def _under_root(candidate: Path) -> bool:
+        try:
+            candidate.relative_to(batch_root_resolved)
+        except ValueError:
+            return False
+        return True
+
     direct = (batch_root / relative_path).resolve()
-    if direct.exists():
+    if direct.exists() and _under_root(direct):
         return direct
 
     inputs_candidate = (batch_root / "inputs" / Path(relative_path).name).resolve()
-    if inputs_candidate.exists():
+    if inputs_candidate.exists() and _under_root(inputs_candidate):
         return inputs_candidate
 
     raise FileNotFoundError(

@@ -18,8 +18,18 @@ const jsonFetch = async (url, options = {}) => {
         cache: "no-store",
         ...options,
     })
-    const text = await response.text()
-    const data = text ? JSON.parse(text) : {}
+    // Audit fix UI-2: tolerate non-JSON response bodies (e.g. a reverse-proxy
+    // HTML error page) without crashing the entire promise chain on
+    // SyntaxError. Reuse the shared helper from app.js if available.
+    let data = {}
+    if (window.safeJsonResponse) {
+        data = await window.safeJsonResponse(response)
+    } else {
+        const text = await response.text()
+        if (text) {
+            try { data = JSON.parse(text) } catch (_e) { data = { detail: text.slice(0, 256) } }
+        }
+    }
     if (!response.ok) {
         throw new Error(data.detail || `Request failed (${response.status})`)
     }
@@ -590,8 +600,9 @@ const buildAnswerGrid = (row, responseColumns) => {
     return answers
 }
 
-const renderResultCard = (row, responseColumns, index) => {
+const renderResultCard = (row, responseColumns, index, activeIndex = 0) => {
     const fileId = row.file_id || `File ${index + 1}`
+    const isActive = index === activeIndex
     const qcFlags = Array.isArray(row.qc_flags) ? row.qc_flags : []
     const qcPills = qcFlags.length
         ? `<div class="result-qc">${qcFlags.map((flag) => {
@@ -636,7 +647,7 @@ const renderResultCard = (row, responseColumns, index) => {
 
     if (row.status === "failed") {
         return `
-            <article class="result-card" data-result-card="${index}" ${index === 0 ? "" : "hidden"}>
+            <article class="result-card" data-result-card="${index}" ${isActive ? "" : "hidden"}>
                 <div class="flex-between result-card-head">
                     <div>
                         <h3>${escapeHtml(fileId)}</h3>
@@ -659,7 +670,7 @@ const renderResultCard = (row, responseColumns, index) => {
 
     const answers = buildAnswerGrid(row, responseColumns)
     return `
-        <article class="result-card" data-result-card="${index}" ${index === 0 ? "" : "hidden"}>
+        <article class="result-card" data-result-card="${index}" ${isActive ? "" : "hidden"}>
             <div class="flex-between result-card-head">
                 <div>
                     <h3>${escapeHtml(fileId)}</h3>
@@ -690,16 +701,33 @@ const renderResults = (container, data) => {
 
     const columns = data.columns || []
     const responseColumns = getResponseColumns(columns)
+
+    // Audit fix UI-5: preserve the currently-selected result tab across
+    // re-renders. Previously every poll cycle clobbered the active tab back
+    // to index 0, so reviewers couldn't keep a result card in focus while
+    // the batch was still running.
+    let _prevSelected = "0"
+    const _activeTab = container.querySelector(".result-file-tab.active[data-result-select]")
+    if (_activeTab) {
+        _prevSelected = _activeTab.dataset.resultSelect || "0"
+    }
+    const _selectedIndex = (() => {
+        const n = Number(_prevSelected)
+        if (Number.isFinite(n) && n >= 0 && n < data.rows.length) return n
+        return 0
+    })()
+
     const tabs = data.rows.map((row, index) => {
         const fileId = row.file_id || `File ${index + 1}`
         const qcFlags = Array.isArray(row.qc_flags) ? row.qc_flags : []
         const qcLabel = qcFlags.length ? `<span class="muted small">QC: ${escapeHtml(qcFlags.join(", "))}</span>` : ""
+        const isActive = index === _selectedIndex
         return `
             <button
-                class="result-file-tab${index === 0 ? " active" : ""}"
+                class="result-file-tab${isActive ? " active" : ""}"
                 type="button"
                 role="tab"
-                aria-selected="${index === 0 ? "true" : "false"}"
+                aria-selected="${isActive ? "true" : "false"}"
                 data-result-select="${index}">
                 <span class="mono">${escapeHtml(fileId)}</span>
                 ${qcLabel}
@@ -708,7 +736,11 @@ const renderResults = (container, data) => {
             </button>
         `
     }).join("")
-    const cards = data.rows.map((row, index) => renderResultCard(row, responseColumns, index)).join("")
+    // Audit fix UI-5: render each card with the preserved active index so
+    // exactly one card is visible across re-renders.
+    const cards = data.rows
+        .map((row, index) => renderResultCard(row, responseColumns, index, _selectedIndex))
+        .join("")
     const header = columns.map((col) => `<th>${escapeHtml(col)}</th>`).join("")
     const CSV_PREVIEW_LIMIT = 100
     const allRows = data.rows
@@ -904,9 +936,17 @@ const setEditorMode = (box, mode) => {
     codePanel.setAttribute("aria-hidden", mode === "code" ? "false" : "true")
     dynamicPanel.setAttribute("aria-hidden", mode === "ui" ? "false" : "true")
     box.querySelectorAll("[data-doc-mode]").forEach((button) => {
-        button.classList.toggle("active", button.dataset.docMode === mode)
+        const isActive = button.dataset.docMode === mode
+        button.classList.toggle("active", isActive)
+        // Audit fix UI-M9 (companion): expose pressed-state to AT.
+        button.setAttribute("aria-pressed", isActive ? "true" : "false")
     })
-    window.localStorage.setItem(getEditorStorageKey(box), mode)
+    // Audit fix UI-11: ``localStorage.setItem`` can throw in quota-exhausted
+    // or private-browsing modes. Without try/catch the exception aborts the
+    // mode switch entirely.
+    try {
+        window.localStorage.setItem(getEditorStorageKey(box), mode)
+    } catch (_e) { /* storage unavailable — non-fatal */ }
 }
 
 const makeSection = (title, description) => {
@@ -1629,6 +1669,18 @@ const handleUpload = async (event) => {
         return
     }
 
+    // Audit fix UI-3: disable the submit button while an upload is in flight
+    // to prevent double-submit (which previously could fire the same upload
+    // twice on slow networks and create duplicate pages).
+    const _uploadForm = event.currentTarget || event.target
+    const _submitBtn = _uploadForm && _uploadForm.querySelector
+        ? _uploadForm.querySelector('[type="submit"]')
+        : null
+    if (_submitBtn) {
+        if (_submitBtn.disabled) return
+        _submitBtn.disabled = true
+    }
+
     const hasPdf = Array.from(input.files).some((f) => f.name.toLowerCase().endsWith(".pdf"))
     const progressEl = document.getElementById("upload-progress")
     const progressBar = document.getElementById("upload-progress-bar")
@@ -1733,8 +1785,13 @@ const handleUpload = async (event) => {
     Array.from(input.files).forEach((file) => formData.append("files", file))
     try {
         const response = await fetch(apiUrl("/files"), { method: "POST", body: formData })
-        const data = await response.json()
-        if (!response.ok) throw new Error(data.detail || "Upload failed")
+        // Audit fix UI-2: response body may be non-JSON if a reverse proxy
+        // returns an HTML error page. ``safeJsonResponse`` (app.js) tolerates
+        // that by returning ``{ detail: text }`` rather than crashing.
+        const data = window.safeJsonResponse
+            ? await window.safeJsonResponse(response)
+            : await response.json().catch(() => ({}))
+        if (!response.ok) throw new Error(data.detail || `Upload failed (${response.status})`)
         if (response.status === 202) {
             // Background split started — poll handles progress and completion.
             _isBackgroundUpload = true
@@ -1747,6 +1804,12 @@ const handleUpload = async (event) => {
         }
     } catch (error) {
         show(feedback, error.message, "error")
+        // Audit fix UI-M10: on error always tear down the progress bar so
+        // the "Splitting PDF pages…" strip cannot stick on screen at 0%.
+        if (hasPdf && progressEl) {
+            progressEl.hidden = true
+            if (pollInterval) { clearInterval(pollInterval); pollInterval = null }
+        }
     } finally {
         // For background PDF uploads the poll handles cleanup; skip it here.
         if (!_isBackgroundUpload) {
@@ -1756,6 +1819,10 @@ const handleUpload = async (event) => {
                 setTimeout(() => { progressEl.hidden = true }, 1200)
             }
         }
+        // Audit fix UI-3: always re-enable the submit button (even when the
+        // upload kicks off a background task and ``handleUpload`` returns
+        // immediately — the form is still usable for the next batch).
+        if (_submitBtn) _submitBtn.disabled = false
     }
 }
 
@@ -2013,14 +2080,15 @@ const handleApplyPreset = async () => {
             } catch (_err) { /* doc might not exist in this preset */ }
         }
 
-        // Reload asset list so the newly-copied marker files show as present
-        location.reload()
-
+        // Audit fix UI-9: previously ``location.reload()`` fired before
+        // the success message was rendered, so the operator never saw
+        // confirmation that the preset applied. Show the message first,
+        // wait a tick so the browser paints, *then* reload.
         if (feedback) {
             feedback.hidden = false
-            feedback.textContent = `Preset "${presetName.replace(/_/g, " ")}" applied.`
-            setTimeout(() => { feedback.hidden = true }, 3000)
+            feedback.textContent = `Preset "${presetName.replace(/_/g, " ")}" applied. Refreshing…`
         }
+        setTimeout(() => { location.reload() }, 800)
     } catch (err) {
         if (feedback) { feedback.hidden = false; feedback.textContent = `Error: ${err.message}` }
     }

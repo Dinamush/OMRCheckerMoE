@@ -209,13 +209,18 @@
 </section>
 
 <section class="panel">
+    {# Audit fix UI-10: a ``<h2>`` element inside a ``<button>`` is invalid HTML
+        per the spec; browsers either lift the heading out of the accessibility
+        tree or treat it inconsistently. Use an ARIA-flat ``<span role="heading"
+        aria-level="2">`` so screen readers still pick up the heading without
+        nesting interactive content. #}
     <button
         type="button"
         id="json-docs-toggle"
         class="panel-toggle"
         aria-expanded="false"
         aria-controls="json-docs-body">
-        <h2>Template / config / evaluation</h2>
+        <span class="panel-toggle-heading" role="heading" aria-level="2">Template / config / evaluation</span>
         <span class="panel-toggle-summary">template: {{ 'present' if template_doc else 'empty' }} | config: {{ 'present' if config_doc else 'empty' }} | evaluation: {{ 'present' if evaluation_doc else 'empty' }}</span>
         <span class="panel-toggle-chevron" aria-hidden="true">▶</span>
     </button>
@@ -386,7 +391,8 @@
                                     <span class="answer-key">{{ col }}</span>
                                     <strong>{{ answer_value or "—" }}</strong>
                                     {% if is_erasure_risk %}
-                                    <span class="answer-risk" title="Multiple marks detected in CSV output. This can happen when an erased option remains dark enough to be read.">Erasure risk 85%</span>
+                                    {# Audit fix UI-6: previously hard-coded "85%" misled reviewers on first paint until the JS re-render. Drop the false fixed number; the JS layer renders the actual computed risk per row. #}
+                                    <span class="answer-risk" title="Multiple marks detected in CSV output. This can happen when an erased option remains dark enough to be read.">Erasure risk</span>
                                     {% endif %}
                                 </div>
                                 {% endif %}
@@ -434,7 +440,8 @@
                                     <span class="answer-key">{{ col }}</span>
                                     <strong>{{ answer_value or "—" }}</strong>
                                     {% if is_erasure_risk %}
-                                    <span class="answer-risk" title="Multiple marks detected in CSV output.">Erasure risk 85%</span>
+                                    {# Audit fix UI-6: drop hard-coded "85%" — JS renders the real percentage. #}
+                                    <span class="answer-risk" title="Multiple marks detected in CSV output.">Erasure risk</span>
                                     {% endif %}
                                 </div>
                                 {% endif %}

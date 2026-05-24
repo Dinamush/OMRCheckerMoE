@@ -2,6 +2,12 @@
     --bg: #0e1116;
     --panel: #161b22;
     --panel-border: #21262d;
+    /* Audit fix UI-7: ``--border`` was referenced by .preset-preview rules
+       but never declared, so var(--border) resolved to ``invalid value`` and
+       the ``border: 1px solid`` shorthand silently collapsed — the preset
+       comparison cards rendered without any visible border. Alias to
+       --panel-border so existing rules render correctly. */
+    --border: #21262d;
     --muted: #8b949e;
     --text: #e6edf3;
     --accent: #2f81f7;
@@ -1135,6 +1141,16 @@ body.log-panel-collapsed .footer {
 }
 .panel-toggle:hover { background: rgba(255, 255, 255, 0.02); }
 .panel-toggle h2 { margin: 0; flex: 1; }
+/* Audit fix UI-10: mirror the .panel-toggle h2 sizing for the
+   role="heading" replacement so it stays visually identical without
+   nesting an interactive h2 inside a button. */
+.panel-toggle .panel-toggle-heading {
+    margin: 0;
+    flex: 1;
+    font-size: 1.25rem;
+    font-weight: 600;
+    line-height: 1.2;
+}
 .panel-toggle-summary {
     color: var(--muted);
     font-size: 0.85rem;

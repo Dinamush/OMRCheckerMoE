@@ -26,6 +26,7 @@ import shutil
 import threading
 import time
 import uuid
+import weakref
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -97,6 +98,19 @@ class InvalidBatchRequest(Exception):
     """Raised on bad input (e.g. unsafe filenames, missing directory)."""
 
 
+# Audit fix API-2: batch_id is taken straight from URL paths and used as a
+# filesystem directory component. ``uuid.uuid4().hex[:12]`` is always
+# 12 lowercase hex chars; reject anything else so callers cannot pass
+# ``..``, ``..\\..\\system``, or a Windows drive prefix.
+_BATCH_ID_PATTERN = re.compile(r"^[a-f0-9]{8,32}$")
+
+
+def _validate_batch_id(batch_id: str) -> str:
+    if not isinstance(batch_id, str) or not _BATCH_ID_PATTERN.fullmatch(batch_id):
+        raise BatchNotFound(repr(batch_id))
+    return batch_id
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -145,6 +159,8 @@ def _serialise(value: Any) -> Any:
 
 
 def _batch_root(settings: Settings, batch_id: str) -> Path:
+    # Audit fix API-2: validate batch_id before composing a filesystem path.
+    _validate_batch_id(batch_id)
     return settings.ensure_storage() / batch_id
 
 
@@ -546,7 +562,14 @@ _PDF_WORKER_CACHE: dict[str, Any] = {}
 # The master lock guards insertion into the dict only; the individual stem locks
 # are held for the full duration of the split so they are never short-lived from
 # the perspective of the master lock.
-_PDF_SPLIT_LOCKS: dict[tuple[str, str], threading.Lock] = {}
+#
+# Audit fix API-4: previously a plain dict was used and never cleaned up,
+# leaking one Lock object per (batch, stem) seen for the life of the process.
+# WeakValueDictionary lets entries die when no caller still references the
+# returned Lock — locks are held only for the duration of a single split.
+_PDF_SPLIT_LOCKS: "weakref.WeakValueDictionary[tuple[str, str], threading.Lock]" = (
+    weakref.WeakValueDictionary()
+)
 _PDF_SPLIT_LOCKS_MASTER = threading.Lock()
 
 # Persistent ProcessPoolExecutor for PDF rendering (Fix #4).
@@ -558,12 +581,22 @@ _ATEXIT_REGISTERED = False
 
 
 def _get_pdf_split_lock(batch_id: str, stem: str) -> threading.Lock:
-    """Return the per-(batch, stem) threading.Lock, creating it if absent."""
+    """Return the per-(batch, stem) threading.Lock, creating it if absent.
+
+    Audit fix API-4: stores the lock in a WeakValueDictionary so it gets
+    GC'd once every caller drops their reference. Critical implementation
+    detail: WeakValueDictionary purges entries with no strong references
+    *immediately*, so we must keep a local strong reference between the
+    insertion and the return statement (otherwise ``_PDF_SPLIT_LOCKS[key]``
+    on the return line raises KeyError).
+    """
     key = (batch_id, stem)
     with _PDF_SPLIT_LOCKS_MASTER:
-        if key not in _PDF_SPLIT_LOCKS:
-            _PDF_SPLIT_LOCKS[key] = threading.Lock()
-        return _PDF_SPLIT_LOCKS[key]
+        lock = _PDF_SPLIT_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _PDF_SPLIT_LOCKS[key] = lock
+        return lock
 
 
 def _shutdown_pdf_render_pool() -> None:
@@ -1468,18 +1501,27 @@ def get_batch_root(batch_id: str, settings: Settings | None = None) -> Path:
     return root
 
 
-def _collect_template_relative_paths(value: Any) -> list[str]:
-    """Walk a parsed template.json payload and collect ``relativePath`` values."""
+_MAX_TEMPLATE_DEPTH = 32
+
+
+def _collect_template_relative_paths(value: Any, _depth: int = 0) -> list[str]:
+    """Walk a parsed template.json payload and collect ``relativePath`` values.
+
+    Audit fix API-5: cap depth so a deeply-nested attacker-supplied
+    template cannot trigger RecursionError on every read.
+    """
+    if _depth > _MAX_TEMPLATE_DEPTH:
+        return []
     found: list[str] = []
     if isinstance(value, dict):
         for key, item in value.items():
             if key == "relativePath" and isinstance(item, str):
                 found.append(item)
             else:
-                found.extend(_collect_template_relative_paths(item))
+                found.extend(_collect_template_relative_paths(item, _depth + 1))
     elif isinstance(value, list):
         for item in value:
-            found.extend(_collect_template_relative_paths(item))
+            found.extend(_collect_template_relative_paths(item, _depth + 1))
     return found
 
 

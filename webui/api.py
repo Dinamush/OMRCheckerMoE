@@ -720,10 +720,18 @@ async def upload_files(
                 try:
                     batches_service.save_uploaded_file(batch_id, fn, d, settings)
                 except Exception as exc:  # noqa: BLE001
-                    error_msg = f"{s}: {type(exc).__name__}: {exc}"
+                    # Audit fix API-6: previously the full exception string
+                    # (often containing filesystem paths) was persisted into
+                    # metadata and echoed to the public status endpoint.
+                    # Log the full traceback server-side; record a generic
+                    # user-facing message keyed by stem only.
                     logger.exception(
-                        "Background PDF split failed | batch=%s | file=%s",
-                        batch_id, fn,
+                        "Background PDF split failed | batch=%s | file=%s | exc_type=%s",
+                        batch_id, fn, type(exc).__name__,
+                    )
+                    error_msg = (
+                        f"{s}: PDF split failed ({type(exc).__name__}). "
+                        f"See server logs for details."
                     )
                     batches_service._record_pdf_split_error(batch_id, settings, error_msg)
 
@@ -1380,8 +1388,14 @@ async def prefill_batch(
             )
         raw = encoded.decode("utf-8-sig")
     else:
-        # csv_text was empty/blank, so csv_file must be present (validated above).
-        assert csv_file is not None
+        # csv_text was empty/blank, so csv_file must be present.
+        # Audit fix API-3: replace assert (stripped under python -O) with
+        # an explicit HTTPException so this branch is robust in production.
+        if csv_file is None:
+            raise HTTPException(
+                status_code=400,
+                detail="No CSV provided: pass either csv_text or csv_file.",
+            )
         chunks: list[bytes] = []
         total = 0
         while True:

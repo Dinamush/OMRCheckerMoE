@@ -338,9 +338,16 @@ csvUpload.addEventListener('change', () => {
     reader.onload = e => {
         uploadedCsvText = e.target.result;
         const { headers, rows } = parseCsv(uploadedCsvText);
-        csvPreviewHead.innerHTML = headers.map(h => `<th>${h}</th>`).join('');
+        // Audit fix UI-1 (XSS): every CSV header / cell value is escaped
+        // before being interpolated into innerHTML. ``window.escapeHtml``
+        // is defined in app.js; the inline fallback below keeps prefill.js
+        // working even if app.js loads after this script.
+        const esc = window.escapeHtml || (s => String(s == null ? '' : s)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'));
+        csvPreviewHead.innerHTML = headers.map(h => `<th>${esc(h)}</th>`).join('');
         csvPreviewBody.innerHTML = rows.slice(0, 10).map(row =>
-            `<tr>${headers.map(h => `<td>${row[h] || ''}</td>`).join('')}</tr>`
+            `<tr>${headers.map(h => `<td>${esc(row[h] || '')}</td>`).join('')}</tr>`
         ).join('');
         csvPreviewCount.textContent = `${rows.length} row(s) parsed${rows.length > 10 ? ' (showing first 10)' : ''}.`;
         csvPreview.style.display = '';
