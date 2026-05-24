@@ -420,10 +420,12 @@ const syncOutputModeHint = () => {
     if (!batchOutputMode) return;
     if (isGroupingActive()) {
         batchOutputMode.disabled = true;
-        if (batchOutputModeHint) batchOutputModeHint.style.opacity = '';
+        if (batchOutputModeHint) batchOutputModeHint.style.display = '';
     } else {
         batchOutputMode.disabled = false;
-        if (batchOutputModeHint) batchOutputModeHint.style.opacity = '0.55';
+        // Hide the hint entirely when grouping is off — it's only meaningful
+        // when grouping is on (it explains that grouping overrides this select).
+        if (batchOutputModeHint) batchOutputModeHint.style.display = 'none';
     }
 };
 
