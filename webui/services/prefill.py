@@ -651,6 +651,203 @@ def generate_batch_pdf_to_file(
     }
 
 
+# ---------------------------------------------------------------------------
+# Grouping helpers
+# ---------------------------------------------------------------------------
+
+# Accepted ``group_by`` values for the batch endpoint. ``none`` reproduces the
+# original flat output; the others bundle rows into a ZIP-of-PDFs with one
+# file per group.
+GROUP_BY_VALUES = ("none", "school", "region", "region_school")
+DEFAULT_GROUP_BY = "none"
+
+# A control-character / path-traversal-safe pattern for group filenames.
+_GROUP_NAME_BAD_CHARS = re.compile(r"[\\/:*?\"<>|\x00-\x1f\x7f]+")
+
+
+def normalize_group_by(value: Any) -> str:
+    """Return a validated ``group_by`` value or raise :class:`ValueError`."""
+    text = (str(value) if value is not None else "").strip().lower()
+    if not text:
+        return DEFAULT_GROUP_BY
+    if text not in GROUP_BY_VALUES:
+        raise ValueError(
+            f"Unknown group_by={value!r}. Must be one of: {', '.join(GROUP_BY_VALUES)}."
+        )
+    return text
+
+
+def _safe_group_filename(name: str, *, fallback: str = "_ungrouped") -> str:
+    """Coerce a row's school/region into a safe ZIP-entry filename component."""
+    cleaned = _clean_field(name, max_len=80)
+    cleaned = _GROUP_NAME_BAD_CHARS.sub("_", cleaned).strip(" ._-")
+    if not cleaned:
+        return fallback
+    return cleaned
+
+
+def _row_group_keys(row: dict[str, Any], group_by: str) -> tuple[str, ...]:
+    """Return one or two normalised group keys for a row.
+
+    ``school`` -> (school,)
+    ``region`` -> (region,)
+    ``region_school`` -> (region, school)  # nested ZIP path
+    """
+    school = _safe_group_filename(row.get("school_name", ""), fallback="_unknown_school")
+    region = _safe_group_filename(row.get("region", ""), fallback="_unknown_region")
+    if group_by == "school":
+        return (school,)
+    if group_by == "region":
+        return (region,)
+    if group_by == "region_school":
+        return (region, school)
+    raise ValueError(f"Cannot derive group keys for group_by={group_by!r}.")
+
+
+def _group_rows(
+    rows: list[dict[str, Any]], group_by: str
+) -> dict[tuple[str, ...], list[tuple[int, dict[str, Any]]]]:
+    """Bucket ``(original_index, row)`` tuples by their group key.
+
+    Insertion order is preserved within each bucket so that page numbering
+    inside a group still follows CSV order.
+    """
+    groups: dict[tuple[str, ...], list[tuple[int, dict[str, Any]]]] = {}
+    for idx, row in enumerate(rows):
+        key = _row_group_keys(row, group_by)
+        groups.setdefault(key, []).append((idx, row))
+    return groups
+
+
+def _group_zip_entry_name(key: tuple[str, ...]) -> str:
+    """Translate a group key tuple into the ZIP entry path (always .pdf)."""
+    parts = list(key)
+    parts[-1] = f"{parts[-1]}.pdf"
+    return "/".join(parts)
+
+
+def generate_batch_grouped_zip_to_file(
+    rows: list[dict[str, Any]],
+    dst_path: Path,
+    *,
+    group_by: str,
+    realism_preset: str = "none",
+    include_page_numbers: bool = False,
+    marking_profile: str = "none",
+    answers: Any = None,
+) -> dict:
+    """Write a ZIP of one PDF per group to ``dst_path``.
+
+    ``group_by`` must be one of ``"school"``, ``"region"``, ``"region_school"``.
+    Page numbering, when requested, resets to 1 within each group so each
+    group's PDF reads as a self-contained document.
+
+    Returns ``{count, successes, errors, elapsed_s, size_bytes, groups}``
+    where ``groups`` is a list of ``{name, count, successes}`` summaries.
+    """
+    group_by = normalize_group_by(group_by)
+    if group_by == "none":
+        raise ValueError(
+            "generate_batch_grouped_zip_to_file requires a non-'none' group_by."
+        )
+
+    count = len(rows)
+    logger.info(
+        "Prefill grouped ZIP started | count=%d | group_by=%s | page_numbers=%s",
+        count,
+        group_by,
+        include_page_numbers,
+    )
+    t_batch = time.perf_counter()
+
+    grouped = _group_rows(rows, group_by)
+    logger.info(
+        "Prefill grouped ZIP groups | count=%d | groups=%d",
+        count,
+        len(grouped),
+    )
+
+    dst_path.parent.mkdir(parents=True, exist_ok=True)
+    total_successes = 0
+    errors: list[str] = []
+    group_summaries: list[dict[str, Any]] = []
+
+    with zipfile.ZipFile(
+        dst_path, mode="w", compression=zipfile.ZIP_DEFLATED, compresslevel=1
+    ) as zf:
+        for key, indexed_rows in grouped.items():
+            entry_name = _group_zip_entry_name(key)
+            group_rows = [row for _, row in indexed_rows]
+            with tempfile.NamedTemporaryFile(
+                prefix="prefill_group_", suffix=".pdf", delete=False
+            ) as tmp:
+                tmp_path = Path(tmp.name)
+            try:
+                meta = generate_batch_pdf_to_file(
+                    group_rows,
+                    tmp_path,
+                    realism_preset=realism_preset,
+                    include_page_numbers=include_page_numbers,
+                    marking_profile=marking_profile,
+                    answers=answers,
+                )
+                if meta["successes"] > 0:
+                    zf.writestr(entry_name, tmp_path.read_bytes())
+                    total_successes += meta["successes"]
+                else:
+                    errors.append(f"group {entry_name!r}: all rows failed")
+                group_summaries.append(
+                    {
+                        "name": entry_name,
+                        "count": meta["count"],
+                        "successes": meta["successes"],
+                        "errors": meta["errors"],
+                    }
+                )
+                if meta.get("errors"):
+                    errors.extend(
+                        f"group {entry_name!r}: {e}" for e in meta["errors"]
+                    )
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"group {entry_name!r}: {type(exc).__name__}: {exc}")
+                group_summaries.append(
+                    {
+                        "name": entry_name,
+                        "count": len(group_rows),
+                        "successes": 0,
+                        "errors": [f"{type(exc).__name__}: {exc}"],
+                    }
+                )
+            finally:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    elapsed = time.perf_counter() - t_batch
+    size_bytes = dst_path.stat().st_size if dst_path.exists() else 0
+    rate = (total_successes / elapsed) * 60 if elapsed > 0 else 0
+    logger.info(
+        "Prefill grouped ZIP complete | count=%d | groups=%d | ok=%d | err=%d | "
+        "elapsed=%.1fs | rate=%.0f/min | size_mb=%.1f",
+        count,
+        len(grouped),
+        total_successes,
+        len(errors),
+        elapsed,
+        rate,
+        size_bytes / (1024 * 1024),
+    )
+    return {
+        "count": count,
+        "successes": total_successes,
+        "errors": errors[:50],
+        "elapsed_s": round(elapsed, 2),
+        "size_bytes": size_bytes,
+        "groups": group_summaries,
+    }
+
+
 def generate_batch_zip_to_file(
     rows: list[dict[str, Any]],
     dst_path: Path,

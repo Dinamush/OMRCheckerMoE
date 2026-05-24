@@ -281,6 +281,40 @@ def _run_batch_zip(
     return target(rows, dst_path, **kwargs)
 
 
+def _run_batch_grouped_zip(
+    rows: list[dict[str, Any]],
+    dst_path: Path,
+    realism_preset: str,
+    group_by: str,
+    include_page_numbers: bool,
+    marking_profile: str = "none",
+    answers: Any = None,
+) -> dict:
+    """Adapter for ``generate_batch_grouped_zip_to_file`` matching the
+    same shape as :func:`_run_batch_pdf` / :func:`_run_batch_zip`. Tests may
+    monkeypatch the underlying service function with a stub that lacks
+    newer kwargs, so we feature-detect the signature like the siblings do.
+    """
+    import inspect
+
+    target = prefill_service.generate_batch_grouped_zip_to_file
+    try:
+        params = inspect.signature(target).parameters
+    except (TypeError, ValueError):
+        params = {}
+    kwargs: dict[str, Any] = {
+        "group_by": group_by,
+        "realism_preset": realism_preset,
+    }
+    if "include_page_numbers" in params:
+        kwargs["include_page_numbers"] = include_page_numbers
+    if "marking_profile" in params:
+        kwargs["marking_profile"] = marking_profile
+    if "answers" in params:
+        kwargs["answers"] = answers
+    return target(rows, dst_path, **kwargs)
+
+
 # Download token store: maps token -> (tmp_path, media_type, filename, expires_at)
 # Tokens are single-use and expire after 10 minutes so orphaned files are cleaned up.
 _DOWNLOAD_STORE: dict[str, tuple[Path, str, str, float]] = {}
@@ -1419,6 +1453,8 @@ async def prefill_batch(
     output_mode = str(form.get("output_mode") or "pdf")
     realism_preset = str(form.get("realism_preset") or "none")
     marking_profile = str(form.get("marking_profile") or "none")
+    group_by_raw = form.get("group_by")
+    group_by_value = str(group_by_raw) if group_by_raw is not None else "none"
     answers_default_value = form.get("answers")
     answers_default = (
         answers_default_value if isinstance(answers_default_value, str) and answers_default_value.strip() else None
@@ -1444,6 +1480,10 @@ async def prefill_batch(
         raise HTTPException(status_code=422, detail=str(exc))
     try:
         marking_profile = normalize_marking_profile(marking_profile)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    try:
+        group_by = prefill_service.normalize_group_by(group_by_value)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
@@ -1521,14 +1561,32 @@ async def prefill_batch(
             detail=f"CSV is missing required columns: {', '.join(sorted(missing_cols))}",
         )
 
+    # 4b) When grouping by region the CSV must carry a ``region`` column.
+    # We do not enforce non-empty values (rows with empty region fall into
+    # an explicit ``_unknown_region`` bucket) but the column itself must
+    # exist so the user knows their CSV missed it.
+    if group_by in {"region", "region_school"} and "region" not in rows[0]:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "group_by="
+                + group_by
+                + " requires a 'region' column in the CSV "
+                "(empty cells are allowed and bucket into '_unknown_region')."
+            ),
+        )
+
     # 5) Row-count cap so a runaway batch can't dominate the server.
-    row_cap = pdf_max_rows if output_mode == "pdf" else zip_max_rows
+    # Grouped output is always packaged as a ZIP regardless of ``output_mode``
+    # (the ZIP contains one PDF per group), so use the ZIP cap there.
+    effective_mode_for_cap = "zip" if group_by != "none" else output_mode
+    row_cap = pdf_max_rows if effective_mode_for_cap == "pdf" else zip_max_rows
     if len(rows) > row_cap:
         raise HTTPException(
             status_code=422,
             detail=(
                 f"CSV has {len(rows)} rows but the per-batch limit for "
-                f"{output_mode.upper()} output is {row_cap}. Split the file into "
+                f"{effective_mode_for_cap.upper()} output is {row_cap}. Split the file into "
                 "smaller batches or raise the cap on the /settings page."
             ),
         )
@@ -1544,10 +1602,13 @@ async def prefill_batch(
             headers={"Retry-After": "10"},
         )
 
-    suffix = ".pdf" if output_mode == "pdf" else ".zip"
-    media_type = "application/pdf" if output_mode == "pdf" else "application/zip"
+    # Grouped output is always a ZIP of per-group PDFs.
+    effective_mode = "zip" if group_by != "none" else output_mode
+    suffix = ".pdf" if effective_mode == "pdf" else ".zip"
+    media_type = "application/pdf" if effective_mode == "pdf" else "application/zip"
     preset_suffix = "" if realism_preset == "none" else f"_{realism_preset}"
-    filename = f"prefilled_sheets{preset_suffix}{suffix}"
+    group_suffix = "" if group_by == "none" else f"_by_{group_by}"
+    filename = f"prefilled_sheets{preset_suffix}{group_suffix}{suffix}"
 
     # 7) Write to a temp file the response will stream from. The file is
     # deleted after the response finishes via background_tasks.
@@ -1568,7 +1629,22 @@ async def prefill_batch(
     try:
         # Offload to a thread so a long-running batch cannot block the event
         # loop and stall every other request (incl. health checks).
-        if output_mode == "zip":
+        if group_by != "none":
+            # Grouped output: one PDF per school/region inside a ZIP. The
+            # ``output_mode`` field is intentionally ignored here — when the
+            # user asks for grouping they always get a ZIP-of-PDFs, since
+            # a single PDF can't represent multiple group documents.
+            meta = await asyncio.to_thread(
+                _run_batch_grouped_zip,
+                rows,
+                tmp_path,
+                realism_preset,
+                group_by,
+                include_page_numbers,
+                marking_profile,
+                answers_default,
+            )
+        elif output_mode == "zip":
             # Page numbers are a multi-page PDF feature only — silently
             # ignore the flag when the user picked a ZIP of single PNGs
             # so the JS UI doesn't have to enforce it client-side.
@@ -1626,9 +1702,14 @@ async def prefill_batch(
         "errors": meta["errors"],
         "elapsed_s": meta["elapsed_s"],
         "size_bytes": meta["size_bytes"],
-        # Echo whether page numbers were applied (PDF only — silently
-        # dropped when ``output_mode == 'zip'``).
-        "page_numbers": include_page_numbers and output_mode == "pdf",
+        # Echo whether page numbers were applied. Page numbers DO apply
+        # inside each per-group PDF when grouping is on; they're only
+        # dropped for a flat ZIP of single PNGs.
+        "page_numbers": include_page_numbers and (
+            group_by != "none" or output_mode == "pdf"
+        ),
+        "group_by": group_by,
+        "groups": meta.get("groups", []) if group_by != "none" else [],
     }
 
 

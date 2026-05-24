@@ -394,24 +394,50 @@ csvUpload.addEventListener('change', () => {
 const batchSubmit = document.getElementById('batch-submit');
 const batchError  = document.getElementById('batch-error');
 const batchOutputMode = document.getElementById('batch-output-mode');
+const batchOutputModeHint = document.getElementById('batch-output-mode-hint');
+const batchGroupBy = document.getElementById('batch-group-by');
 const batchRealismPreset = document.getElementById('batch-realism-preset');
 const batchIncludePageNumbers = document.getElementById('batch-include-page-numbers');
 const batchPageNumbersHint = document.getElementById('batch-page-numbers-hint');
 
+const isGroupingActive = () => batchGroupBy && batchGroupBy.value && batchGroupBy.value !== 'none';
+
 const syncPageNumbersAvailability = () => {
     if (!batchIncludePageNumbers) return;
-    const isPdf = batchOutputMode.value === 'pdf';
-    batchIncludePageNumbers.disabled = !isPdf;
-    if (!isPdf) batchIncludePageNumbers.checked = false;
+    // Page numbers apply to any PDF output: a combined PDF, OR each PDF
+    // inside a grouped ZIP. Only disable when output is a flat ZIP of
+    // individual PNGs (i.e. output_mode=zip AND no grouping).
+    const isPdfOutput = batchOutputMode.value === 'pdf' || isGroupingActive();
+    batchIncludePageNumbers.disabled = !isPdfOutput;
+    if (!isPdfOutput) batchIncludePageNumbers.checked = false;
     if (batchPageNumbersHint) {
-        batchPageNumbersHint.classList.toggle('muted', isPdf);
-        batchPageNumbersHint.style.opacity = isPdf ? '' : '0.55';
+        batchPageNumbersHint.classList.toggle('muted', isPdfOutput);
+        batchPageNumbersHint.style.opacity = isPdfOutput ? '' : '0.55';
+    }
+};
+
+const syncOutputModeHint = () => {
+    if (!batchOutputMode) return;
+    if (isGroupingActive()) {
+        batchOutputMode.disabled = true;
+        if (batchOutputModeHint) batchOutputModeHint.style.opacity = '';
+    } else {
+        batchOutputMode.disabled = false;
+        if (batchOutputModeHint) batchOutputModeHint.style.opacity = '0.55';
     }
 };
 
 if (batchOutputMode) {
     batchOutputMode.addEventListener('change', syncPageNumbersAvailability);
     syncPageNumbersAvailability();
+    syncOutputModeHint();
+}
+
+if (batchGroupBy) {
+    batchGroupBy.addEventListener('change', () => {
+        syncOutputModeHint();
+        syncPageNumbersAvailability();
+    });
 }
 
 batchSubmit.addEventListener('click', async () => {
@@ -420,7 +446,16 @@ batchSubmit.addEventListener('click', async () => {
     const fd = new FormData();
     fd.append('output_mode', batchOutputMode.value);
     fd.append('realism_preset', batchRealismPreset.value);
-    if (batchIncludePageNumbers && batchIncludePageNumbers.checked && batchOutputMode.value === 'pdf') {
+    if (batchGroupBy && batchGroupBy.value && batchGroupBy.value !== 'none') {
+        fd.append('group_by', batchGroupBy.value);
+    }
+    // Page numbers apply to a flat combined PDF AND to every PDF inside a
+    // grouped ZIP; they only fail to apply when the output is a flat ZIP
+    // of individual PNGs (output_mode=zip with no grouping).
+    const grouping = batchGroupBy && batchGroupBy.value && batchGroupBy.value !== 'none';
+    const pageNumbersUseful =
+        batchOutputMode.value === 'pdf' || grouping;
+    if (batchIncludePageNumbers && batchIncludePageNumbers.checked && pageNumbersUseful) {
         fd.append('include_page_numbers', 'true');
     }
     const batchMarkingProfileEl = document.getElementById('batch-marking-profile');

@@ -195,6 +195,22 @@
                 <option value="pdf">Combined PDF</option>
                 <option value="zip">ZIP of individual PNGs</option>
             </select>
+            <p class="muted small" id="batch-output-mode-hint">
+                When grouping is enabled below, the output is always a ZIP containing one PDF per group.
+            </p>
+        </div>
+        <div class="form-group">
+            <label for="batch-group-by">Group sheets by</label>
+            <select id="batch-group-by" name="group_by">
+                <option value="none" selected>None — single combined output</option>
+                <option value="school">School Name — one PDF per school</option>
+                <option value="region">Region — one PDF per region (requires region column)</option>
+                <option value="region_school">Region then School — region/&lt;school&gt;.pdf (requires region column)</option>
+            </select>
+            <p class="muted small">
+                Grouping bundles rows by the chosen field into a ZIP of per-group PDFs. Add an optional
+                <code>region</code> column to the CSV to enable the Region groupings.
+            </p>
         </div>
         <div class="form-group">
             <label for="batch-realism-preset">Realism preset</label>
