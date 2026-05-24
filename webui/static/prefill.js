@@ -126,6 +126,19 @@ const singleForm = document.getElementById('single-form');
 const singleSubmit = document.getElementById('single-submit');
 const singleError = document.getElementById('single-error');
 
+// ── Student-fill shortcut handler ────────────────────────────────────
+// When the "Quick answer key" select changes to something other than the
+// "custom" entry, mirror its value into the free-form `answers` input so
+// the operator sees what's being sent and can tweak it before submit.
+const singleAnswersShortcut = document.getElementById('single-answers-shortcut');
+const singleAnswersInput = document.getElementById('single-answers');
+if (singleAnswersShortcut && singleAnswersInput) {
+    singleAnswersShortcut.addEventListener('change', () => {
+        const v = singleAnswersShortcut.value;
+        if (v) singleAnswersInput.value = v;
+    });
+}
+
 singleForm.addEventListener('submit', async e => {
     e.preventDefault();
     showError(singleError, '');
@@ -136,6 +149,11 @@ singleForm.addEventListener('submit', async e => {
     const candidateNo = singleForm.querySelector('[name=candidate_number]').value.trim();
     const outputFmt   = singleForm.querySelector('[name=output_format]:checked').value;
     const realismPreset = singleForm.querySelector('[name=realism_preset]').value;
+    const markingProfileEl = document.getElementById('single-marking-profile');
+    const markingProfile = markingProfileEl ? markingProfileEl.value : 'none';
+    const answersText = (singleAnswersInput && singleAnswersInput.value.trim()) || '';
+    const answersJsonEl = document.getElementById('single-answers-json');
+    const answersJson = (answersJsonEl && answersJsonEl.value.trim()) || '';
 
     if (!studentName || !schoolName || !examName || !candidateNo) {
         showError(singleError, 'All fields are required.');
@@ -148,6 +166,15 @@ singleForm.addEventListener('submit', async e => {
     }
     singleForm.querySelector('[name=candidate_number]').classList.remove('invalid');
 
+    // Allow the user to fill out answers without picking a marking profile —
+    // if marking_profile is 'none' but answers are provided, default to
+    // medium_pencil so the answers actually appear on the sheet. Saves users
+    // from a confusing "I filled in answers but the sheet is blank" gotcha.
+    let effectiveProfile = markingProfile;
+    if ((answersText || answersJson) && effectiveProfile === 'none') {
+        effectiveProfile = 'medium_pencil';
+    }
+
     const fd = new FormData();
     fd.append('student_name', studentName);
     fd.append('school_name', schoolName);
@@ -155,6 +182,13 @@ singleForm.addEventListener('submit', async e => {
     fd.append('candidate_number', candidateNo);
     fd.append('output_format', outputFmt);
     fd.append('realism_preset', realismPreset);
+    fd.append('marking_profile', effectiveProfile);
+    // JSON map wins over the plain string when both are present.
+    if (answersJson) {
+        fd.append('answers', answersJson);
+    } else if (answersText) {
+        fd.append('answers', answersText);
+    }
 
     const singleLastDownload = document.getElementById('single-last-download');
     await postFormAndDownload('/api/v1/prefill/single', fd, singleSubmit, singleError, singleLastDownload);
@@ -388,6 +422,19 @@ batchSubmit.addEventListener('click', async () => {
     fd.append('realism_preset', batchRealismPreset.value);
     if (batchIncludePageNumbers && batchIncludePageNumbers.checked && batchOutputMode.value === 'pdf') {
         fd.append('include_page_numbers', 'true');
+    }
+    const batchMarkingProfileEl = document.getElementById('batch-marking-profile');
+    const batchAnswersDefaultEl = document.getElementById('batch-answers-default');
+    let batchMarkingProfile = batchMarkingProfileEl ? batchMarkingProfileEl.value : 'none';
+    const batchAnswersDefault = batchAnswersDefaultEl ? batchAnswersDefaultEl.value.trim() : '';
+    // Same UX rule as Single: if user typed an answer default but left
+    // the profile at 'none', auto-upgrade so they see the marks.
+    if (batchAnswersDefault && batchMarkingProfile === 'none') {
+        batchMarkingProfile = 'medium_pencil';
+    }
+    fd.append('marking_profile', batchMarkingProfile);
+    if (batchAnswersDefault) {
+        fd.append('answers', batchAnswersDefault);
     }
 
     if (activeSubtab === 'manual') {

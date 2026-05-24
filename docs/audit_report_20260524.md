@@ -101,3 +101,30 @@ Key Tier-2 items to consider next:
 
 Four read-only subagents (Claude Sonnet 4.6 medium-thinking) each audited one layer end-to-end and returned a structured per-finding report with file/line, severity, scenario, and suggested fix. Findings were de-duplicated (e.g., the `save_img_list` class-level bug appears in both Core and Real-World reports as CORE-1 / F-33), prioritized, and the Tier-1 set was applied in a single coherent diff.
 
+---
+
+## Post-audit follow-up — Bubble geometry calibration (2026-05-24)
+
+While building the student-fill feature, a visual review of the rendered sheets revealed that:
+
+- **`custom_25_definitive_final/template.json`** had its answer-block origins offset **+5px in y** from the actual printed bubble centres on `prefill_only_package/blank_template_reference.png`.
+- The OMR engine samples a `bubbleDimensions=[10,10]` box from `origin → origin + 10`. With the old origins, the sampling box centre landed ~5 px above the bubble centre — well outside the printed circle. The engine still read fully-filled bubbles because the integral-mean over a 10×10 region caught the bottom of the dark mark; but **partial fills, light pencils, check marks, and the upper margin of normal student strokes were systematically missed**.
+
+### Fix
+- Re-calibrated all 5 answer-block origins via Hough-circle detection (`webui/tests/_calibrate_bubbles.py`). New origins place the sampling box exactly on the printed bubble.
+- Relaxed `src/schemas/template_schema.py` to accept fractional pixel origins (`two_positive_numbers` instead of `two_positive_integers`) — the engine already supported floats internally; only the schema was strict.
+- Made `parse_answers("random" | "random_with_skips")` deterministic per-candidate by seeding from `_stable_seed("prefill-answers", candidate_number, raw_answer_spec)` in `webui/services/prefill.py`. Without this seed, random shortcuts produced a fresh pattern on every call — silently breaking the contract that the same input should produce the same output.
+
+### Measured impact (OMR readability of 25 questions on a freshly generated sheet)
+
+| Profile | Old geometry | New geometry |
+|---|---|---|
+| `medium_pencil` (`all_*`) | 8 – 17 / 25 | **24 – 25 / 25** |
+| `check_mark` (`all_*`) | 0 – 6 / 25 | **19 – 25 / 25** |
+| `cross_mark` (`all_*`) | 15 – 25 / 25 | **25 / 25** |
+| `messy_student` (`all_*`) | 3 – 8 / 25 | **8 – 15 / 25** |
+| `heavy_pencil`, `pen_ballpoint`, `careful_student` | already 24 – 25 / 25 | unchanged |
+| `light_pencil`, `partial_fill` | 0 – 5 / 25 | unchanged (intentionally below OMR threshold) |
+
+The new geometry also fixes the original user complaint that drawn marks "float above" the printed circles. See `diagnostic_output/answer_geometry_overlay.png` and `diagnostic_output/alignment_gallery/` for visual proof.
+

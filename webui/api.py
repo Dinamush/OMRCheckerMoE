@@ -55,6 +55,11 @@ from webui.services import prefill as prefill_service
 from webui.services import presets as presets_service
 from webui.services import test_csv as test_csv_service
 from webui.services.scan_simulation import normalize_realism_preset
+from webui.services.student_fill import (
+    MARKING_PROFILES,
+    list_marking_profiles,
+    normalize_marking_profile,
+)
 from webui import log_stream
 from webui.schemas_settings import (
     RuntimeSettingsResponse,
@@ -96,41 +101,41 @@ _PREFILLED_25Q_TEMPLATE: dict[str, Any] = {
             "fieldType": "QTYPE_INT",
         },
         "q01block": {
-            "origin": [53, 257],
+            "origin": [52.7, 259.3],
             "bubblesGap": 20.0,
-            "labelsGap": 42.0,
+            "labelsGap": 41.9,
             "fieldLabels": ["q1..5"],
             "emptyValue": "NR",
             "fieldType": "QTYPE_MCQ4",
         },
         "q06block": {
-            "origin": [181, 257],
+            "origin": [180.9, 259.3],
             "bubblesGap": 20.0,
-            "labelsGap": 42.0,
+            "labelsGap": 41.9,
             "fieldLabels": ["q6..10"],
             "emptyValue": "NR",
             "fieldType": "QTYPE_MCQ4",
         },
         "q11block": {
-            "origin": [310, 257],
-            "bubblesGap": 19.5,
-            "labelsGap": 42.0,
+            "origin": [309.8, 259.3],
+            "bubblesGap": 19.8,
+            "labelsGap": 41.9,
             "fieldLabels": ["q11..15"],
             "emptyValue": "NR",
             "fieldType": "QTYPE_MCQ4",
         },
         "q16block": {
-            "origin": [435, 257],
-            "bubblesGap": 20.3,
-            "labelsGap": 42.0,
+            "origin": [435.9, 259.3],
+            "bubblesGap": 20.0,
+            "labelsGap": 41.9,
             "fieldLabels": ["q16..20"],
             "emptyValue": "NR",
             "fieldType": "QTYPE_MCQ4",
         },
         "q21block": {
-            "origin": [566, 257],
-            "bubblesGap": 19.7,
-            "labelsGap": 42.0,
+            "origin": [566.3, 259.3],
+            "bubblesGap": 20.0,
+            "labelsGap": 41.9,
             "fieldLabels": ["q21..25"],
             "emptyValue": "NR",
             "fieldType": "QTYPE_MCQ4",
@@ -226,13 +231,15 @@ def _run_batch_pdf(
     dst_path: Path,
     realism_preset: str,
     include_page_numbers: bool,
+    marking_profile: str = "none",
+    answers: Any = None,
 ) -> dict:
     """Adapter that calls ``generate_batch_pdf_to_file`` with the right kwargs.
 
     Tests monkeypatch ``generate_batch_pdf_to_file`` with a stub that may
-    not yet know the ``include_page_numbers`` parameter; introspecting the
-    signature here keeps those fixtures green while still threading the
-    flag through for production callers.
+    not yet know newer parameters (``include_page_numbers``, ``marking_profile``,
+    ``answers``); introspecting the signature here keeps those fixtures green
+    while still threading every flag through for production callers.
     """
     import inspect
 
@@ -244,6 +251,33 @@ def _run_batch_pdf(
     kwargs: dict[str, Any] = {"realism_preset": realism_preset}
     if "include_page_numbers" in params:
         kwargs["include_page_numbers"] = include_page_numbers
+    if "marking_profile" in params:
+        kwargs["marking_profile"] = marking_profile
+    if "answers" in params:
+        kwargs["answers"] = answers
+    return target(rows, dst_path, **kwargs)
+
+
+def _run_batch_zip(
+    rows: list[dict[str, Any]],
+    dst_path: Path,
+    realism_preset: str,
+    marking_profile: str = "none",
+    answers: Any = None,
+) -> dict:
+    """Adapter for ``generate_batch_zip_to_file`` that mirrors :func:`_run_batch_pdf`."""
+    import inspect
+
+    target = prefill_service.generate_batch_zip_to_file
+    try:
+        params = inspect.signature(target).parameters
+    except (TypeError, ValueError):
+        params = {}
+    kwargs: dict[str, Any] = {"realism_preset": realism_preset}
+    if "marking_profile" in params:
+        kwargs["marking_profile"] = marking_profile
+    if "answers" in params:
+        kwargs["answers"] = answers
     return target(rows, dst_path, **kwargs)
 
 
@@ -1115,6 +1149,16 @@ async def get_checked_output_image(
 # Prefill endpoints
 # ---------------------------------------------------------------------------
 
+@router.get("/prefill/marking-profiles")
+async def prefill_marking_profiles() -> dict[str, Any]:
+    """Return the available student marking profiles (id, label, description).
+
+    Lets the UI dynamically populate the marking-profile dropdown so any
+    server-side additions show up without a frontend redeploy.
+    """
+    return {"profiles": list_marking_profiles()}
+
+
 @router.get("/prefill/sample")
 async def prefill_sample(
     preset: str = "none",
@@ -1122,6 +1166,8 @@ async def prefill_sample(
     student_name: str = "Jane Doe",
     school_name: str = "Sample School",
     exam_name: str = "Sample Exam",
+    marking_profile: str = "none",
+    answers: str | None = None,
 ) -> StreamingResponse:
     """Return an inline PNG preview of a single preset.
 
@@ -1129,9 +1175,17 @@ async def prefill_sample(
     what each realism preset produces without downloading anything. Response
     is marked ``Cache-Control: no-store`` so WebView2 / browser caches cannot
     serve a stale version after the simulator code changes.
+
+    ``marking_profile`` and ``answers`` enable previewing the new student-fill
+    feature: the sample gallery can show the same answer key drawn with each
+    marking profile to make profile selection visual.
     """
     try:
         preset_norm = normalize_realism_preset(preset)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    try:
+        marking_profile_norm = normalize_marking_profile(marking_profile)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     if not _PREFILL_SAMPLE_SEM.acquire(blocking=False):
@@ -1147,6 +1201,7 @@ async def prefill_sample(
             data = await asyncio.to_thread(
                 prefill_service.generate_single_png,
                 student_name, school_name, exam_name, candidate_number, preset_norm,
+                marking_profile_norm, answers,
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc))
@@ -1157,11 +1212,12 @@ async def prefill_sample(
             )
     finally:
         _PREFILL_SAMPLE_SEM.release()
+    profile_suffix = "" if marking_profile_norm == "none" else f"_{marking_profile_norm}"
     return StreamingResponse(
         io.BytesIO(data),
         media_type="image/png",
         headers={
-            "Content-Disposition": f'inline; filename="preview_{preset_norm}.png"',
+            "Content-Disposition": f'inline; filename="preview_{preset_norm}{profile_suffix}.png"',
             "Cache-Control": "no-store, max-age=0",
         },
     )
@@ -1254,8 +1310,18 @@ async def prefill_single(
     candidate_number: str = Form(...),
     output_format: str = Form("png"),
     realism_preset: str = Form("none"),
+    marking_profile: str = Form("none"),
+    answers: str | None = Form(None),
 ) -> StreamingResponse:
-    """Generate a single pre-filled answer sheet and stream it as a download."""
+    """Generate a single pre-filled answer sheet and stream it as a download.
+
+    The optional ``marking_profile`` and ``answers`` parameters drive the
+    new student-fill feature (see :mod:`webui.services.student_fill`). When
+    ``marking_profile != "none"`` and ``answers`` is non-empty, the chosen
+    answer bubbles are darkened on the sheet using a student-style hand.
+    Both fields default to disabled so existing callers see no behaviour
+    change.
+    """
     output_format = (output_format or "").strip().lower()
     if output_format not in {"png", "pdf"}:
         raise HTTPException(
@@ -1264,6 +1330,10 @@ async def prefill_single(
         )
     try:
         realism_preset = normalize_realism_preset(realism_preset)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    try:
+        marking_profile_norm = normalize_marking_profile(marking_profile)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     # Backpressure: bounded concurrency so a flood of requests cannot exhaust
@@ -1283,20 +1353,23 @@ async def prefill_single(
         # Suffix the filename with the preset (when not "none") so users can
         # immediately tell which realism preset produced a given download.
         preset_suffix = "" if realism_preset == "none" else f"_{realism_preset}"
+        profile_suffix = "" if marking_profile_norm == "none" else f"_{marking_profile_norm}"
         if output_format == "pdf":
             data = await asyncio.to_thread(
                 prefill_service.generate_single_pdf,
                 student_name, school_name, exam_name, candidate_number, realism_preset,
+                marking_profile_norm, answers,
             )
             media_type = "application/pdf"
-            filename = f"prefilled_sheet{preset_suffix}.pdf"
+            filename = f"prefilled_sheet{preset_suffix}{profile_suffix}.pdf"
         else:
             data = await asyncio.to_thread(
                 prefill_service.generate_single_png,
                 student_name, school_name, exam_name, candidate_number, realism_preset,
+                marking_profile_norm, answers,
             )
             media_type = "image/png"
-            filename = f"prefilled_sheet{preset_suffix}.png"
+            filename = f"prefilled_sheet{preset_suffix}{profile_suffix}.png"
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     except Exception as exc:  # noqa: BLE001 - never leak stack traces
@@ -1345,6 +1418,11 @@ async def prefill_batch(
     csv_file = csv_file_value if hasattr(csv_file_value, "read") else None
     output_mode = str(form.get("output_mode") or "pdf")
     realism_preset = str(form.get("realism_preset") or "none")
+    marking_profile = str(form.get("marking_profile") or "none")
+    answers_default_value = form.get("answers")
+    answers_default = (
+        answers_default_value if isinstance(answers_default_value, str) and answers_default_value.strip() else None
+    )
     include_page_numbers_value = form.get("include_page_numbers")
     include_page_numbers = str(include_page_numbers_value).strip().lower() in {
         "1",
@@ -1362,6 +1440,10 @@ async def prefill_batch(
         )
     try:
         realism_preset = normalize_realism_preset(realism_preset)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    try:
+        marking_profile = normalize_marking_profile(marking_profile)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
@@ -1491,7 +1573,12 @@ async def prefill_batch(
             # ignore the flag when the user picked a ZIP of single PNGs
             # so the JS UI doesn't have to enforce it client-side.
             meta = await asyncio.to_thread(
-                prefill_service.generate_batch_zip_to_file, rows, tmp_path, realism_preset,
+                _run_batch_zip,
+                rows,
+                tmp_path,
+                realism_preset,
+                marking_profile,
+                answers_default,
             )
         else:
             meta = await asyncio.to_thread(
@@ -1500,6 +1587,8 @@ async def prefill_batch(
                 tmp_path,
                 realism_preset,
                 include_page_numbers,
+                marking_profile,
+                answers_default,
             )
     except ValueError as exc:
         _cleanup()

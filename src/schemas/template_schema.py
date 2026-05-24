@@ -264,7 +264,7 @@ TEMPLATE_SCHEMA = {
                         "emptyValue": {"type": "string"},
                         "fieldLabels": {"type": "array", "items": FIELD_STRING_TYPE},
                         "labelsGap": positive_number,
-                        "origin": two_positive_integers,
+                        "origin": two_positive_numbers,
                         "fieldType": {
                             "type": "string",
                             "enum": list(FIELD_TYPES.keys()),

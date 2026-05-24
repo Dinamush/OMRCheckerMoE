@@ -27,6 +27,14 @@ from webui.services.scan_simulation import (
     apply_scan_simulation,
     normalize_realism_preset,
 )
+from webui.services.student_fill import (
+    DEFAULT_MARKING_PROFILE,
+    MARKING_PROFILES,
+    _stable_seed,
+    draw_student_marks,
+    normalize_marking_profile,
+    parse_answers,
+)
 
 # Built-in blank template shipped with the package.
 # When running as a PyInstaller frozen bundle sys._MEIPASS is the _internal/
@@ -125,10 +133,38 @@ def _build_fast_payload(
     row: dict[str, Any],
     output_format: str = "png",
     realism_preset: str = "none",
+    marking_profile: str = "none",
+    answers: Any = None,
 ) -> dict[str, Any]:
-    """Validate + sanitise a row into a fast worker payload (no stamped_bytes)."""
+    """Validate + sanitise a row into a fast worker payload (no stamped_bytes).
+
+    Per-row ``answers`` (CSV column) override the batch-level default. The
+    row's ``marking_profile`` column overrides the batch-level profile when
+    present, otherwise the batch default is used.
+    """
     candidate_number = _clean_field(row.get("candidate_number"), max_len=10)
     _validate_candidate_number(candidate_number)
+
+    row_profile = _clean_field(row.get("marking_profile"), max_len=64) or marking_profile
+    row_profile = normalize_marking_profile(row_profile or "none")
+
+    # Per-row answers may live in either ``answers`` or ``answers_json``.
+    row_answers_raw = row.get("answers")
+    if row_answers_raw in (None, ""):
+        row_answers_raw = row.get("answers_json")
+    if row_answers_raw in (None, ""):
+        row_answers_raw = answers
+
+    # Seed random-answer generation deterministically per candidate_number +
+    # answer spec so each row is reproducible but each sheet in a batch
+    # gets a distinct pattern. Without a seed, ``random`` / ``random_with_skips``
+    # would silently produce a fresh pattern every call.
+    answer_seed = _stable_seed("prefill-answers", candidate_number, str(row_answers_raw))
+    parsed_answers = (
+        parse_answers(row_answers_raw, seed=answer_seed)
+        if row_answers_raw is not None else {}
+    )
+
     return {
         "student_name": _clean_field(row.get("student_name")),
         "school_name": _clean_field(row.get("school_name")),
@@ -136,6 +172,8 @@ def _build_fast_payload(
         "candidate_number": candidate_number,
         "output_format": output_format,
         "realism_preset": normalize_realism_preset(realism_preset),
+        "marking_profile": row_profile,
+        "answers": parsed_answers,
     }
 
 
@@ -222,6 +260,31 @@ def _simulate_scan_if_needed(
     )
 
 
+def _maybe_fill_student_marks(
+    image,
+    *,
+    candidate_number: str,
+    marking_profile: str | None,
+    answers: Any,
+):
+    """Optionally apply student-style bubble fills to ``image``.
+
+    No-op when ``marking_profile`` is ``"none"`` or ``answers`` is empty.
+    Returns the resulting image (a new instance when marks were drawn).
+    """
+    profile = (marking_profile or "none").lower()
+    if profile == "none":
+        return image
+    if not answers:
+        return image
+    return draw_student_marks(
+        image,
+        answers=answers,
+        marking_profile=profile,
+        candidate_number=candidate_number,
+    )
+
+
 def _thread_render(payload: dict) -> bytes:
     """Thread worker: renders one prefill sheet using the shared in-process template cache.
 
@@ -246,6 +309,12 @@ def _thread_render(payload: dict) -> bytes:
         # printed mark. Placement guarantees no overlap with bubbles or
         # ArUco markers (see prefill_answer_sheet_final.page_number_anchor).
         img = m.draw_page_number(img, page_number)
+    img = _maybe_fill_student_marks(
+        img,
+        candidate_number=payload['candidate_number'],
+        marking_profile=payload.get('marking_profile', 'none'),
+        answers=payload.get('answers') or {},
+    )
     img = _simulate_scan_if_needed(
         img,
         m,
@@ -368,6 +437,12 @@ def _iter_pngs_fast(payloads: list[dict], *, preserve_order: bool = True):
             fallback_page = payloads[idx].get('page_number')
             if fallback_page is not None:
                 img = m2.draw_page_number(img, fallback_page)
+            img = _maybe_fill_student_marks(
+                img,
+                candidate_number=payloads[idx]['candidate_number'],
+                marking_profile=payloads[idx].get('marking_profile', 'none'),
+                answers=payloads[idx].get('answers') or {},
+            )
             img = _simulate_scan_if_needed(
                 img,
                 m2,
@@ -395,10 +470,17 @@ def generate_single_png(
     exam_name: str,
     candidate_number: str,
     realism_preset: str = "none",
+    marking_profile: str = "none",
+    answers: Any = None,
 ) -> bytes:
     candidate_number = _clean_field(candidate_number, max_len=10)
     _validate_candidate_number(candidate_number)
     realism_preset = normalize_realism_preset(realism_preset)
+    marking_profile = normalize_marking_profile(marking_profile or "none")
+    answer_seed = _stable_seed("prefill-answers", candidate_number, str(answers))
+    parsed_answers = (
+        parse_answers(answers, seed=answer_seed) if answers is not None else {}
+    )
     m = _import_prefill_module()
     stamped_img, _ = _get_stamped_img()
     assert stamped_img is not None
@@ -408,6 +490,12 @@ def generate_single_png(
         _clean_field(school_name),
         _clean_field(exam_name),
         candidate_number,
+    )
+    image = _maybe_fill_student_marks(
+        image,
+        candidate_number=candidate_number,
+        marking_profile=marking_profile,
+        answers=parsed_answers,
     )
     image = _simulate_scan_if_needed(
         image,
@@ -426,6 +514,8 @@ def generate_single_pdf(
     exam_name: str,
     candidate_number: str,
     realism_preset: str = "none",
+    marking_profile: str = "none",
+    answers: Any = None,
 ) -> bytes:
     import fitz
     import struct
@@ -437,6 +527,8 @@ def generate_single_pdf(
         exam_name,
         candidate_number,
         realism_preset=realism_preset,
+        marking_profile=marking_profile,
+        answers=answers,
     )
     w, h = struct.unpack('>II', png_bytes[16:24])
     doc = fitz.open()
@@ -453,6 +545,8 @@ def generate_batch_pdf_to_file(
     dst_path: Path,
     realism_preset: str = "none",
     include_page_numbers: bool = False,
+    marking_profile: str = "none",
+    answers: Any = None,
 ) -> dict:
     """Stream PDF generation directly to ``dst_path``.
 
@@ -476,9 +570,16 @@ def generate_batch_pdf_to_file(
     t_batch = time.perf_counter()
 
     realism_preset = normalize_realism_preset(realism_preset)
+    marking_profile = normalize_marking_profile(marking_profile or "none")
     payloads = []
     for idx, row in enumerate(rows, start=1):
-        payload = _build_fast_payload(row, output_format="jpeg", realism_preset=realism_preset)
+        payload = _build_fast_payload(
+            row,
+            output_format="jpeg",
+            realism_preset=realism_preset,
+            marking_profile=marking_profile,
+            answers=answers,
+        )
         if include_page_numbers:
             payload["page_number"] = idx
         payloads.append(payload)
@@ -554,16 +655,26 @@ def generate_batch_zip_to_file(
     rows: list[dict[str, Any]],
     dst_path: Path,
     realism_preset: str = "none",
+    marking_profile: str = "none",
+    answers: Any = None,
 ) -> dict:
     """Stream ZIP generation directly to ``dst_path``. Bounded memory."""
     count = len(rows)
     logger.info("Prefill batch ZIP started | count=%d", count)
     t_batch = time.perf_counter()
 
+    marking_profile = normalize_marking_profile(marking_profile or "none")
     payloads: list[dict] = []
     filenames: list[str] = []
     for i, row in enumerate(rows, start=1):
-        payloads.append(_build_fast_payload(row, realism_preset=realism_preset))
+        payloads.append(
+            _build_fast_payload(
+                row,
+                realism_preset=realism_preset,
+                marking_profile=marking_profile,
+                answers=answers,
+            )
+        )
         filename = Path(_clean_field(row.get("output_file", "")) or "").name \
             or f"sheet_{i:03d}.png"
         if not filename.lower().endswith(".png"):
@@ -610,6 +721,8 @@ def generate_batch_pdf(
     rows: list[dict[str, Any]],
     realism_preset: str = "none",
     include_page_numbers: bool = False,
+    marking_profile: str = "none",
+    answers: Any = None,
 ) -> bytes:
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
         tmp_path = Path(tmp.name)
@@ -619,6 +732,8 @@ def generate_batch_pdf(
             tmp_path,
             realism_preset=realism_preset,
             include_page_numbers=include_page_numbers,
+            marking_profile=marking_profile,
+            answers=answers,
         )
         return tmp_path.read_bytes()
     finally:
@@ -628,11 +743,22 @@ def generate_batch_pdf(
             pass
 
 
-def generate_batch_zip(rows: list[dict[str, Any]], realism_preset: str = "none") -> bytes:
+def generate_batch_zip(
+    rows: list[dict[str, Any]],
+    realism_preset: str = "none",
+    marking_profile: str = "none",
+    answers: Any = None,
+) -> bytes:
     with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
         tmp_path = Path(tmp.name)
     try:
-        generate_batch_zip_to_file(rows, tmp_path, realism_preset=realism_preset)
+        generate_batch_zip_to_file(
+            rows,
+            tmp_path,
+            realism_preset=realism_preset,
+            marking_profile=marking_profile,
+            answers=answers,
+        )
         return tmp_path.read_bytes()
     finally:
         try:

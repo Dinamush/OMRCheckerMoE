@@ -57,6 +57,54 @@
                     </select>
                     <p class="muted small">Use <strong>Subtle</strong> or <strong>Moderate</strong> to generate realistic scanned-looking sheets. <strong>Adversarial</strong> intentionally creates hard cases that may fail OMR and should be used for robustness testing.</p>
                 </div>
+
+                <details id="single-student-fill" class="student-fill-section" style="margin-block-start:0.5rem;">
+                    <summary><strong>Fill answer bubbles</strong> <span class="muted small">(simulate a student marking q1–q25)</span></summary>
+                    <div class="stack" style="margin-block-start:0.75rem;">
+                        <div class="form-group">
+                            <label for="single-marking-profile">Marking profile</label>
+                            <select id="single-marking-profile" name="marking_profile">
+                                <option value="none" selected>None — leave answer bubbles blank</option>
+                                <option value="light_pencil">Light pencil — faint, tentative marks</option>
+                                <option value="medium_pencil">Medium pencil — typical student</option>
+                                <option value="heavy_pencil">Heavy pencil — confident dark marks</option>
+                                <option value="pen_ballpoint">Pen — crisp, uniformly dark</option>
+                                <option value="check_mark">Check mark (✓) instead of fill</option>
+                                <option value="cross_mark">Cross (✗) through the bubble</option>
+                                <option value="partial_fill">Partial fill — half-shaded</option>
+                                <option value="messy_student">Messy — variable darkness &amp; jitter</option>
+                                <option value="careful_student">Careful — neat, full fills</option>
+                            </select>
+                            <p class="muted small">Each profile simulates a different student's marking hand. Use the same answer key with different profiles to stress-test the OMR engine against realistic mark variability.</p>
+                        </div>
+                        <div class="form-group">
+                            <label for="single-answers-shortcut">Quick answer key</label>
+                            <select id="single-answers-shortcut">
+                                <option value="" selected>Custom (use textbox below)</option>
+                                <option value="random">Random A–D (deterministic per candidate)</option>
+                                <option value="random_with_skips">Random with ~10% skipped</option>
+                                <option value="alternating">Alternating A,B,C,D,A,B,C,D…</option>
+                                <option value="all_a">All A</option>
+                                <option value="all_b">All B</option>
+                                <option value="all_c">All C</option>
+                                <option value="all_d">All D</option>
+                                <option value="blank">Blank (no marks)</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label for="single-answers">Answer key for q1–q25</label>
+                            <input id="single-answers" name="answers" type="text"
+                                   placeholder="e.g. ABCDA-BCDAB CDABC DABCD ABCDA   (A–D, '-' or 'X' to skip)"
+                                   autocomplete="off" />
+                            <p class="muted small">25 letters in order (A–D). Use <code>-</code> or <code>X</code> to skip a question. Multi-marks like <code>AB</code> are supported via the JSON form below.</p>
+                        </div>
+                        <details>
+                            <summary class="muted small">Advanced: per-question JSON answer map</summary>
+                            <p class="muted small" style="margin-block:0.5rem 0.25rem;">JSON object mapping q-number to answer letters. Missing keys = blank. Example: <code>{"q1": "A", "q2": "BC", "q5": "-"}</code></p>
+                            <textarea id="single-answers-json" rows="3" placeholder='{"q1": "A", "q2": "B"}'></textarea>
+                        </details>
+                    </div>
+                </details>
             </div>
             <div id="single-error" class="error small" style="display:none;margin-block-end:0.75rem;"></div>
             <div id="single-last-download" class="muted small" style="display:none;margin-block-end:0.5rem;"></div>
@@ -158,6 +206,39 @@
             </select>
             <p class="muted small">Batch simulation is deterministic per candidate number, so repeated runs produce the same scan artifacts for the same row and preset.</p>
         </div>
+
+        <details class="student-fill-section" style="margin-block-start:0.5rem;">
+            <summary><strong>Fill answer bubbles</strong> <span class="muted small">(simulate a student marking q1–q25)</span></summary>
+            <div class="stack" style="margin-block-start:0.75rem;">
+                <div class="form-group">
+                    <label for="batch-marking-profile">Marking profile (applies to every row)</label>
+                    <select id="batch-marking-profile" name="marking_profile">
+                        <option value="none" selected>None — leave answer bubbles blank</option>
+                        <option value="light_pencil">Light pencil — faint, tentative marks</option>
+                        <option value="medium_pencil">Medium pencil — typical student</option>
+                        <option value="heavy_pencil">Heavy pencil — confident dark marks</option>
+                        <option value="pen_ballpoint">Pen — crisp, uniformly dark</option>
+                        <option value="check_mark">Check mark (✓) instead of fill</option>
+                        <option value="cross_mark">Cross (✗) through the bubble</option>
+                        <option value="partial_fill">Partial fill — half-shaded</option>
+                        <option value="messy_student">Messy — variable darkness &amp; jitter</option>
+                        <option value="careful_student">Careful — neat, full fills</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="batch-answers-default">Default answer key</label>
+                    <input id="batch-answers-default" name="answers" type="text"
+                           placeholder="e.g. random_with_skips, ABCDABCDA…, or blank for unmarked"
+                           autocomplete="off" />
+                    <p class="muted small">
+                        Used for every row that doesn't supply its own <code>answers</code> column.
+                        Accepts the same shortcuts as Single Sheet (<code>random</code>, <code>random_with_skips</code>,
+                        <code>alternating</code>, <code>all_a</code>…<code>all_d</code>, or a 25-letter string).
+                        Add an <code>answers</code> column to your CSV for per-row overrides.
+                    </p>
+                </div>
+            </div>
+        </details>
 
         <div class="form-group">
             <label class="radio-label" for="batch-include-page-numbers">
