@@ -31,11 +31,11 @@
     },
     "q01block": {
       "origin": [
-        53,
-        257
+        52.7,
+        259.3
       ],
       "bubblesGap": 20.0,
-      "labelsGap": 42.0,
+      "labelsGap": 41.9,
       "fieldLabels": [
         "q1..5"
       ],
@@ -44,11 +44,11 @@
     },
     "q06block": {
       "origin": [
-        181,
-        257
+        180.9,
+        259.3
       ],
       "bubblesGap": 20.0,
-      "labelsGap": 42.0,
+      "labelsGap": 41.9,
       "fieldLabels": [
         "q6..10"
       ],
@@ -57,11 +57,11 @@
     },
     "q11block": {
       "origin": [
-        310,
-        257
+        309.8,
+        259.3
       ],
-      "bubblesGap": 19.5,
-      "labelsGap": 42.0,
+      "bubblesGap": 19.8,
+      "labelsGap": 41.9,
       "fieldLabels": [
         "q11..15"
       ],
@@ -70,11 +70,11 @@
     },
     "q16block": {
       "origin": [
-        435,
-        257
+        435.9,
+        259.3
       ],
-      "bubblesGap": 20.3,
-      "labelsGap": 42.0,
+      "bubblesGap": 20.0,
+      "labelsGap": 41.9,
       "fieldLabels": [
         "q16..20"
       ],
@@ -83,11 +83,11 @@
     },
     "q21block": {
       "origin": [
-        566,
-        257
+        566.3,
+        259.3
       ],
-      "bubblesGap": 19.7,
-      "labelsGap": 42.0,
+      "bubblesGap": 20.0,
+      "labelsGap": 41.9,
       "fieldLabels": [
         "q21..25"
       ],

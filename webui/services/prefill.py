@@ -27,6 +27,14 @@ from webui.services.scan_simulation import (
     apply_scan_simulation,
     normalize_realism_preset,
 )
+from webui.services.student_fill import (
+    DEFAULT_MARKING_PROFILE,
+    MARKING_PROFILES,
+    _stable_seed,
+    draw_student_marks,
+    normalize_marking_profile,
+    parse_answers,
+)
 
 # Built-in blank template shipped with the package.
 # When running as a PyInstaller frozen bundle sys._MEIPASS is the _internal/
@@ -125,10 +133,38 @@ def _build_fast_payload(
     row: dict[str, Any],
     output_format: str = "png",
     realism_preset: str = "none",
+    marking_profile: str = "none",
+    answers: Any = None,
 ) -> dict[str, Any]:
-    """Validate + sanitise a row into a fast worker payload (no stamped_bytes)."""
+    """Validate + sanitise a row into a fast worker payload (no stamped_bytes).
+
+    Per-row ``answers`` (CSV column) override the batch-level default. The
+    row's ``marking_profile`` column overrides the batch-level profile when
+    present, otherwise the batch default is used.
+    """
     candidate_number = _clean_field(row.get("candidate_number"), max_len=10)
     _validate_candidate_number(candidate_number)
+
+    row_profile = _clean_field(row.get("marking_profile"), max_len=64) or marking_profile
+    row_profile = normalize_marking_profile(row_profile or "none")
+
+    # Per-row answers may live in either ``answers`` or ``answers_json``.
+    row_answers_raw = row.get("answers")
+    if row_answers_raw in (None, ""):
+        row_answers_raw = row.get("answers_json")
+    if row_answers_raw in (None, ""):
+        row_answers_raw = answers
+
+    # Seed random-answer generation deterministically per candidate_number +
+    # answer spec so each row is reproducible but each sheet in a batch
+    # gets a distinct pattern. Without a seed, ``random`` / ``random_with_skips``
+    # would silently produce a fresh pattern every call.
+    answer_seed = _stable_seed("prefill-answers", candidate_number, str(row_answers_raw))
+    parsed_answers = (
+        parse_answers(row_answers_raw, seed=answer_seed)
+        if row_answers_raw is not None else {}
+    )
+
     return {
         "student_name": _clean_field(row.get("student_name")),
         "school_name": _clean_field(row.get("school_name")),
@@ -136,6 +172,8 @@ def _build_fast_payload(
         "candidate_number": candidate_number,
         "output_format": output_format,
         "realism_preset": normalize_realism_preset(realism_preset),
+        "marking_profile": row_profile,
+        "answers": parsed_answers,
     }
 
 
@@ -222,6 +260,31 @@ def _simulate_scan_if_needed(
     )
 
 
+def _maybe_fill_student_marks(
+    image,
+    *,
+    candidate_number: str,
+    marking_profile: str | None,
+    answers: Any,
+):
+    """Optionally apply student-style bubble fills to ``image``.
+
+    No-op when ``marking_profile`` is ``"none"`` or ``answers`` is empty.
+    Returns the resulting image (a new instance when marks were drawn).
+    """
+    profile = (marking_profile or "none").lower()
+    if profile == "none":
+        return image
+    if not answers:
+        return image
+    return draw_student_marks(
+        image,
+        answers=answers,
+        marking_profile=profile,
+        candidate_number=candidate_number,
+    )
+
+
 def _thread_render(payload: dict) -> bytes:
     """Thread worker: renders one prefill sheet using the shared in-process template cache.
 
@@ -246,6 +309,12 @@ def _thread_render(payload: dict) -> bytes:
         # printed mark. Placement guarantees no overlap with bubbles or
         # ArUco markers (see prefill_answer_sheet_final.page_number_anchor).
         img = m.draw_page_number(img, page_number)
+    img = _maybe_fill_student_marks(
+        img,
+        candidate_number=payload['candidate_number'],
+        marking_profile=payload.get('marking_profile', 'none'),
+        answers=payload.get('answers') or {},
+    )
     img = _simulate_scan_if_needed(
         img,
         m,
@@ -368,6 +437,12 @@ def _iter_pngs_fast(payloads: list[dict], *, preserve_order: bool = True):
             fallback_page = payloads[idx].get('page_number')
             if fallback_page is not None:
                 img = m2.draw_page_number(img, fallback_page)
+            img = _maybe_fill_student_marks(
+                img,
+                candidate_number=payloads[idx]['candidate_number'],
+                marking_profile=payloads[idx].get('marking_profile', 'none'),
+                answers=payloads[idx].get('answers') or {},
+            )
             img = _simulate_scan_if_needed(
                 img,
                 m2,
@@ -395,10 +470,17 @@ def generate_single_png(
     exam_name: str,
     candidate_number: str,
     realism_preset: str = "none",
+    marking_profile: str = "none",
+    answers: Any = None,
 ) -> bytes:
     candidate_number = _clean_field(candidate_number, max_len=10)
     _validate_candidate_number(candidate_number)
     realism_preset = normalize_realism_preset(realism_preset)
+    marking_profile = normalize_marking_profile(marking_profile or "none")
+    answer_seed = _stable_seed("prefill-answers", candidate_number, str(answers))
+    parsed_answers = (
+        parse_answers(answers, seed=answer_seed) if answers is not None else {}
+    )
     m = _import_prefill_module()
     stamped_img, _ = _get_stamped_img()
     assert stamped_img is not None
@@ -408,6 +490,12 @@ def generate_single_png(
         _clean_field(school_name),
         _clean_field(exam_name),
         candidate_number,
+    )
+    image = _maybe_fill_student_marks(
+        image,
+        candidate_number=candidate_number,
+        marking_profile=marking_profile,
+        answers=parsed_answers,
     )
     image = _simulate_scan_if_needed(
         image,
@@ -426,6 +514,8 @@ def generate_single_pdf(
     exam_name: str,
     candidate_number: str,
     realism_preset: str = "none",
+    marking_profile: str = "none",
+    answers: Any = None,
 ) -> bytes:
     import fitz
     import struct
@@ -437,6 +527,8 @@ def generate_single_pdf(
         exam_name,
         candidate_number,
         realism_preset=realism_preset,
+        marking_profile=marking_profile,
+        answers=answers,
     )
     w, h = struct.unpack('>II', png_bytes[16:24])
     doc = fitz.open()
@@ -453,6 +545,8 @@ def generate_batch_pdf_to_file(
     dst_path: Path,
     realism_preset: str = "none",
     include_page_numbers: bool = False,
+    marking_profile: str = "none",
+    answers: Any = None,
 ) -> dict:
     """Stream PDF generation directly to ``dst_path``.
 
@@ -476,9 +570,16 @@ def generate_batch_pdf_to_file(
     t_batch = time.perf_counter()
 
     realism_preset = normalize_realism_preset(realism_preset)
+    marking_profile = normalize_marking_profile(marking_profile or "none")
     payloads = []
     for idx, row in enumerate(rows, start=1):
-        payload = _build_fast_payload(row, output_format="jpeg", realism_preset=realism_preset)
+        payload = _build_fast_payload(
+            row,
+            output_format="jpeg",
+            realism_preset=realism_preset,
+            marking_profile=marking_profile,
+            answers=answers,
+        )
         if include_page_numbers:
             payload["page_number"] = idx
         payloads.append(payload)
@@ -550,20 +651,227 @@ def generate_batch_pdf_to_file(
     }
 
 
+# ---------------------------------------------------------------------------
+# Grouping helpers
+# ---------------------------------------------------------------------------
+
+# Accepted ``group_by`` values for the batch endpoint. ``none`` reproduces the
+# original flat output; the others bundle rows into a ZIP-of-PDFs with one
+# file per group.
+GROUP_BY_VALUES = ("none", "school", "region", "region_school")
+DEFAULT_GROUP_BY = "none"
+
+# A control-character / path-traversal-safe pattern for group filenames.
+_GROUP_NAME_BAD_CHARS = re.compile(r"[\\/:*?\"<>|\x00-\x1f\x7f]+")
+
+
+def normalize_group_by(value: Any) -> str:
+    """Return a validated ``group_by`` value or raise :class:`ValueError`."""
+    text = (str(value) if value is not None else "").strip().lower()
+    if not text:
+        return DEFAULT_GROUP_BY
+    if text not in GROUP_BY_VALUES:
+        raise ValueError(
+            f"Unknown group_by={value!r}. Must be one of: {', '.join(GROUP_BY_VALUES)}."
+        )
+    return text
+
+
+def _safe_group_filename(name: str, *, fallback: str = "_ungrouped") -> str:
+    """Coerce a row's school/region into a safe ZIP-entry filename component."""
+    cleaned = _clean_field(name, max_len=80)
+    cleaned = _GROUP_NAME_BAD_CHARS.sub("_", cleaned).strip(" ._-")
+    if not cleaned:
+        return fallback
+    return cleaned
+
+
+def _row_group_keys(row: dict[str, Any], group_by: str) -> tuple[str, ...]:
+    """Return one or two normalised group keys for a row.
+
+    ``school`` -> (school,)
+    ``region`` -> (region,)
+    ``region_school`` -> (region, school)  # nested ZIP path
+    """
+    school = _safe_group_filename(row.get("school_name", ""), fallback="_unknown_school")
+    region = _safe_group_filename(row.get("region", ""), fallback="_unknown_region")
+    if group_by == "school":
+        return (school,)
+    if group_by == "region":
+        return (region,)
+    if group_by == "region_school":
+        return (region, school)
+    raise ValueError(f"Cannot derive group keys for group_by={group_by!r}.")
+
+
+def _group_rows(
+    rows: list[dict[str, Any]], group_by: str
+) -> dict[tuple[str, ...], list[tuple[int, dict[str, Any]]]]:
+    """Bucket ``(original_index, row)`` tuples by their group key.
+
+    Insertion order is preserved within each bucket so that page numbering
+    inside a group still follows CSV order.
+    """
+    groups: dict[tuple[str, ...], list[tuple[int, dict[str, Any]]]] = {}
+    for idx, row in enumerate(rows):
+        key = _row_group_keys(row, group_by)
+        groups.setdefault(key, []).append((idx, row))
+    return groups
+
+
+def _group_zip_entry_name(key: tuple[str, ...]) -> str:
+    """Translate a group key tuple into the ZIP entry path (always .pdf)."""
+    parts = list(key)
+    parts[-1] = f"{parts[-1]}.pdf"
+    return "/".join(parts)
+
+
+def generate_batch_grouped_zip_to_file(
+    rows: list[dict[str, Any]],
+    dst_path: Path,
+    *,
+    group_by: str,
+    realism_preset: str = "none",
+    include_page_numbers: bool = False,
+    marking_profile: str = "none",
+    answers: Any = None,
+) -> dict:
+    """Write a ZIP of one PDF per group to ``dst_path``.
+
+    ``group_by`` must be one of ``"school"``, ``"region"``, ``"region_school"``.
+    Page numbering, when requested, resets to 1 within each group so each
+    group's PDF reads as a self-contained document.
+
+    Returns ``{count, successes, errors, elapsed_s, size_bytes, groups}``
+    where ``groups`` is a list of ``{name, count, successes}`` summaries.
+    """
+    group_by = normalize_group_by(group_by)
+    if group_by == "none":
+        raise ValueError(
+            "generate_batch_grouped_zip_to_file requires a non-'none' group_by."
+        )
+
+    count = len(rows)
+    logger.info(
+        "Prefill grouped ZIP started | count=%d | group_by=%s | page_numbers=%s",
+        count,
+        group_by,
+        include_page_numbers,
+    )
+    t_batch = time.perf_counter()
+
+    grouped = _group_rows(rows, group_by)
+    logger.info(
+        "Prefill grouped ZIP groups | count=%d | groups=%d",
+        count,
+        len(grouped),
+    )
+
+    dst_path.parent.mkdir(parents=True, exist_ok=True)
+    total_successes = 0
+    errors: list[str] = []
+    group_summaries: list[dict[str, Any]] = []
+
+    with zipfile.ZipFile(
+        dst_path, mode="w", compression=zipfile.ZIP_DEFLATED, compresslevel=1
+    ) as zf:
+        for key, indexed_rows in grouped.items():
+            entry_name = _group_zip_entry_name(key)
+            group_rows = [row for _, row in indexed_rows]
+            with tempfile.NamedTemporaryFile(
+                prefix="prefill_group_", suffix=".pdf", delete=False
+            ) as tmp:
+                tmp_path = Path(tmp.name)
+            try:
+                meta = generate_batch_pdf_to_file(
+                    group_rows,
+                    tmp_path,
+                    realism_preset=realism_preset,
+                    include_page_numbers=include_page_numbers,
+                    marking_profile=marking_profile,
+                    answers=answers,
+                )
+                if meta["successes"] > 0:
+                    zf.writestr(entry_name, tmp_path.read_bytes())
+                    total_successes += meta["successes"]
+                else:
+                    errors.append(f"group {entry_name!r}: all rows failed")
+                group_summaries.append(
+                    {
+                        "name": entry_name,
+                        "count": meta["count"],
+                        "successes": meta["successes"],
+                        "errors": meta["errors"],
+                    }
+                )
+                if meta.get("errors"):
+                    errors.extend(
+                        f"group {entry_name!r}: {e}" for e in meta["errors"]
+                    )
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"group {entry_name!r}: {type(exc).__name__}: {exc}")
+                group_summaries.append(
+                    {
+                        "name": entry_name,
+                        "count": len(group_rows),
+                        "successes": 0,
+                        "errors": [f"{type(exc).__name__}: {exc}"],
+                    }
+                )
+            finally:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    elapsed = time.perf_counter() - t_batch
+    size_bytes = dst_path.stat().st_size if dst_path.exists() else 0
+    rate = (total_successes / elapsed) * 60 if elapsed > 0 else 0
+    logger.info(
+        "Prefill grouped ZIP complete | count=%d | groups=%d | ok=%d | err=%d | "
+        "elapsed=%.1fs | rate=%.0f/min | size_mb=%.1f",
+        count,
+        len(grouped),
+        total_successes,
+        len(errors),
+        elapsed,
+        rate,
+        size_bytes / (1024 * 1024),
+    )
+    return {
+        "count": count,
+        "successes": total_successes,
+        "errors": errors[:50],
+        "elapsed_s": round(elapsed, 2),
+        "size_bytes": size_bytes,
+        "groups": group_summaries,
+    }
+
+
 def generate_batch_zip_to_file(
     rows: list[dict[str, Any]],
     dst_path: Path,
     realism_preset: str = "none",
+    marking_profile: str = "none",
+    answers: Any = None,
 ) -> dict:
     """Stream ZIP generation directly to ``dst_path``. Bounded memory."""
     count = len(rows)
     logger.info("Prefill batch ZIP started | count=%d", count)
     t_batch = time.perf_counter()
 
+    marking_profile = normalize_marking_profile(marking_profile or "none")
     payloads: list[dict] = []
     filenames: list[str] = []
     for i, row in enumerate(rows, start=1):
-        payloads.append(_build_fast_payload(row, realism_preset=realism_preset))
+        payloads.append(
+            _build_fast_payload(
+                row,
+                realism_preset=realism_preset,
+                marking_profile=marking_profile,
+                answers=answers,
+            )
+        )
         filename = Path(_clean_field(row.get("output_file", "")) or "").name \
             or f"sheet_{i:03d}.png"
         if not filename.lower().endswith(".png"):
@@ -610,6 +918,8 @@ def generate_batch_pdf(
     rows: list[dict[str, Any]],
     realism_preset: str = "none",
     include_page_numbers: bool = False,
+    marking_profile: str = "none",
+    answers: Any = None,
 ) -> bytes:
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
         tmp_path = Path(tmp.name)
@@ -619,6 +929,8 @@ def generate_batch_pdf(
             tmp_path,
             realism_preset=realism_preset,
             include_page_numbers=include_page_numbers,
+            marking_profile=marking_profile,
+            answers=answers,
         )
         return tmp_path.read_bytes()
     finally:
@@ -628,11 +940,22 @@ def generate_batch_pdf(
             pass
 
 
-def generate_batch_zip(rows: list[dict[str, Any]], realism_preset: str = "none") -> bytes:
+def generate_batch_zip(
+    rows: list[dict[str, Any]],
+    realism_preset: str = "none",
+    marking_profile: str = "none",
+    answers: Any = None,
+) -> bytes:
     with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
         tmp_path = Path(tmp.name)
     try:
-        generate_batch_zip_to_file(rows, tmp_path, realism_preset=realism_preset)
+        generate_batch_zip_to_file(
+            rows,
+            tmp_path,
+            realism_preset=realism_preset,
+            marking_profile=marking_profile,
+            answers=answers,
+        )
         return tmp_path.read_bytes()
     finally:
         try:

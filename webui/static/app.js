@@ -7,14 +7,44 @@ const showFeedback = (element, message, kind = "info") => {
     if (kind === "success") element.classList.add("success")
 }
 
+// Audit fix UI-1 (XSS): minimal HTML escaper, shared across pages by hanging
+// it off ``window`` so prefill.js / batch.js / generate_csv.js can reuse it
+// when interpolating user-supplied strings into innerHTML. Without this,
+// a CSV header containing ``<img src=x onerror="..."``> executes JS on
+// preview.
+function escapeHtml(text) {
+    if (text === null || text === undefined) return ""
+    return String(text)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;")
+}
+window.escapeHtml = escapeHtml
+
+// Audit fix UI-2: safely parse a Response body that *might* be JSON.
+// A reverse proxy returning a 502 HTML page would crash JSON.parse with a
+// SyntaxError, surfacing as an unhandled promise rejection. Now any
+// non-JSON body is treated as ``{}``.
+async function safeJsonResponse(response) {
+    const text = await response.text()
+    if (!text) return {}
+    try {
+        return JSON.parse(text)
+    } catch (_e) {
+        return { detail: text.slice(0, 256) }
+    }
+}
+window.safeJsonResponse = safeJsonResponse
+
 const postJson = async (url, body) => {
     const response = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
     })
-    const text = await response.text()
-    const data = text ? JSON.parse(text) : {}
+    const data = await safeJsonResponse(response)
     if (!response.ok) {
         const detail = data.detail || `Request failed (${response.status})`
         throw new Error(detail)
@@ -153,21 +183,53 @@ document.addEventListener("DOMContentLoaded", () => {
     // Poll for new log entries every second.
     // Plain HTTP GET works reliably in all browsers and in WebView2, unlike
     // SSE streaming responses which can be silently buffered by WebView2.
+    //
+    // Audit fix UI-4: previously this setInterval ran forever, even when
+    // the tab was hidden — a tab left open overnight made ~86 400 requests
+    // and kept CPU/network busy. Now we pause polling when the tab is
+    // hidden and resume on focus.
     let _logSeq = -1
+    let _logPollTimer = null
+    let _logPollInflight = null
 
     const pollLogs = async () => {
-        try {
-            const res = await fetch(`/api/v1/logs/poll?since=${_logSeq}`)
-            if (res.ok) {
-                const data = await res.json()
-                for (const entry of data.entries) appendLine(entry.msg)
-                if (data.latest_seq > _logSeq) _logSeq = data.latest_seq
-            }
-        } catch (_) { /* server not ready yet — retry next tick */ }
+        if (_logPollInflight) return
+        _logPollInflight = (async () => {
+            try {
+                const res = await fetch(`/api/v1/logs/poll?since=${_logSeq}`)
+                if (res.ok) {
+                    const data = await res.json().catch(() => null)
+                    if (data && Array.isArray(data.entries)) {
+                        for (const entry of data.entries) appendLine(entry.msg)
+                        if (data.latest_seq > _logSeq) _logSeq = data.latest_seq
+                    }
+                }
+            } catch (_) { /* server not ready yet — retry next tick */ }
+        })()
+        try { await _logPollInflight } finally { _logPollInflight = null }
+    }
+
+    const startPolling = () => {
+        if (_logPollTimer !== null) return
+        _logPollTimer = setInterval(pollLogs, 1000)
+    }
+    const stopPolling = () => {
+        if (_logPollTimer === null) return
+        clearInterval(_logPollTimer)
+        _logPollTimer = null
     }
 
     pollLogs()                          // immediate first poll (gets all history)
-    setInterval(pollLogs, 1000)         // then every 1 s
+    startPolling()
+
+    document.addEventListener("visibilitychange", () => {
+        if (document.hidden) {
+            stopPolling()
+        } else {
+            pollLogs()
+            startPolling()
+        }
+    })
 
     // Start collapsed but visible
     document.body.classList.add("log-panel-collapsed")

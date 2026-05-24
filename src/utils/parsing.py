@@ -101,7 +101,14 @@ def parse_field_string(field_string):
 
 
 def custom_sort_output_columns(field_label):
-    label_prefix, label_suffix = re.findall(FIELD_LABEL_NUMBER_REGEX, field_label)[0]
+    # Audit fix CORE-14: previously this raised IndexError on field labels
+    # that did not match FIELD_LABEL_NUMBER_REGEX (e.g. ``ROLL_NO``,
+    # ``section-a``), aborting template construction with a confusing
+    # traceback. Fall back to sorting the raw label when no match is found.
+    matches = re.findall(FIELD_LABEL_NUMBER_REGEX, field_label)
+    if not matches:
+        return [field_label, 0]
+    label_prefix, label_suffix = matches[0]
     return [label_prefix, int(label_suffix) if len(label_suffix) > 0 else 0]
 
 

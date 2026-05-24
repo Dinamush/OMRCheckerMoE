@@ -888,10 +888,13 @@ class CropOnMarkers(ImagePreprocessor):
             return self._apply_aruco_filter(image, file_path)
         config = self.tuning_config
         image_instance_ops = self.image_instance_ops
-        image_eroded_sub = ImageUtils.normalize_util(
-            image
-            if self.apply_erode_subtract
-            else (
+        # Fix for audit finding CORE-4: the conditional was inverted —
+        # ``apply_erode_subtract=True`` was returning the *raw* image, even
+        # though ``load_marker`` always erode-subtracts the marker template
+        # when this flag is set. The two halves of cv2.matchTemplate then
+        # operated on mismatched representations, degrading scores.
+        if self.apply_erode_subtract:
+            image_eroded_sub = ImageUtils.normalize_util(
                 image
                 - cv2.erode(
                     image,
@@ -899,7 +902,8 @@ class CropOnMarkers(ImagePreprocessor):
                     iterations=EROSION_PARAMS["iterations"],
                 )
             )
-        )
+        else:
+            image_eroded_sub = ImageUtils.normalize_util(image)
         # Build per-corner search windows. Prefer explicit ``markerCorners``
         # when provided; otherwise fall back to the classical 50/50 quadrant
         # split.
@@ -1156,6 +1160,24 @@ class CropOnMarkers(ImagePreprocessor):
                     "\nError: could not compute homography from detected markers.",
                 )
                 return None
+            # Audit fix CORE-10: the ArUco path already validates each
+            # homography with _homography_is_sane (line ~822); the
+            # template-matching preserve_full_image path skipped that check
+            # and silently warped the image with degenerate (near-collinear
+            # marker) homographies. Apply the same guard here.
+            expected_aspect = (
+                self.tuning_config.dimensions.processing_width
+                / max(1.0, float(self.tuning_config.dimensions.processing_height))
+            )
+            ok, reason = _homography_is_sane(
+                homography, image.shape[:2], expected_aspect
+            )
+            if not ok:
+                logger.error(
+                    file_path,
+                    f"\nError: marker-derived homography failed sanity check: {reason}.",
+                )
+                return None
             image = gpu_warp_perspective(
                 image,
                 homography,
@@ -1199,11 +1221,18 @@ class CropOnMarkers(ImagePreprocessor):
         if self.marker_type == "aruco":
             return None
         if not os.path.exists(self.marker_path):
+            # Audit fix CORE-5: previously called exit(31), which terminates
+            # the entire worker process bypassing every finally/atexit
+            # handler. Inside the web pipeline that orphaned the future and
+            # could deadlock the orchestrator. Raise a typed error instead
+            # so the worker can report the failure and the pool can recover.
             logger.error(
-                "Marker not found at path provided in template:",
+                "Marker not found at path provided in template: %s",
                 self.marker_path,
             )
-            exit(31)
+            raise FileNotFoundError(
+                f"Marker image not found: {self.marker_path}"
+            )
 
         marker = cv2.imread(self.marker_path, cv2.IMREAD_GRAYSCALE)
 
@@ -1276,7 +1305,11 @@ class CropOnMarkers(ImagePreprocessor):
             logger.warning(
                 "\tTemplate matching too low! Consider rechecking preProcessors applied before this."
             )
-            if config.outputs.show_image_level >= 1:
+            # Audit fix CORE-11: if every rescaled marker is larger than
+            # the input image the for-loop above never assigns res, so
+            # cv2.imshow(None) inside InteractionUtils.show would raise
+            # ``cv2.error: Image is empty``. Guard against it.
+            if config.outputs.show_image_level >= 1 and res is not None:
                 InteractionUtils.show("res", res, 1, 0, config=config)
 
         if best_scale is None:

@@ -20,6 +20,13 @@
     // Feedback helpers
     // ────────────────────────────────────────────────────────────────────────
 
+    // Audit fix UI-8: previously the success feedback never auto-cleared,
+    // so a stale "Settings saved" banner stayed up while the operator made
+    // *new* edits, falsely implying those edits had also been persisted.
+    // Track the auto-hide timer so a fresh feedback call cancels the
+    // pending hide.
+    let _feedbackHideTimer = null
+
     const showFeedback = (message, kind = "info") => {
         if (!feedback) return
         feedback.hidden = false
@@ -27,6 +34,16 @@
         feedback.classList.remove("error", "success")
         if (kind === "error") feedback.classList.add("error")
         if (kind === "success") feedback.classList.add("success")
+        if (_feedbackHideTimer) {
+            clearTimeout(_feedbackHideTimer)
+            _feedbackHideTimer = null
+        }
+        if (kind === "success") {
+            _feedbackHideTimer = setTimeout(() => {
+                clearFeedback()
+                _feedbackHideTimer = null
+            }, 5000)
+        }
     }
 
     const clearFeedback = () => {
@@ -34,6 +51,10 @@
         feedback.hidden = true
         feedback.textContent = ""
         feedback.classList.remove("error", "success")
+        if (_feedbackHideTimer) {
+            clearTimeout(_feedbackHideTimer)
+            _feedbackHideTimer = null
+        }
     }
 
     // ────────────────────────────────────────────────────────────────────────

@@ -87,9 +87,16 @@ def _auto_orient_to_template(file_path, in_omr, template, tuning_config):
     target_height = float(tuning_config.dimensions.processing_height)
     target_aspect = target_width / max(1.0, target_height)
     source_aspect = width / max(1.0, float(height))
-    if _aspect_matches(source_aspect, target_aspect):
-        return in_omr
-    if not _aspect_matches(1.0 / source_aspect, target_aspect):
+    # If the source aspect already matches the target, the sheet might still
+    # be upside-down (180 degree). Previously the aspect-match early-return
+    # at this point meant 180-degree flips fed by sheet-fed duplex scanners
+    # silently misgraded the whole batch (audit finding CORE-9 / OMR-1).
+    aspect_already_matches = _aspect_matches(source_aspect, target_aspect)
+    needs_90 = (
+        not aspect_already_matches
+        and _aspect_matches(1.0 / source_aspect, target_aspect)
+    )
+    if not aspect_already_matches and not needs_90:
         return in_omr
 
     aruco_processor = next(
@@ -108,34 +115,65 @@ def _auto_orient_to_template(file_path, in_omr, template, tuning_config):
     if not detected:
         return in_omr
 
-    scores = {
-        "cw": _rotation_score_for_markers(
+    # Build score table for all viable rotations:
+    #   - "none" only when aspect already matches (covers a sheet that is
+    #     already correctly oriented OR is 180-degree flipped)
+    #   - "180" only when aspect already matches (covers the 180 case
+    #     which preserves aspect)
+    #   - "cw" / "ccw" only when a 90-degree rotation would reach the
+    #     target aspect.
+    scores: dict[str, float] = {}
+    if aspect_already_matches:
+        scores["none"] = _rotation_score_for_markers(
+            detected,
+            aruco_processor.aruco_corner_ids,
+            width,
+            height,
+            "none",
+        )
+        scores["180"] = _rotation_score_for_markers(
+            detected, aruco_processor.aruco_corner_ids, width, height, "180"
+        )
+    if needs_90:
+        scores["cw"] = _rotation_score_for_markers(
             detected, aruco_processor.aruco_corner_ids, width, height, "cw"
-        ),
-        "ccw": _rotation_score_for_markers(
+        )
+        scores["ccw"] = _rotation_score_for_markers(
             detected, aruco_processor.aruco_corner_ids, width, height, "ccw"
-        ),
-    }
+        )
+
+    if not scores:
+        return in_omr
+
     rotation, score = min(scores.items(), key=lambda item: item[1])
     other_score = max(scores.values())
-    if score > 0.30 or other_score - score < 0.15:
+    # Confidence gate: best must be clearly better than runner-up.
+    if score > 0.30 or (len(scores) > 1 and other_score - score < 0.15):
         logger.warning(
             file_path,
             "\nAuto-orient skipped: marker IDs did not give a confident "
-            f"90-degree rotation ({rotation} score={score:.3f}).",
+            f"rotation ({rotation} score={score:.3f}).",
         )
         return in_omr
 
-    rotate_code = (
-        cv2.ROTATE_90_CLOCKWISE
-        if rotation == "cw"
-        else cv2.ROTATE_90_COUNTERCLOCKWISE
-    )
+    if rotation == "none":
+        return in_omr
+
+    rotate_code_map = {
+        "cw": cv2.ROTATE_90_CLOCKWISE,
+        "ccw": cv2.ROTATE_90_COUNTERCLOCKWISE,
+        "180": cv2.ROTATE_180,
+    }
+    rotate_label = {
+        "cw": "90 degrees clockwise",
+        "ccw": "90 degrees counter-clockwise",
+        "180": "180 degrees",
+    }
+    rotate_code = rotate_code_map[rotation]
     logger.info(
         file_path,
-        "\nAuto-orient: rotating scan "
-        f"{'90 degrees clockwise' if rotation == 'cw' else '90 degrees counter-clockwise'} "
-        "to match the template aspect before resizing.",
+        f"\nAuto-orient: rotating scan {rotate_label[rotation]} "
+        "to match the template orientation.",
     )
     return cv2.rotate(in_omr, rotate_code)
 
@@ -171,12 +209,16 @@ def select_question_response(
 class ImageInstanceOps:
     """Class to hold fine-tuned utilities for a group of images. One instance for each processing directory."""
 
-    save_img_list: Any = defaultdict(list)
-
     def __init__(self, tuning_config):
         super().__init__()
         self.tuning_config = tuning_config
         self.save_image_level = tuning_config.outputs.save_image_level
+        # Instance-level image stack: previously a class-level defaultdict, which
+        # caused every ImageInstanceOps to share the same dict, leaking memory
+        # across batches and cross-contaminating debug image stacks when
+        # different templates are processed by the same worker (see audit
+        # finding CORE-1).
+        self.save_img_list: Any = defaultdict(list)
 
     def apply_preprocessors(self, file_path, in_omr, template):
         tuning_config = self.tuning_config
@@ -369,24 +411,42 @@ class ImageInstanceOps:
             # cv2.mean() call that copies a sub-array on every iteration.
             # cv2.integral() returns float64, shape (H+1, W+1).
             _ii = cv2.integral(img)
+            _ii_h, _ii_w = _ii.shape[:2]  # (H+1, W+1)
 
             all_q_vals, all_q_strip_arrs, all_q_std_vals = [], [], []
             total_q_strip_no = 0
             for field_block in template.field_blocks:
                 box_w, box_h = field_block.bubble_dimensions
-                _area_inv = 1.0 / (box_w * box_h)
                 q_std_vals = []
                 for field_block_bubbles in field_block.traverse_bubbles:
                     q_strip_vals = []
                     for pt in field_block_bubbles:
                         # shifted
                         x, y = (pt.x + field_block.shift, pt.y)
+                        # Clamp into the integral image bounds. Previously a
+                        # negative auto-align shift could push x or y
+                        # negative, which in NumPy wraps around to the far
+                        # side of the integral image and silently returned a
+                        # completely wrong bubble intensity. Out-of-range
+                        # high values caused an IndexError mid-batch.
+                        # (audit finding CORE-3)
+                        x1 = int(max(0, min(x, _ii_w - 1)))
+                        y1 = int(max(0, min(y, _ii_h - 1)))
+                        x2 = int(max(0, min(x + box_w, _ii_w - 1)))
+                        y2 = int(max(0, min(y + box_h, _ii_h - 1)))
+                        if x2 <= x1 or y2 <= y1:
+                            # Clamped to zero area; fall back to a safe
+                            # "fully white" reading so this question is
+                            # later detected as no-mark rather than silently
+                            # scored.
+                            q_strip_vals.append(255.0)
+                            continue
                         # Summed-area table: mean = (I[y2,x2]-I[y1,x2]-I[y2,x1]+I[y1,x1]) / area
                         q_strip_vals.append(float(
-                            (_ii[y + box_h, x + box_w]
-                             - _ii[y,        x + box_w]
-                             - _ii[y + box_h, x       ]
-                             + _ii[y,         x       ]) * _area_inv
+                            (_ii[y2, x2]
+                             - _ii[y1, x2]
+                             - _ii[y2, x1]
+                             + _ii[y1, x1]) / max(1, (x2 - x1) * (y2 - y1))
                         ))
                     q_std_vals.append(round(np.std(q_strip_vals), 2))
                     all_q_strip_arrs.append(q_strip_vals)
@@ -550,8 +610,15 @@ class ImageInstanceOps:
                     total_q_strip_no += 1
                 # /for field_block
 
-            per_omr_threshold_avg /= total_q_strip_no
-            per_omr_threshold_avg = round(per_omr_threshold_avg, 2)
+            # Guard against templates that produce zero question strips
+            # (empty field_blocks or all blocks with no traverse_bubbles).
+            # Previously this raised ZeroDivisionError mid-processing
+            # (audit finding CORE-2).
+            if total_q_strip_no > 0:
+                per_omr_threshold_avg /= total_q_strip_no
+                per_omr_threshold_avg = round(per_omr_threshold_avg, 2)
+            else:
+                per_omr_threshold_avg = 0.0
             # Translucent
             cv2.addWeighted(
                 final_marked, alpha, transp_layer, 1 - alpha, 0, final_marked

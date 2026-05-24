@@ -126,6 +126,19 @@ const singleForm = document.getElementById('single-form');
 const singleSubmit = document.getElementById('single-submit');
 const singleError = document.getElementById('single-error');
 
+// ── Student-fill shortcut handler ────────────────────────────────────
+// When the "Quick answer key" select changes to something other than the
+// "custom" entry, mirror its value into the free-form `answers` input so
+// the operator sees what's being sent and can tweak it before submit.
+const singleAnswersShortcut = document.getElementById('single-answers-shortcut');
+const singleAnswersInput = document.getElementById('single-answers');
+if (singleAnswersShortcut && singleAnswersInput) {
+    singleAnswersShortcut.addEventListener('change', () => {
+        const v = singleAnswersShortcut.value;
+        if (v) singleAnswersInput.value = v;
+    });
+}
+
 singleForm.addEventListener('submit', async e => {
     e.preventDefault();
     showError(singleError, '');
@@ -136,6 +149,11 @@ singleForm.addEventListener('submit', async e => {
     const candidateNo = singleForm.querySelector('[name=candidate_number]').value.trim();
     const outputFmt   = singleForm.querySelector('[name=output_format]:checked').value;
     const realismPreset = singleForm.querySelector('[name=realism_preset]').value;
+    const markingProfileEl = document.getElementById('single-marking-profile');
+    const markingProfile = markingProfileEl ? markingProfileEl.value : 'none';
+    const answersText = (singleAnswersInput && singleAnswersInput.value.trim()) || '';
+    const answersJsonEl = document.getElementById('single-answers-json');
+    const answersJson = (answersJsonEl && answersJsonEl.value.trim()) || '';
 
     if (!studentName || !schoolName || !examName || !candidateNo) {
         showError(singleError, 'All fields are required.');
@@ -148,6 +166,15 @@ singleForm.addEventListener('submit', async e => {
     }
     singleForm.querySelector('[name=candidate_number]').classList.remove('invalid');
 
+    // Allow the user to fill out answers without picking a marking profile —
+    // if marking_profile is 'none' but answers are provided, default to
+    // medium_pencil so the answers actually appear on the sheet. Saves users
+    // from a confusing "I filled in answers but the sheet is blank" gotcha.
+    let effectiveProfile = markingProfile;
+    if ((answersText || answersJson) && effectiveProfile === 'none') {
+        effectiveProfile = 'medium_pencil';
+    }
+
     const fd = new FormData();
     fd.append('student_name', studentName);
     fd.append('school_name', schoolName);
@@ -155,6 +182,13 @@ singleForm.addEventListener('submit', async e => {
     fd.append('candidate_number', candidateNo);
     fd.append('output_format', outputFmt);
     fd.append('realism_preset', realismPreset);
+    fd.append('marking_profile', effectiveProfile);
+    // JSON map wins over the plain string when both are present.
+    if (answersJson) {
+        fd.append('answers', answersJson);
+    } else if (answersText) {
+        fd.append('answers', answersText);
+    }
 
     const singleLastDownload = document.getElementById('single-last-download');
     await postFormAndDownload('/api/v1/prefill/single', fd, singleSubmit, singleError, singleLastDownload);
@@ -338,9 +372,16 @@ csvUpload.addEventListener('change', () => {
     reader.onload = e => {
         uploadedCsvText = e.target.result;
         const { headers, rows } = parseCsv(uploadedCsvText);
-        csvPreviewHead.innerHTML = headers.map(h => `<th>${h}</th>`).join('');
+        // Audit fix UI-1 (XSS): every CSV header / cell value is escaped
+        // before being interpolated into innerHTML. ``window.escapeHtml``
+        // is defined in app.js; the inline fallback below keeps prefill.js
+        // working even if app.js loads after this script.
+        const esc = window.escapeHtml || (s => String(s == null ? '' : s)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'));
+        csvPreviewHead.innerHTML = headers.map(h => `<th>${esc(h)}</th>`).join('');
         csvPreviewBody.innerHTML = rows.slice(0, 10).map(row =>
-            `<tr>${headers.map(h => `<td>${row[h] || ''}</td>`).join('')}</tr>`
+            `<tr>${headers.map(h => `<td>${esc(row[h] || '')}</td>`).join('')}</tr>`
         ).join('');
         csvPreviewCount.textContent = `${rows.length} row(s) parsed${rows.length > 10 ? ' (showing first 10)' : ''}.`;
         csvPreview.style.display = '';
@@ -353,24 +394,52 @@ csvUpload.addEventListener('change', () => {
 const batchSubmit = document.getElementById('batch-submit');
 const batchError  = document.getElementById('batch-error');
 const batchOutputMode = document.getElementById('batch-output-mode');
+const batchOutputModeHint = document.getElementById('batch-output-mode-hint');
+const batchGroupBy = document.getElementById('batch-group-by');
 const batchRealismPreset = document.getElementById('batch-realism-preset');
 const batchIncludePageNumbers = document.getElementById('batch-include-page-numbers');
 const batchPageNumbersHint = document.getElementById('batch-page-numbers-hint');
 
+const isGroupingActive = () => batchGroupBy && batchGroupBy.value && batchGroupBy.value !== 'none';
+
 const syncPageNumbersAvailability = () => {
     if (!batchIncludePageNumbers) return;
-    const isPdf = batchOutputMode.value === 'pdf';
-    batchIncludePageNumbers.disabled = !isPdf;
-    if (!isPdf) batchIncludePageNumbers.checked = false;
+    // Page numbers apply to any PDF output: a combined PDF, OR each PDF
+    // inside a grouped ZIP. Only disable when output is a flat ZIP of
+    // individual PNGs (i.e. output_mode=zip AND no grouping).
+    const isPdfOutput = batchOutputMode.value === 'pdf' || isGroupingActive();
+    batchIncludePageNumbers.disabled = !isPdfOutput;
+    if (!isPdfOutput) batchIncludePageNumbers.checked = false;
     if (batchPageNumbersHint) {
-        batchPageNumbersHint.classList.toggle('muted', isPdf);
-        batchPageNumbersHint.style.opacity = isPdf ? '' : '0.55';
+        batchPageNumbersHint.classList.toggle('muted', isPdfOutput);
+        batchPageNumbersHint.style.opacity = isPdfOutput ? '' : '0.55';
+    }
+};
+
+const syncOutputModeHint = () => {
+    if (!batchOutputMode) return;
+    if (isGroupingActive()) {
+        batchOutputMode.disabled = true;
+        if (batchOutputModeHint) batchOutputModeHint.style.display = '';
+    } else {
+        batchOutputMode.disabled = false;
+        // Hide the hint entirely when grouping is off — it's only meaningful
+        // when grouping is on (it explains that grouping overrides this select).
+        if (batchOutputModeHint) batchOutputModeHint.style.display = 'none';
     }
 };
 
 if (batchOutputMode) {
     batchOutputMode.addEventListener('change', syncPageNumbersAvailability);
     syncPageNumbersAvailability();
+    syncOutputModeHint();
+}
+
+if (batchGroupBy) {
+    batchGroupBy.addEventListener('change', () => {
+        syncOutputModeHint();
+        syncPageNumbersAvailability();
+    });
 }
 
 batchSubmit.addEventListener('click', async () => {
@@ -379,8 +448,30 @@ batchSubmit.addEventListener('click', async () => {
     const fd = new FormData();
     fd.append('output_mode', batchOutputMode.value);
     fd.append('realism_preset', batchRealismPreset.value);
-    if (batchIncludePageNumbers && batchIncludePageNumbers.checked && batchOutputMode.value === 'pdf') {
+    if (batchGroupBy && batchGroupBy.value && batchGroupBy.value !== 'none') {
+        fd.append('group_by', batchGroupBy.value);
+    }
+    // Page numbers apply to a flat combined PDF AND to every PDF inside a
+    // grouped ZIP; they only fail to apply when the output is a flat ZIP
+    // of individual PNGs (output_mode=zip with no grouping).
+    const grouping = batchGroupBy && batchGroupBy.value && batchGroupBy.value !== 'none';
+    const pageNumbersUseful =
+        batchOutputMode.value === 'pdf' || grouping;
+    if (batchIncludePageNumbers && batchIncludePageNumbers.checked && pageNumbersUseful) {
         fd.append('include_page_numbers', 'true');
+    }
+    const batchMarkingProfileEl = document.getElementById('batch-marking-profile');
+    const batchAnswersDefaultEl = document.getElementById('batch-answers-default');
+    let batchMarkingProfile = batchMarkingProfileEl ? batchMarkingProfileEl.value : 'none';
+    const batchAnswersDefault = batchAnswersDefaultEl ? batchAnswersDefaultEl.value.trim() : '';
+    // Same UX rule as Single: if user typed an answer default but left
+    // the profile at 'none', auto-upgrade so they see the marks.
+    if (batchAnswersDefault && batchMarkingProfile === 'none') {
+        batchMarkingProfile = 'medium_pencil';
+    }
+    fd.append('marking_profile', batchMarkingProfile);
+    if (batchAnswersDefault) {
+        fd.append('answers', batchAnswersDefault);
     }
 
     if (activeSubtab === 'manual') {

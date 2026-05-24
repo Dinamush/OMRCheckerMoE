@@ -620,6 +620,11 @@ def check_and_move(error_code, file_path, filepath2):
     source image must remain in place. Copying gives operators a reviewable
     artifact without breaking later cleanup or retry flows.
     """
+    # Audit fix CORE-15: previously this function returned True on every
+    # path, including when the source file was missing or shutil.copy2
+    # raised. Callers wrote a CSV row pointing to a non-existent file in
+    # Manual/Errors/Manual/MultiMarked. Now return False on failure so
+    # callers can skip the CSV entry.
     try:
         source = Path(file_path)
         target = Path(filepath2)
@@ -630,7 +635,7 @@ def check_and_move(error_code, file_path, filepath2):
                 error_code,
                 source,
             )
-            return True
+            return False
         target.parent.mkdir(parents=True, exist_ok=True)
         if source.resolve() != target.resolve():
             shutil.copy2(source, target)
@@ -644,7 +649,7 @@ def check_and_move(error_code, file_path, filepath2):
             type(exc).__name__,
             exc,
         )
-        return True
+        return False
 
 
 def print_stats(start_time, files_counter, tuning_config):
