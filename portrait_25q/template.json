@@ -1,11 +1,11 @@
 {
   "pageDimensions": [
     515,
-    728
+    666
   ],
   "bubbleDimensions": [
-    10,
-    10
+    13,
+    13
   ],
   "customLabels": {
     "CandidateNumber": [
@@ -20,10 +20,14 @@
     "CandidateNumber": {
       "origin": [
         133,
-        210
+        237
+      ],
+      "bubbleDimensions": [
+        10,
+        10
       ],
       "bubblesGap": 25.0,
-      "labelsGap": 14.5,
+      "labelsGap": 13.5,
       "fieldLabels": [
         "cand1..10"
       ],
@@ -32,10 +36,10 @@
     "q01_q13_block": {
       "origin": [
         85,
-        400
+        395
       ],
-      "bubblesGap": 22.0,
-      "labelsGap": 22.0,
+      "bubblesGap": 24.0,
+      "labelsGap": 17.5,
       "fieldLabels": [
         "q1..13"
       ],
@@ -45,10 +49,10 @@
     "q14_q25_block": {
       "origin": [
         305,
-        400
+        395
       ],
-      "bubblesGap": 22.0,
-      "labelsGap": 22.0,
+      "bubblesGap": 24.0,
+      "labelsGap": 17.5,
       "fieldLabels": [
         "q14..25"
       ],
@@ -65,10 +69,10 @@
         "arucoCornerIds": [0, 1, 2, 3],
         "preserveFullImage": true,
         "referenceMarkerCenters": [
-          [14, 14],
-          [501, 14],
-          [14, 714],
-          [501, 714]
+          [40, 40],
+          [475, 40],
+          [40, 626],
+          [475, 626]
         ]
       }
     }
