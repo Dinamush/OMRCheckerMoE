@@ -148,10 +148,12 @@ ANS_BLOCK_LEFT_ORIGIN = (85, 395)
 ANS_BLOCK_RIGHT_ORIGIN = (305, 395)
 ANS_BUBBLE_DIAM = 13           # 5.5 mm
 ANS_BUBBLES_GAP_X = 24.0       # 10.0 mm centre-to-centre
-ANS_LABELS_GAP_Y = 17.5        # 7.4 mm row pitch — compressed to fit between
+ANS_LABELS_GAP_Y = 17.0        # 7.1 mm row pitch — compressed to fit between
                                # the new bottom-marker quiet zone (y ≤ 606)
                                # and the answer-header at y=380.
-                               # 12 gaps × 17.5 = 210 → grid bottom y = 605.
+                               # 12 gaps × 17.0 = 204; q13 centre y = 599
+                               # and bubble bottom y = 605.5, preserving the
+                               # 5 px internal quiet zone above marker top y=611.
 
 # Outline stroke — 3 print-px ≈ 0.38 mm. Inside the safe band: thin
 # enough that no OMR engine reads the outline as a fill (Addmen warning),

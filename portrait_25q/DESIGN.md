@@ -186,7 +186,7 @@ graded marks — grow to 5.5 mm.
 | Candidate bubble Ø (OMR space) | **10 × 10 px** | **≈ 4.2 mm @ 200 DPI** | Density-constrained — the 10×10 grid cannot fit at 5.5 mm without spilling into the bottom ArUco quiet zone. Still above Scantron ScanFlex's 2.5 mm machine floor and matches OMRChecker upstream's `[10, 10]` default. |
 | Bubble outline stroke | 3 print-px | **≈ 0.38 mm** | Safe band per [Addmen "don't bold the outline"](https://www.addmengroup.com/omr-design/omr-bubble-size.htm) anti-pattern and [Jukebox 0.25 pt print-engine floor](https://support.jukeboxprint.com/en/articles/3190067-what-is-the-smallest-font-size-i-should-use): thin enough that no engine reads the outline as a fill, thick enough to survive 200 DPI scanner downsampling. |
 | `bubblesGap` answer (A/B/C/D) | **24 px** | **≈ 10.0 mm centre-to-centre** | Twice Scantron's 0.166″ pitch — gives a clear 4.6 mm of white between bubble edges, satisfies Remark's "two character spaces between bubbles", and keeps the OpenCV adaptive-threshold block-size (≤ 23 px) able to read an unbiased local background. |
-| `labelsGap` answer (Q1→Q2) | **17.5 px** | **≈ 7.4 mm row pitch** | Tighter than horizontal because the 13-row left column has to clear the new (inset) bottom-marker quiet zone — 12 row-gaps × 17.5 = 210 px ends at y=605, leaving 1 px of internal quiet zone above the marker's 30-px outer edge at y=606. Aligns with [Scantron OpScan 5–6 timing-marks-per-inch (4.23–5.08 mm)](https://www.scantron.com/ScanToolsPlus/Help/v8/LINK/content/overview/scanner_technology_overview.htm) and exceeds it. Trade-off: this is the value we pay for the §3.2 fold-resistance inset. |
+| `labelsGap` answer (Q1→Q2) | **17.0 px** | **≈ 7.1 mm row pitch** | Tighter than horizontal because the 13-row left column has to clear the new (inset) bottom-marker quiet zone — 12 row-gaps × 17.0 = 204 px puts q13 at y=599; with a 13 px bubble, the bottom edge is y=605.5, preserving the documented 5 px internal quiet zone above the marker's 30-px outer edge at y=611 (content limit y≤606). Aligns with [Scantron OpScan 5–6 timing-marks-per-inch (4.23–5.08 mm)](https://www.scantron.com/ScanToolsPlus/Help/v8/LINK/content/overview/scanner_technology_overview.htm) and exceeds it. Trade-off: this is the value we pay for the §3.2 fold-resistance inset. |
 | `bubblesGap` candidate (column) | 25 px | ≈ 10.5 mm | Wide enough that even at the smaller 4.2 mm bubble Ø, neighbouring columns are clearly separated. |
 | `labelsGap` candidate (row) | 13.5 px | ≈ 5.7 mm | Bare minimum for adjacent digit bubbles to keep ≥ 1.5 mm of white space (PLOS ONE-tolerated density). Compressed by 0.5 px from the previous 14 px value to free vertical room for the §3 fold-resistance inset. |
 | Label glyph colour (A/B/C/D, digits inside bubbles) | **`#777777` mid-grey** | — | [PLOS ONE FlAttum et al. 2018](https://journals.plos.org/plosone/article?id=10.1371%2Fjournal.pone.0206420) finds that black labels *inside* the bubble outline are sometimes mis-classified as fills by adaptive-threshold OMR engines. Printing the glyph in mid-grey keeps it human-readable but pushes its luminance well below pencil-fill darkness. |
@@ -236,9 +236,9 @@ the printer's-point equivalent in brackets (1 pt ≈ 2.78 px @ 200 DPI).
 |  |                                                    |      |
 |  |  -- Answer Grid (13 + 12, Ø 5.5 mm) -------------- |      |
 |  |  y ≈ 380       "Q1 – Q13" / "Q14 – Q25" (14 pt b.) |      |
-|  |  Col 1 (x ≈ 60-160):   origin x=85, row gap 17.5   |      |
-|  |  Col 2 (x ≈ 280-380):  origin x=305, row gap 17.5  |      |
-|  |  y range: 395-605                                  |      |
+|  |  Col 1 (x ≈ 60-160):   origin x=85, row gap 17.0   |      |
+|  |  Col 2 (x ≈ 280-380):  origin x=305, row gap 17.0  |      |
+|  |  y range: 395-599 centres, bubble bottom 605.5     |      |
 |  |                                                    |      |
 |  └─[C] ArUco BL (40,626)       [D] ArUco BR (475,626)─┘      |
 |     ↑                                                ↑       |
@@ -316,8 +316,8 @@ form that's two fieldBlocks:
 
 | Block | Questions | Origin (top-left of q1-A / q14-A bubble) | `bubblesGap` | `labelsGap` | `fieldLabels` |
 | --- | --- | --- | --- | --- | --- |
-| `q01_q13_block` | q1 – q13 | `[85, 395]` | 24 | 17.5 | `["q1..13"]` |
-| `q14_q25_block` | q14 – q25 | `[305, 395]` | 24 | 17.5 | `["q14..25"]` |
+| `q01_q13_block` | q1 – q13 | `[85, 395]` | 24 | 17.0 | `["q1..13"]` |
+| `q14_q25_block` | q14 – q25 | `[305, 395]` | 24 | 17.0 | `["q14..25"]` |
 
 Top-level `bubbleDimensions` is `[13, 13]` (≈ 5.5 mm Ø) and applies to both
 answer blocks (the candidate-number block overrides this to `[10, 10]`).
@@ -374,7 +374,7 @@ foundational artifacts only. Wiring it into the live web UI is the next iteratio
 These need to be answered empirically after `generate_blank.py` is run and the
 first physical prints come back through a scanner:
 
-1. Does `labelsGap = 17.5` (answer grid) produce enough vertical room
+1. Does `labelsGap = 17.0` (answer grid) produce enough vertical room
    for messy handwriting spillover on US Letter, or do we need 20+?
    (If 20+, the only way to fit while preserving the §3 fold-resistance
    marker inset is to either split each answer column into two stacked

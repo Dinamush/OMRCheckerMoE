@@ -39,7 +39,7 @@
         395
       ],
       "bubblesGap": 24.0,
-      "labelsGap": 17.5,
+      "labelsGap": 17.0,
       "fieldLabels": [
         "q1..13"
       ],
@@ -52,7 +52,7 @@
         395
       ],
       "bubblesGap": 24.0,
-      "labelsGap": 17.5,
+      "labelsGap": 17.0,
       "fieldLabels": [
         "q14..25"
       ],
