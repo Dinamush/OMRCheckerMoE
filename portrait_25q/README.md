@@ -9,9 +9,9 @@
 | Path | Purpose |
 | --- | --- |
 | [`DESIGN.md`](DESIGN.md) | Full design rationale for the portrait layout: page geometry, ArUco placement, bubble grid, fonts, and trade-offs against the existing landscape sheet. |
-| [`template.json`](template.json) | OMR engine template (`pageDimensions`, `bubbleDimensions`, `fieldBlocks`, `preProcessors`) for the portrait layout. Coordinates are in OMR-processing space (515×728). |
-| [`generate_blank.py`](generate_blank.py) | Standalone Python script that renders the blank printable PNG (`reference/blank_portrait_25q.png`) from the constants in `DESIGN.md`. Re-run after any layout change. |
-| [`reference/blank_portrait_25q.png`](reference/blank_portrait_25q.png) | The generated blank reference PNG (A4 portrait at 200 DPI, 1654×2339 px). Used by the prefill / student-fill pipeline as the canvas for student details + bubble fills. |
+| [`template.json`](template.json) | OMR engine template (`pageDimensions`, `bubbleDimensions`, `fieldBlocks`, `preProcessors`) for the portrait layout. Coordinates are in OMR-processing space (515×666 — aspect-matched to US Letter). Top-level `bubbleDimensions: [13, 13]` (5.5 mm Ø) drives the answer blocks; the candidate-number block overrides this to `[10, 10]` (4.2 mm Ø) so the 10×10 digit grid fits without spilling into the bottom ArUco quiet zone. |
+| [`generate_blank.py`](generate_blank.py) | Standalone Python script that renders the blank printable PNG (`reference/blank_portrait_25q.png`) from the constants documented in `DESIGN.md §4`. Every constant carries an inline comment citing the industry / accessibility / motor-skill / camera-detection research line that justifies the value. Re-run after any layout change. |
+| [`reference/blank_portrait_25q.png`](reference/blank_portrait_25q.png) | The generated blank reference PNG (**US Letter portrait** at 200 DPI, **1700×2200 px**). 5.5 mm answer bubbles, 14 pt header labels, 22 pt bold title, and 12.6 mm ArUco fiducials. Used by the prefill / student-fill pipeline as the canvas for student details + bubble fills. |
 | [`inputs/`](inputs/) | Drop scanned (or pre-filled) sheets here when running OMR against this template via `python main.py -i portrait_25q/`. |
 
 ## Why portrait?
@@ -20,8 +20,11 @@ The existing 25Q sheet (`custom_25_definitive_final/template.json`) is landscape
 666 × 515 px in OMR space, A4-landscape print. That layout was inherited from the
 upstream OMRChecker examples and is awkward in practice because:
 
-1. **Schools mostly print on A4 portrait** — landscape sheets require the printer
-   to be set to landscape mode, which trips up exam invigilators.
+1. **Schools mostly print on portrait paper** — most classroom printers ship
+   set to portrait US Letter (or portrait A4); landscape sheets force a print
+   dialog change, which trips up exam invigilators. The portrait redesign
+   targets US Letter (8.5" × 11") by default, since that's the dominant paper
+   size in the North American / Caribbean markets the sheet serves.
 2. **Filing and stapling assumes portrait** — answer sheets are usually filed
    alongside scripts that are written on portrait paper.
 3. **The horizontal answer-block layout is visually noisy** — five blocks of five

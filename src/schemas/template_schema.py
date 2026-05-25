@@ -144,6 +144,11 @@ TEMPLATE_SCHEMA = {
                                             },
                                             "description": "Expected marker centres on the processing canvas in [[x, y], ...] order (top-left, top-right, bottom-left, bottom-right). Required when preserveFullImage is true.",
                                         },
+                                        "referenceMarkerHalfSize": {
+                                            "type": "number",
+                                            "exclusiveMinimum": 0,
+                                            "description": "Half of the expected marker side length on the processing canvas (so the full marker is 2 × this value). The default of 10 assumes 20-pixel markers; templates with larger fiducial markers must override this so the homography's within-marker corner scale matches the between-marker centre scale (otherwise the page warps and fails the homography sanity check).",
+                                        },
                                     },
                                     "if": {
                                         "properties": {

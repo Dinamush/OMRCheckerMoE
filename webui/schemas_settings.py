@@ -19,6 +19,10 @@ from webui.settings import RUNTIME_MUTABLE_SETTINGS, Settings
 # both the response and update models share the exact same enum.
 PdfPageFormat = Literal["jpeg", "png"]
 
+# Allowed values for ``sheet_variant``. Mirrors the Literal on the
+# Settings model so the schema validates the same set the engine honours.
+SheetVariant = Literal["v1_legacy", "v2_optimized"]
+
 
 class RuntimeSettingsResponse(BaseModel):
     """Snapshot of every runtime-mutable setting.
@@ -42,6 +46,7 @@ class RuntimeSettingsResponse(BaseModel):
     pdf_split_workers: int = Field(ge=0, le=32)
     pdf_split_min_pages_for_parallel: int = Field(ge=1)
     default_preset: Optional[str] = None
+    sheet_variant: SheetVariant
     allow_directory_import: bool
     # Prefill / upload limits
     prefill_pdf_max_rows: int = Field(ge=1, le=200_000)
@@ -77,6 +82,7 @@ class RuntimeSettingsUpdate(BaseModel):
     pdf_split_workers: Optional[int] = Field(default=None, ge=0, le=32)
     pdf_split_min_pages_for_parallel: Optional[int] = Field(default=None, ge=1)
     default_preset: Optional[str] = None
+    sheet_variant: Optional[SheetVariant] = None
     allow_directory_import: Optional[bool] = None
     # Prefill / upload limits
     prefill_pdf_max_rows: Optional[int] = Field(default=None, ge=1, le=200_000)

@@ -22,7 +22,7 @@ import os
 import sys
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -46,6 +46,7 @@ RUNTIME_MUTABLE_SETTINGS: frozenset[str] = frozenset({
     "pdf_split_workers",
     "pdf_split_min_pages_for_parallel",
     "default_preset",
+    "sheet_variant",
     "allow_directory_import",
     # Prefill / upload limits — exposed on /settings so operators can tune
     # batch sizes without restarting the server or rebuilding the bundle.
@@ -54,6 +55,19 @@ RUNTIME_MUTABLE_SETTINGS: frozenset[str] = frozenset({
     "prefill_csv_max_bytes",
     "max_upload_bytes",
 })
+
+# Allowed values for the ``sheet_variant`` setting. Kept as a
+# module-level constant so the schema layer (``schemas_settings.py``) and
+# the preset router (``services/presets.py``) share a single source of truth.
+#
+# ``v1_legacy``  — the original ``portrait_25q/template.json`` shipped with
+#                  the repo. This stays the default so existing batches keep
+#                  their behaviour with zero migration effort.
+# ``v2_optimized`` — the sweep-validated successor materialised under
+#                    ``portrait_25q_v2/`` (12 OMR-px candidate bubbles,
+#                    corrected origin + gap conventions, robust marker
+#                    sizing). Opt-in only.
+SHEET_VARIANTS: tuple[str, ...] = ("v1_legacy", "v2_optimized")
 
 OVERRIDES_FILENAME = "settings_overrides.json"
 
@@ -305,6 +319,20 @@ class Settings(BaseSettings):
         description=(
             "Preset applied automatically when a new batch is created. "
             "Set to null or empty string to disable auto-apply."
+        ),
+    )
+
+    sheet_variant: Literal["v1_legacy", "v2_optimized"] = Field(
+        default="v1_legacy",
+        description=(
+            "Which answer-sheet layout variant should be used for variant-aware "
+            "presets. 'v1_legacy' (default) uses the original portrait_25q/template.json "
+            "shipped with the repo so existing batches keep their behaviour. "
+            "'v2_optimized' routes the portrait_25q preset name to portrait_25q_v2/, "
+            "a sweep-validated layout with larger candidate bubbles (12 OMR-px), "
+            "corrected origin / gap conventions, and robust marker sizing. "
+            "Change only after you have re-printed sheets that match the selected "
+            "geometry. Override with OMR_WEBUI_SHEET_VARIANT."
         ),
     )
 

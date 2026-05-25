@@ -366,6 +366,26 @@
                 <p class="muted small" data-description="default_preset"></p>
             </div>
 
+            <div class="settings-row" data-row="sheet_variant">
+                <div class="form-inline">
+                    <label for="f-sheet_variant">Sheet variant</label>
+                    <select id="f-sheet_variant"
+                            name="sheet_variant"
+                            data-key="sheet_variant"
+                            data-type="str">
+                        <option value="v1_legacy">v1_legacy (original)</option>
+                        <option value="v2_optimized">v2_optimized (sweep-validated)</option>
+                    </select>
+                    <button type="button"
+                            class="btn small"
+                            data-reset="sheet_variant"
+                            aria-label="Reset Sheet variant to default">
+                        Reset to default
+                    </button>
+                </div>
+                <p class="muted small" data-description="sheet_variant"></p>
+            </div>
+
             <div class="settings-row" data-row="allow_directory_import">
                 <div class="form-inline">
                     <label for="f-allow_directory_import">
