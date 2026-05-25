@@ -38,6 +38,15 @@ datas = [
     (str(ROOT / "src" / "schemas"),      "src/schemas"),
     # Sample sheets so first-time users can try the app immediately
     (str(ROOT / "samples"),              "samples"),
+    # Root-level presets discovered by the web UI. Keep portrait_25q selective
+    # so sweep scratch directories are not bundled into the desktop build.
+    (str(ROOT / "custom_25_definitive_final"), "custom_25_definitive_final"),
+    (str(ROOT / "old_custom25_answer_sheet_v1"), "old_custom25_answer_sheet_v1"),
+    (str(ROOT / "portrait_25q" / "template.json"), "portrait_25q"),
+    (str(ROOT / "portrait_25q" / "README.md"), "portrait_25q"),
+    (str(ROOT / "portrait_25q" / "DESIGN.md"), "portrait_25q"),
+    (str(ROOT / "portrait_25q" / "reference"), "portrait_25q/reference"),
+    (str(ROOT / "portrait_25q_v2"), "portrait_25q_v2"),
     # Prefill blank template image (read at runtime by the prefill service)
     (str(ROOT / "prefill_only_package" / "blank_template_reference.png"),
      "prefill_only_package"),

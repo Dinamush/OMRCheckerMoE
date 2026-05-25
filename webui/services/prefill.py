@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import logging
+import math
 import os
 import re
 import sys
@@ -962,3 +963,429 @@ def generate_batch_zip(
             tmp_path.unlink(missing_ok=True)
         except OSError:
             pass
+
+
+# ---------------------------------------------------------------------------
+# Size-aware PDF segmentation
+# ---------------------------------------------------------------------------
+#
+# Real-world office MFPs (Xerox VersaLink C-series, Ricoh IM, Canon iR-ADV,
+# Konica bizhub, HP LaserJet Enterprise) reliably accept print jobs up to
+# ~50 MiB and ~500-999 pages but fail in opaque ways above those limits
+# (Fault 016-751 on Xerox, PostScript ``limitcheck`` on HP, silent
+# half-prints on Ricoh). The two helpers below let the prefill pipeline
+# split an assembled PDF into bounded segments AFTER rendering. Splitting
+# post-render means page numbers stay continuous across segments for free,
+# because the underlying ``generate_batch_pdf_to_file`` already numbers
+# pages by CSV order (1, 2, 3, ...).
+
+# Output filename conventions for split segments. Embedding the part index
+# AND total upfront ("part_02_of_07.pdf") rather than padding to a fixed
+# width avoids the "01.pdf 02.pdf ... 10.pdf" lexicographic-vs-numeric
+# sort confusion that breaks alphabetised file managers.
+_PART_NAME_TEMPLATE = "{stem}_part_{index:02d}_of_{total:02d}.pdf"
+
+
+def _format_part_name(stem: str, index: int, total: int) -> str:
+    """Return the canonical filename for segment ``index`` of ``total``.
+
+    ``stem`` is the base name without the ``.pdf`` extension. ``index`` is
+    1-based. Single-segment outputs collapse to ``{stem}.pdf`` so the user
+    sees a plain file rather than a confusing ``..._part_01_of_01.pdf``.
+    """
+    if total <= 1:
+        return f"{stem}.pdf"
+    return _PART_NAME_TEMPLATE.format(stem=stem, index=index, total=total)
+
+
+def _chunk_ranges_for_split(
+    page_byte_sizes: list[int],
+    *,
+    max_bytes: int,
+    max_pages: int,
+) -> list[tuple[int, int]]:
+    """Return inclusive ``(start_index, end_index)`` page ranges for each segment.
+
+    Walks the per-page byte sizes greedily and starts a new segment when
+    adding the next page would exceed ``max_bytes`` OR the segment has
+    already reached ``max_pages``. A single page larger than ``max_bytes``
+    still occupies its own segment (we never produce a zero-page segment).
+    """
+    if not page_byte_sizes:
+        return []
+    ranges: list[tuple[int, int]] = []
+    seg_start = 0
+    seg_bytes = 0
+    for i, page_bytes in enumerate(page_byte_sizes):
+        seg_pages = i - seg_start + 1
+        projected_bytes = seg_bytes + page_bytes
+        too_big = projected_bytes > max_bytes and seg_pages > 1
+        too_long = seg_pages > max_pages
+        if too_big or too_long:
+            ranges.append((seg_start, i - 1))
+            seg_start = i
+            seg_bytes = page_bytes
+        else:
+            seg_bytes = projected_bytes
+    ranges.append((seg_start, len(page_byte_sizes) - 1))
+    return ranges
+
+
+def _split_pdf_into_segments(
+    src_pdf_path: Path,
+    *,
+    max_pdf_mb: int,
+    max_pdf_pages: int,
+) -> list[tuple[Path, int, int, int]]:
+    """Split ``src_pdf_path`` into temp PDFs each within both caps.
+
+    Returns a list of ``(segment_path, first_page_number, last_page_number,
+    size_bytes)`` tuples. ``first_page_number`` / ``last_page_number`` are
+    1-based and refer to the original combined PDF, which preserves the
+    continuous numbering already baked into each page by
+    :func:`generate_batch_pdf_to_file`. The caller owns the returned temp
+    files and is responsible for unlinking them.
+
+    The single-segment case (source already within caps) returns the
+    source path itself wrapped in a one-element list — the caller can
+    treat that uniformly without special-casing the "no split needed"
+    branch. The source file is never modified.
+    """
+    import fitz
+
+    max_bytes = max(1, max_pdf_mb) * 1024 * 1024
+    max_pages = max(1, max_pdf_pages)
+
+    src = fitz.open(str(src_pdf_path))
+    try:
+        page_count = src.page_count
+        if page_count == 0:
+            return []
+        total_size = src_pdf_path.stat().st_size
+        if total_size <= max_bytes and page_count <= max_pages:
+            return [(src_pdf_path, 1, page_count, total_size)]
+
+        # We do not have per-page on-disk byte sizes inexpensively. The
+        # PDF object stream is shared (xref table, fonts, images). For
+        # segmentation it is enough to budget by AVERAGE page size; the
+        # per-segment ``doc.save`` reports the real size which we
+        # surface in the metadata. Using a constant per-page average
+        # also makes the segment count deterministic and predictable
+        # for tests, which is more valuable than chasing exact bytes.
+        avg_per_page = max(1, math.ceil(total_size / page_count))
+        page_byte_sizes = [avg_per_page] * page_count
+
+        ranges = _chunk_ranges_for_split(
+            page_byte_sizes,
+            max_bytes=max_bytes,
+            max_pages=max_pages,
+        )
+
+        results: list[tuple[Path, int, int, int]] = []
+        for start, end in ranges:
+            with tempfile.NamedTemporaryFile(
+                prefix="prefill_segment_", suffix=".pdf", delete=False
+            ) as tmp:
+                seg_path = Path(tmp.name)
+            seg_doc = fitz.open()
+            try:
+                seg_doc.insert_pdf(src, from_page=start, to_page=end)
+                # Keep ``garbage=0 deflate=False`` to match the parent
+                # save flags - we already paid the cost of building
+                # bubble-free greyscale JPEG pages once; re-deflating
+                # here for marginal savings would just add latency.
+                seg_doc.save(str(seg_path), garbage=0, deflate=False)
+            finally:
+                seg_doc.close()
+            size_bytes = seg_path.stat().st_size if seg_path.exists() else 0
+            results.append((seg_path, start + 1, end + 1, size_bytes))
+        return results
+    finally:
+        src.close()
+
+
+def generate_batch_split_pdf_to_zip(
+    rows: list[dict[str, Any]],
+    dst_path: Path,
+    *,
+    max_pdf_mb: int,
+    max_pdf_pages: int,
+    realism_preset: str = "none",
+    include_page_numbers: bool = False,
+    marking_profile: str = "none",
+    answers: Any = None,
+    stem: str = "prefilled_sheets",
+) -> dict:
+    """Render a combined PDF then split it into ``<= cap`` segments inside a ZIP.
+
+    The combined PDF is rendered exactly once via
+    :func:`generate_batch_pdf_to_file` so page numbers (when
+    ``include_page_numbers`` is true) are assigned in CSV order across the
+    full batch. The post-render split preserves that ordering, which is
+    why ``segment_02_of_05`` continues the numbering of
+    ``segment_01_of_05`` rather than resetting to 1.
+
+    Returns a metadata dict shaped like the other batch entry points,
+    plus a ``segments`` list of ``{name, first_page, last_page, pages,
+    size_bytes}`` rows describing each segment in the ZIP.
+    """
+    if max_pdf_mb < 1:
+        raise ValueError("max_pdf_mb must be >= 1.")
+    if max_pdf_pages < 1:
+        raise ValueError("max_pdf_pages must be >= 1.")
+
+    logger.info(
+        "Prefill split PDF -> ZIP started | rows=%d | max_mb=%d | max_pages=%d",
+        len(rows),
+        max_pdf_mb,
+        max_pdf_pages,
+    )
+    t_batch = time.perf_counter()
+
+    with tempfile.NamedTemporaryFile(
+        prefix="prefill_combined_", suffix=".pdf", delete=False
+    ) as combined_tmp:
+        combined_path = Path(combined_tmp.name)
+
+    segment_paths: list[Path] = []
+    try:
+        combined_meta = generate_batch_pdf_to_file(
+            rows,
+            combined_path,
+            realism_preset=realism_preset,
+            include_page_numbers=include_page_numbers,
+            marking_profile=marking_profile,
+            answers=answers,
+        )
+        segments = _split_pdf_into_segments(
+            combined_path,
+            max_pdf_mb=max_pdf_mb,
+            max_pdf_pages=max_pdf_pages,
+        )
+
+        # If a single segment came back AND it is the source path itself,
+        # we still wrap it in the ZIP under the canonical single-part name
+        # so the response format is predictable for the caller.
+        dst_path.parent.mkdir(parents=True, exist_ok=True)
+        segment_summaries: list[dict[str, Any]] = []
+        total = len(segments)
+        with zipfile.ZipFile(
+            dst_path, mode="w", compression=zipfile.ZIP_DEFLATED, compresslevel=1
+        ) as zf:
+            for idx, (seg_path, first_page, last_page, size_bytes) in enumerate(
+                segments, start=1
+            ):
+                entry_name = _format_part_name(stem, idx, total)
+                zf.writestr(entry_name, seg_path.read_bytes())
+                if seg_path != combined_path:
+                    segment_paths.append(seg_path)
+                segment_summaries.append(
+                    {
+                        "name": entry_name,
+                        "first_page": first_page,
+                        "last_page": last_page,
+                        "pages": last_page - first_page + 1,
+                        "size_bytes": size_bytes,
+                    }
+                )
+    finally:
+        # Always remove the combined temp file (we have either zipped
+        # its bytes already or copied them into segment temps).
+        try:
+            combined_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        for sp in segment_paths:
+            try:
+                sp.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    elapsed = time.perf_counter() - t_batch
+    size_bytes = dst_path.stat().st_size if dst_path.exists() else 0
+    logger.info(
+        "Prefill split PDF -> ZIP complete | rows=%d | segments=%d | "
+        "elapsed=%.1fs | zip_size_mb=%.1f",
+        combined_meta["count"],
+        len(segment_summaries),
+        elapsed,
+        size_bytes / (1024 * 1024),
+    )
+    return {
+        "count": combined_meta["count"],
+        "successes": combined_meta["successes"],
+        "errors": combined_meta["errors"],
+        "elapsed_s": round(elapsed, 2),
+        "size_bytes": size_bytes,
+        "segments": segment_summaries,
+    }
+
+
+def generate_batch_grouped_split_zip_to_file(
+    rows: list[dict[str, Any]],
+    dst_path: Path,
+    *,
+    group_by: str,
+    max_pdf_mb: int,
+    max_pdf_pages: int,
+    realism_preset: str = "none",
+    include_page_numbers: bool = False,
+    marking_profile: str = "none",
+    answers: Any = None,
+) -> dict:
+    """Grouped output where each group's PDF is itself split into bounded segments.
+
+    Behaves like :func:`generate_batch_grouped_zip_to_file` but every
+    per-group PDF that exceeds the caps is post-split into ZIP entries of
+    the form ``<group>_part_NN_of_TT.pdf``. Page numbering inside each
+    group remains continuous across that group's segments because the
+    per-group PDF is rendered once before splitting.
+    """
+    group_by = normalize_group_by(group_by)
+    if group_by == "none":
+        raise ValueError(
+            "generate_batch_grouped_split_zip_to_file requires a non-'none' "
+            "group_by."
+        )
+    if max_pdf_mb < 1:
+        raise ValueError("max_pdf_mb must be >= 1.")
+    if max_pdf_pages < 1:
+        raise ValueError("max_pdf_pages must be >= 1.")
+
+    count = len(rows)
+    logger.info(
+        "Prefill grouped+split ZIP started | count=%d | group_by=%s | "
+        "max_mb=%d | max_pages=%d | page_numbers=%s",
+        count,
+        group_by,
+        max_pdf_mb,
+        max_pdf_pages,
+        include_page_numbers,
+    )
+    t_batch = time.perf_counter()
+
+    grouped = _group_rows(rows, group_by)
+    dst_path.parent.mkdir(parents=True, exist_ok=True)
+
+    total_successes = 0
+    errors: list[str] = []
+    group_summaries: list[dict[str, Any]] = []
+
+    with zipfile.ZipFile(
+        dst_path, mode="w", compression=zipfile.ZIP_DEFLATED, compresslevel=1
+    ) as zf:
+        for key, indexed_rows in grouped.items():
+            entry_base = _group_zip_entry_name(key)
+            # Strip the trailing ``.pdf`` so we can interpolate split
+            # suffixes; ``entry_base`` may also contain ``region/school``
+            # which we want to preserve as a folder prefix in the ZIP.
+            stem = entry_base[:-4] if entry_base.lower().endswith(".pdf") else entry_base
+            group_rows = [row for _, row in indexed_rows]
+
+            with tempfile.NamedTemporaryFile(
+                prefix="prefill_group_", suffix=".pdf", delete=False
+            ) as tmp:
+                group_pdf_path = Path(tmp.name)
+
+            segment_paths: list[Path] = []
+            try:
+                group_meta = generate_batch_pdf_to_file(
+                    group_rows,
+                    group_pdf_path,
+                    realism_preset=realism_preset,
+                    include_page_numbers=include_page_numbers,
+                    marking_profile=marking_profile,
+                    answers=answers,
+                )
+                if group_meta["successes"] == 0:
+                    errors.append(f"group {entry_base!r}: all rows failed")
+                    group_summaries.append(
+                        {
+                            "name": entry_base,
+                            "count": group_meta["count"],
+                            "successes": 0,
+                            "errors": group_meta["errors"],
+                            "segments": [],
+                        }
+                    )
+                    continue
+
+                segments = _split_pdf_into_segments(
+                    group_pdf_path,
+                    max_pdf_mb=max_pdf_mb,
+                    max_pdf_pages=max_pdf_pages,
+                )
+                total = len(segments)
+                segment_entries: list[dict[str, Any]] = []
+                for idx, (seg_path, first_page, last_page, size_bytes) in enumerate(
+                    segments, start=1
+                ):
+                    entry_name = _format_part_name(stem, idx, total)
+                    zf.writestr(entry_name, seg_path.read_bytes())
+                    if seg_path != group_pdf_path:
+                        segment_paths.append(seg_path)
+                    segment_entries.append(
+                        {
+                            "name": entry_name,
+                            "first_page": first_page,
+                            "last_page": last_page,
+                            "pages": last_page - first_page + 1,
+                            "size_bytes": size_bytes,
+                        }
+                    )
+                total_successes += group_meta["successes"]
+                group_summaries.append(
+                    {
+                        "name": entry_base,
+                        "count": group_meta["count"],
+                        "successes": group_meta["successes"],
+                        "errors": group_meta["errors"],
+                        "segments": segment_entries,
+                    }
+                )
+                if group_meta.get("errors"):
+                    errors.extend(
+                        f"group {entry_base!r}: {e}" for e in group_meta["errors"]
+                    )
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"group {entry_base!r}: {type(exc).__name__}: {exc}")
+                group_summaries.append(
+                    {
+                        "name": entry_base,
+                        "count": len(group_rows),
+                        "successes": 0,
+                        "errors": [f"{type(exc).__name__}: {exc}"],
+                        "segments": [],
+                    }
+                )
+            finally:
+                try:
+                    group_pdf_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                for sp in segment_paths:
+                    try:
+                        sp.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+
+    elapsed = time.perf_counter() - t_batch
+    size_bytes = dst_path.stat().st_size if dst_path.exists() else 0
+    logger.info(
+        "Prefill grouped+split ZIP complete | count=%d | groups=%d | ok=%d | "
+        "err=%d | elapsed=%.1fs | zip_size_mb=%.1f",
+        count,
+        len(grouped),
+        total_successes,
+        len(errors),
+        elapsed,
+        size_bytes / (1024 * 1024),
+    )
+    return {
+        "count": count,
+        "successes": total_successes,
+        "errors": errors[:50],
+        "elapsed_s": round(elapsed, 2),
+        "size_bytes": size_bytes,
+        "groups": group_summaries,
+    }

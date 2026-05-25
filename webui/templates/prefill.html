@@ -268,6 +268,24 @@
             </p>
         </div>
 
+        <div class="form-group">
+            <label class="radio-label" for="batch-split-pdfs">
+                <input id="batch-split-pdfs" name="split_pdfs" type="checkbox" />
+                Split output into smaller PDFs <span class="muted small">(printer-safe segments)</span>
+            </label>
+            <p class="muted small" id="batch-split-pdfs-hint">
+                Wraps the output in a ZIP of <code>..._part_NN_of_TT.pdf</code>
+                segments, each kept within the operator-configured size and
+                page caps so office MFPs (Xerox VersaLink, Ricoh IM, Canon
+                iR-ADV, Konica bizhub, HP LaserJet Enterprise) accept each
+                segment without Fault 016-751 / PostScript <code>limitcheck</code>
+                errors. Page numbers stay continuous across the segments of
+                each region/school group. Adjust the size and page caps on
+                the <a href="/settings">/settings</a> page. Ignored when output
+                is a ZIP of single PNGs (nothing to split).
+            </p>
+        </div>
+
         <div id="batch-error" class="error small" style="display:none;margin-block-end:0.75rem;"></div>
         <div class="actions">
             <button type="button" id="batch-submit" class="btn primary">Generate &amp; Download</button>

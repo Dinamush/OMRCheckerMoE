@@ -53,6 +53,12 @@ RUNTIME_MUTABLE_SETTINGS: frozenset[str] = frozenset({
     "prefill_pdf_max_rows",
     "prefill_zip_max_rows",
     "prefill_csv_max_bytes",
+    # Operator-tunable caps for the optional "split PDFs into smaller
+    # segments" feature on /prefill. The feature itself is an opt-in
+    # per-request toggle (``split_pdfs`` form field on /api/v1/prefill/batch);
+    # these settings only define the cap that each segment must satisfy.
+    "prefill_split_max_pdf_mb",
+    "prefill_split_max_pdf_pages",
     "max_upload_bytes",
 })
 
@@ -164,6 +170,42 @@ class Settings(BaseSettings):
             "rows comfortably with UTF-8 / quoting overhead. Override with "
             "OMR_WEBUI_PREFILL_CSV_MAX_BYTES or via the /settings page "
             "(input shown in MiB)."
+        ),
+    )
+
+    prefill_split_max_pdf_mb: int = Field(
+        default=50,
+        ge=10,
+        le=200,
+        description=(
+            "Per-segment size cap (in MiB) when the operator enables the "
+            "'split output into smaller PDFs' toggle on /prefill. Default "
+            "50 MiB is the conservative round-down from Ricoh's documented "
+            "100 MiB-via-relay print cap and Xerox VersaLink's ~85 MiB "
+            "usable SMTP envelope, with margin for Windows print-spool EMF "
+            "expansion that has been observed to balloon a 1.4 MiB PDF into "
+            "multi-GiB spool jobs. Office colour MFPs (Xerox VersaLink "
+            "C-series, Ricoh IM, Canon iR-ADV, Konica bizhub, HP LaserJet "
+            "Enterprise) reliably accept segments at or below this cap "
+            "without triggering Fault 016-751 / PostScript limitcheck "
+            "errors. Override with OMR_WEBUI_PREFILL_SPLIT_MAX_PDF_MB."
+        ),
+    )
+
+    prefill_split_max_pdf_pages: int = Field(
+        default=500,
+        ge=50,
+        le=999,
+        description=(
+            "Per-segment page cap when the operator enables the 'split "
+            "output into smaller PDFs' toggle on /prefill. Acts as a "
+            "secondary safety bound: a tightly-compressing prefill batch "
+            "(plain black bubbles, no scan simulation) can stay well under "
+            "the MiB cap while accumulating thousands of pages, which "
+            "stresses MFPs that document a 999-copies-per-job ceiling. "
+            "Default 500 leaves 2x margin under that ceiling and aligns "
+            "with one full paper-tray refill. Override with "
+            "OMR_WEBUI_PREFILL_SPLIT_MAX_PDF_PAGES."
         ),
     )
 

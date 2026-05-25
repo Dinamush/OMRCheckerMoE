@@ -315,6 +315,80 @@ def _run_batch_grouped_zip(
     return target(rows, dst_path, **kwargs)
 
 
+def _run_batch_split_pdf(
+    rows: list[dict[str, Any]],
+    dst_path: Path,
+    realism_preset: str,
+    max_pdf_mb: int,
+    max_pdf_pages: int,
+    include_page_numbers: bool,
+    marking_profile: str = "none",
+    answers: Any = None,
+    stem: str = "prefilled_sheets",
+) -> dict:
+    """Adapter for ``generate_batch_split_pdf_to_zip`` matching the
+    signature pattern of the other ``_run_batch_*`` adapters.
+
+    Falls back gracefully when older test monkeypatches replace the
+    service function with a stub that lacks newer kwargs.
+    """
+    import inspect
+
+    target = prefill_service.generate_batch_split_pdf_to_zip
+    try:
+        params = inspect.signature(target).parameters
+    except (TypeError, ValueError):
+        params = {}
+    kwargs: dict[str, Any] = {
+        "max_pdf_mb": max_pdf_mb,
+        "max_pdf_pages": max_pdf_pages,
+        "realism_preset": realism_preset,
+    }
+    if "include_page_numbers" in params:
+        kwargs["include_page_numbers"] = include_page_numbers
+    if "marking_profile" in params:
+        kwargs["marking_profile"] = marking_profile
+    if "answers" in params:
+        kwargs["answers"] = answers
+    if "stem" in params:
+        kwargs["stem"] = stem
+    return target(rows, dst_path, **kwargs)
+
+
+def _run_batch_grouped_split_zip(
+    rows: list[dict[str, Any]],
+    dst_path: Path,
+    realism_preset: str,
+    group_by: str,
+    max_pdf_mb: int,
+    max_pdf_pages: int,
+    include_page_numbers: bool,
+    marking_profile: str = "none",
+    answers: Any = None,
+) -> dict:
+    """Adapter for ``generate_batch_grouped_split_zip_to_file``."""
+    import inspect
+
+    target = prefill_service.generate_batch_grouped_split_zip_to_file
+    try:
+        params = inspect.signature(target).parameters
+    except (TypeError, ValueError):
+        params = {}
+    kwargs: dict[str, Any] = {
+        "group_by": group_by,
+        "max_pdf_mb": max_pdf_mb,
+        "max_pdf_pages": max_pdf_pages,
+        "realism_preset": realism_preset,
+    }
+    if "include_page_numbers" in params:
+        kwargs["include_page_numbers"] = include_page_numbers
+    if "marking_profile" in params:
+        kwargs["marking_profile"] = marking_profile
+    if "answers" in params:
+        kwargs["answers"] = answers
+    return target(rows, dst_path, **kwargs)
+
+
 # Download token store: maps token -> (tmp_path, media_type, filename, expires_at)
 # Tokens are single-use and expire after 10 minutes so orphaned files are cleaned up.
 _DOWNLOAD_STORE: dict[str, tuple[Path, str, str, float]] = {}
@@ -1466,6 +1540,19 @@ async def prefill_batch(
         "yes",
         "on",
     }
+    # Optional "split combined PDF into smaller printer-safe segments"
+    # toggle (off by default). The size and page caps come from
+    # operator-tunable runtime settings rather than form fields so the
+    # operator can validate them against their printer fleet once on
+    # the /settings page instead of asking every user to re-discover
+    # safe values for every batch.
+    split_pdfs_value = form.get("split_pdfs")
+    split_pdfs = str(split_pdfs_value).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
     # 1) Validate output_mode early — reject unknown values explicitly.
     output_mode = (output_mode or "").strip().lower()
@@ -1603,12 +1690,25 @@ async def prefill_batch(
         )
 
     # Grouped output is always a ZIP of per-group PDFs.
-    effective_mode = "zip" if group_by != "none" else output_mode
+    # The split-PDFs toggle is meaningful only when the underlying
+    # output is at least one PDF; for a flat ZIP of single-page PNGs
+    # (output_mode=zip, no grouping) splitting has nothing to operate
+    # on and is silently dropped, mirroring the existing behaviour
+    # for ``include_page_numbers`` on flat PNG ZIPs.
+    split_enabled = split_pdfs and (group_by != "none" or output_mode == "pdf")
+    if split_enabled:
+        # Splitting always packages output as a ZIP (one or more PDF
+        # segments inside) so the one-file-per-token download contract
+        # still holds and the user sees a single consistent download.
+        effective_mode = "zip"
+    else:
+        effective_mode = "zip" if group_by != "none" else output_mode
     suffix = ".pdf" if effective_mode == "pdf" else ".zip"
     media_type = "application/pdf" if effective_mode == "pdf" else "application/zip"
     preset_suffix = "" if realism_preset == "none" else f"_{realism_preset}"
     group_suffix = "" if group_by == "none" else f"_by_{group_by}"
-    filename = f"prefilled_sheets{preset_suffix}{group_suffix}{suffix}"
+    split_suffix = "_split" if split_enabled else ""
+    filename = f"prefilled_sheets{preset_suffix}{group_suffix}{split_suffix}{suffix}"
 
     # 7) Write to a temp file the response will stream from. The file is
     # deleted after the response finishes via background_tasks.
@@ -1626,10 +1726,48 @@ async def prefill_batch(
     def _release_sem() -> None:
         _PREFILL_BATCH_SEM.release()
 
+    # Snapshot split caps from settings so the values used during
+    # rendering are pinned to the moment the request was accepted, not
+    # whatever the operator might change mid-job on /settings.
+    split_max_mb = settings.prefill_split_max_pdf_mb
+    split_max_pages = settings.prefill_split_max_pdf_pages
+
     try:
         # Offload to a thread so a long-running batch cannot block the event
         # loop and stall every other request (incl. health checks).
-        if group_by != "none":
+        if split_enabled and group_by != "none":
+            # Grouped output with each group's PDF post-split into bounded
+            # segments. Each group's pages remain numbered continuously
+            # across that group's segments because the per-group PDF is
+            # rendered once before being split.
+            meta = await asyncio.to_thread(
+                _run_batch_grouped_split_zip,
+                rows,
+                tmp_path,
+                realism_preset,
+                group_by,
+                split_max_mb,
+                split_max_pages,
+                include_page_numbers,
+                marking_profile,
+                answers_default,
+            )
+        elif split_enabled:
+            # Flat combined PDF post-split into bounded segments, packaged
+            # as a ZIP containing one segment per ``..._part_NN_of_TT.pdf``
+            # entry. Numbering is continuous across the segments.
+            meta = await asyncio.to_thread(
+                _run_batch_split_pdf,
+                rows,
+                tmp_path,
+                realism_preset,
+                split_max_mb,
+                split_max_pages,
+                include_page_numbers,
+                marking_profile,
+                answers_default,
+            )
+        elif group_by != "none":
             # Grouped output: one PDF per school/region inside a ZIP. The
             # ``output_mode`` field is intentionally ignored here — when the
             # user asks for grouping they always get a ZIP-of-PDFs, since
@@ -1710,6 +1848,15 @@ async def prefill_batch(
         ),
         "group_by": group_by,
         "groups": meta.get("groups", []) if group_by != "none" else [],
+        # Surface split metadata so the JS UI can show "Split into N
+        # segments of <= M MiB each" instead of leaving the user to
+        # discover that from a stranger-looking ZIP. When splitting
+        # was not active, ``segments`` is an empty list and the cap
+        # echoes the operator setting for transparency.
+        "split_pdfs": split_enabled,
+        "split_max_pdf_mb": split_max_mb if split_enabled else None,
+        "split_max_pdf_pages": split_max_pages if split_enabled else None,
+        "segments": meta.get("segments", []) if split_enabled and group_by == "none" else [],
     }
 
 

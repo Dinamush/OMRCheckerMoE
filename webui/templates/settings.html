@@ -299,6 +299,50 @@
                 <p class="muted small" data-description="prefill_csv_max_bytes"></p>
             </div>
 
+            <div class="settings-row" data-row="prefill_split_max_pdf_mb">
+                <div class="form-inline">
+                    <label for="f-prefill_split_max_pdf_mb">Prefill split — max size per PDF</label>
+                    <input id="f-prefill_split_max_pdf_mb"
+                           name="prefill_split_max_pdf_mb"
+                           type="number"
+                           min="10"
+                           max="200"
+                           step="1"
+                           data-key="prefill_split_max_pdf_mb"
+                           data-type="int" />
+                    <span class="muted small">MiB</span>
+                    <button type="button"
+                            class="btn small"
+                            data-reset="prefill_split_max_pdf_mb"
+                            aria-label="Reset Prefill split max size to default">
+                        Reset to default
+                    </button>
+                </div>
+                <p class="muted small" data-description="prefill_split_max_pdf_mb"></p>
+            </div>
+
+            <div class="settings-row" data-row="prefill_split_max_pdf_pages">
+                <div class="form-inline">
+                    <label for="f-prefill_split_max_pdf_pages">Prefill split — max pages per PDF</label>
+                    <input id="f-prefill_split_max_pdf_pages"
+                           name="prefill_split_max_pdf_pages"
+                           type="number"
+                           min="50"
+                           max="999"
+                           step="1"
+                           data-key="prefill_split_max_pdf_pages"
+                           data-type="int" />
+                    <span class="muted small">pages</span>
+                    <button type="button"
+                            class="btn small"
+                            data-reset="prefill_split_max_pdf_pages"
+                            aria-label="Reset Prefill split max pages to default">
+                        Reset to default
+                    </button>
+                </div>
+                <p class="muted small" data-description="prefill_split_max_pdf_pages"></p>
+            </div>
+
             <div class="settings-row" data-row="max_upload_bytes">
                 <div class="form-inline">
                     <label for="f-max_upload_bytes">Per-file upload limit</label>
