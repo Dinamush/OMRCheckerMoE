@@ -312,12 +312,23 @@ def draw_title_and_instructions(draw: ImageDraw.ImageDraw) -> None:
         draw.text((line_x, line_y), text, fill=SUBTLE_COLOR, font=instr_font, anchor="lt")
 
 
+# Print-space margin between the label's bbox bottom and the underline.
+# Small enough to read as part of the same field, large enough not to
+# clip descenders or kiss the visible baseline.
+HEADER_UNDERLINE_MARGIN_PX = 4
+
+
 def draw_header_strips(draw: ImageDraw.ImageDraw) -> None:
     label_font = load_font(FONT_HEADER_PX, bold=True)
     for label, y_omr in HEADER_FIELDS:
-        label_x_px, baseline_y_px = omr_to_print(HEADER_LABEL_X_OMR, y_omr)
+        # With ``anchor="lm"`` PIL centres the text bbox vertically on the
+        # given y, so ``text_mid_y_px`` is the MIDDLE of the rendered text
+        # (not the baseline). The bbox bottom therefore sits at
+        # ``text_mid_y_px + FONT_HEADER_PX / 2`` — that's where the
+        # underline must clear.
+        label_x_px, text_mid_y_px = omr_to_print(HEADER_LABEL_X_OMR, y_omr)
         draw.text(
-            (label_x_px, baseline_y_px),
+            (label_x_px, text_mid_y_px),
             f"{label}:",
             fill=LABEL_FILL_COLOR,
             font=label_font,
@@ -325,10 +336,9 @@ def draw_header_strips(draw: ImageDraw.ImageDraw) -> None:
         )
         line_x0, _ = omr_to_print(HEADER_LINE_START_X_OMR, y_omr)
         line_x1, _ = omr_to_print(HEADER_LINE_END_X_OMR, y_omr)
-        # Underline sits just below the label baseline so the prefill
-        # engine has a writable strip ≈ 8 mm tall (matches GOV.UK form
-        # write-in field height guidance).
-        underline_y_px = baseline_y_px + FONT_HEADER_PX * 0.35
+        underline_y_px = (
+            text_mid_y_px + FONT_HEADER_PX / 2 + HEADER_UNDERLINE_MARGIN_PX
+        )
         draw.line(
             [(line_x0, underline_y_px), (line_x1, underline_y_px)],
             fill=LABEL_FILL_COLOR,
@@ -423,8 +433,15 @@ def draw_answer_grid(draw: ImageDraw.ImageDraw) -> None:
 def draw_column_divider(draw: ImageDraw.ImageDraw) -> None:
     div_x_omr = (ANS_BLOCK_LEFT_ORIGIN[0] + ANS_BLOCK_RIGHT_ORIGIN[0]) / 2
     div_y_top_omr = ANS_HEADER_Y_OMR - 8
-    # Stop 12 row-gaps below the origin (q1 → q13 is 12 gaps) plus a 3-px tail.
-    div_y_bot_omr = ANS_BLOCK_LEFT_ORIGIN[1] + ANS_LABELS_GAP_Y * 12 + 3
+    # Extend to the exact bottom edge of the q13 bubble (q1 -> q13 is
+    # 12 row-gaps, plus one bubble radius) so the divider visually
+    # separates both columns for their full height. With the current
+    # geometry (origin 395, gap 17.0, diameter 13) this lands at
+    # y=605.5 OMR-px -- still safely inside the y<=606 marker-quiet-zone
+    # content limit documented in DESIGN.md §3.1.
+    div_y_bot_omr = (
+        ANS_BLOCK_LEFT_ORIGIN[1] + ANS_LABELS_GAP_Y * 12 + ANS_BUBBLE_DIAM / 2
+    )
     x0, y0 = omr_to_print(div_x_omr, div_y_top_omr)
     x1, y1 = omr_to_print(div_x_omr, div_y_bot_omr)
     draw.line([(x0, y0), (x1, y1)], fill="#cccccc", width=2)
