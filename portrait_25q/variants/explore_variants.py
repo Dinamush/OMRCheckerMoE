@@ -584,10 +584,13 @@ VARIANTS: list[Variant] = [
             AnswerColumn(origin_x=305, origin_y=420, q_first=14, q_last=25),
         ),
         answer_header_y=405,
-        candidate_origin=(133, 252),
+        candidate_origin=(118, 252),
         ans_bubble_diam=14,         # 5.9 mm
         ans_bubbles_gap_x=24.0,     # 10.0 mm
-        ans_labels_gap_y=17.5,      # 7.3 mm (tightened to fit page)
+        ans_labels_gap_y=17.5,      # 7.3 mm
+        cand_bubble_diam=12,        # 5.0 mm — sweep winner (100% all darknesses)
+        cand_bubbles_gap_x=28.0,
+        cand_labels_gap_y=15.0,
         font_letter_px=30,
         font_qnum_px=34,
     ),

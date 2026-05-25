@@ -70,3 +70,11 @@ dist/
 # and scripts/debug_alignment.py. Useful while iterating on the OMR template
 # but never source-controlled.
 diagnostic_output/
+
+# --- Portrait-25Q sweep harness scratch ---
+
+# Generated per-case test directories (filled images, per-size template.json /
+# config.json, engine outputs). Re-created on every sweep run.
+portrait_25q/variants/sweep/runs/
+portrait_25q/variants/sweep/reference_test/
+portrait_25q/variants/sweep/results/
