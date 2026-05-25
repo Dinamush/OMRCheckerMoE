@@ -174,21 +174,24 @@ class Settings(BaseSettings):
     )
 
     prefill_split_max_pdf_mb: int = Field(
-        default=50,
+        default=100,
         ge=10,
         le=200,
         description=(
             "Per-segment size cap (in MiB) when the operator enables the "
             "'split output into smaller PDFs' toggle on /prefill. Default "
-            "50 MiB is the conservative round-down from Ricoh's documented "
-            "100 MiB-via-relay print cap and Xerox VersaLink's ~85 MiB "
-            "usable SMTP envelope, with margin for Windows print-spool EMF "
-            "expansion that has been observed to balloon a 1.4 MiB PDF into "
-            "multi-GiB spool jobs. Office colour MFPs (Xerox VersaLink "
-            "C-series, Ricoh IM, Canon iR-ADV, Konica bizhub, HP LaserJet "
-            "Enterprise) reliably accept segments at or below this cap "
-            "without triggering Fault 016-751 / PostScript limitcheck "
-            "errors. Override with OMR_WEBUI_PREFILL_SPLIT_MAX_PDF_MB."
+            "100 MiB matches Ricoh's documented 100 MiB-via-relay print "
+            "cap and sits below Xerox VersaLink's ~120 MiB SMTP message "
+            "ceiling and the ~350 MiB Windows print-spool EMF silent-drop "
+            "threshold. Operators printing through stricter controllers "
+            "(older Xerox VersaLink at default PostScript memory, HP "
+            "LaserJet Enterprise with PostScript limitcheck issues, or "
+            "small-buffer LPR queues) should lower this to ~50 MiB; field "
+            "evidence shows segments at or below 50 MiB reliably avoid "
+            "Fault 016-751 / limitcheck on every office MFP family we "
+            "tested (Xerox VersaLink C-series, Ricoh IM, Canon iR-ADV, "
+            "Konica bizhub, HP LaserJet Enterprise). Override with "
+            "OMR_WEBUI_PREFILL_SPLIT_MAX_PDF_MB."
         ),
     )
 

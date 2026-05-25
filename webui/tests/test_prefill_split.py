@@ -442,9 +442,9 @@ def test_prefill_batch_split_enabled_routes_to_split_zip(
     payload = response.json()
     assert payload["split_pdfs"] is True
     assert payload["filename"].endswith("_split.zip")
-    assert payload["split_max_pdf_mb"] == 50           # operator default
+    assert payload["split_max_pdf_mb"] == 100          # operator default
     assert payload["split_max_pdf_pages"] == 500       # operator default
-    assert captured["max_pdf_mb"] == 50
+    assert captured["max_pdf_mb"] == 100
     assert captured["max_pdf_pages"] == 500
     assert captured["include_page_numbers"] is True
     assert len(payload["segments"]) == 2
