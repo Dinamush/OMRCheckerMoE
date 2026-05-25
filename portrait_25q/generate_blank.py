@@ -433,14 +433,17 @@ def draw_answer_grid(draw: ImageDraw.ImageDraw) -> None:
 def draw_column_divider(draw: ImageDraw.ImageDraw) -> None:
     div_x_omr = (ANS_BLOCK_LEFT_ORIGIN[0] + ANS_BLOCK_RIGHT_ORIGIN[0]) / 2
     div_y_top_omr = ANS_HEADER_Y_OMR - 8
-    # Extend to the exact bottom edge of the q13 bubble (q1 -> q13 is
-    # 12 row-gaps, plus one bubble radius) so the divider visually
-    # separates both columns for their full height. With the current
-    # geometry (origin 395, gap 17.0, diameter 13) this lands at
-    # y=605.5 OMR-px -- still safely inside the y<=606 marker-quiet-zone
-    # content limit documented in DESIGN.md §3.1.
+    # Clip the divider to the SHORTER column's bottom (right, q14-q25 has
+    # only 11 row-gaps) so it doesn't dangle past where the right column
+    # ends. Extending to the left column's q13 bottom (605.5) would
+    # overshoot the right column by 17 OMR-px (~56 print-px) and read as
+    # a visually unbalanced line. The divider's job is to separate the
+    # two columns where they coexist; the asymmetric extra row in the
+    # left column does not need a divider beside it because there is no
+    # neighbouring right-column bubble to separate it from. Result:
+    # y=588.5 OMR-px (11 gaps x 17.0 + ANS_BUBBLE_DIAM/2 = 587 + 6.5).
     div_y_bot_omr = (
-        ANS_BLOCK_LEFT_ORIGIN[1] + ANS_LABELS_GAP_Y * 12 + ANS_BUBBLE_DIAM / 2
+        ANS_BLOCK_RIGHT_ORIGIN[1] + ANS_LABELS_GAP_Y * 11 + ANS_BUBBLE_DIAM / 2
     )
     x0, y0 = omr_to_print(div_x_omr, div_y_top_omr)
     x1, y1 = omr_to_print(div_x_omr, div_y_bot_omr)

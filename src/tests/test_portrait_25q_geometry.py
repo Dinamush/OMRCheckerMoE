@@ -47,20 +47,35 @@ def test_answer_grid_template_gap_matches_generator() -> None:
     )
 
 
-def test_column_divider_reaches_bottom_of_last_answer_bubble() -> None:
-    """The grey column divider must span the full height of the q13 bubble."""
-    expected_div_bot_omr = (
-        generate_blank.ANS_BLOCK_LEFT_ORIGIN[1]
-        + 12 * generate_blank.ANS_LABELS_GAP_Y
+def test_column_divider_matches_shorter_right_column_height() -> None:
+    """The grey column divider must clip to the SHORTER (right) column.
+
+    The right column (q14-q25) has 12 questions = 11 row-gaps and ends
+    at ``ANS_BLOCK_RIGHT_ORIGIN.y + 11 * ANS_LABELS_GAP_Y + diameter/2``.
+    The left column (q1-q13) has 13 questions = 12 row-gaps and extends
+    one row-gap further. The divider's job is to separate the columns
+    where they coexist, so it must stop at the right-column bottom -- not
+    dangle one row-gap (~17 OMR-px / ~56 print-px) below it, which would
+    read as a visually unbalanced line floating past the right column.
+    """
+    right_column_bottom_omr = (
+        generate_blank.ANS_BLOCK_RIGHT_ORIGIN[1]
+        + 11 * generate_blank.ANS_LABELS_GAP_Y
         + generate_blank.ANS_BUBBLE_DIAM / 2
     )
-    lowest_left_bubble_bottom_omr = (
+    left_column_bottom_omr = (
         generate_blank.ANS_BLOCK_LEFT_ORIGIN[1]
         + 12 * generate_blank.ANS_LABELS_GAP_Y
         + generate_blank.ANS_BUBBLE_DIAM / 2
     )
 
-    assert expected_div_bot_omr == lowest_left_bubble_bottom_omr
+    assert right_column_bottom_omr < left_column_bottom_omr, (
+        "Right column should be shorter than left -- if this flips, the "
+        "test below is checking the wrong column."
+    )
+
+    expected_div_bot_omr = right_column_bottom_omr
+    assert expected_div_bot_omr == right_column_bottom_omr
 
     bottom_marker_top_omr = (
         generate_blank.ARUCO_CENTRES[2][1] - generate_blank.ARUCO_MARKER_SIZE_OMR / 2
