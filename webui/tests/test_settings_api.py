@@ -172,6 +172,43 @@ def test_put_accepts_valid_pdf_page_format(
     assert response.json()["pdf_page_format"] == good_value
 
 
+# ---------------------------------------------------------------------------
+# sheet_variant — Literal enum validation + default
+# ---------------------------------------------------------------------------
+
+
+def test_sheet_variant_default_is_v1_legacy(client: TestClient) -> None:
+    """The fresh-install default must be ``v1_legacy`` so existing batches
+    keep their behaviour unchanged after the variant feature ships."""
+    body = client.get("/api/v1/settings").json()
+    assert body["sheet_variant"] == "v1_legacy"
+
+
+@pytest.mark.parametrize("good_value", ["v1_legacy", "v2_optimized"])
+def test_put_accepts_valid_sheet_variant(
+    client: TestClient, good_value: str
+) -> None:
+    response = client.put(
+        "/api/v1/settings", json={"sheet_variant": good_value}
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["sheet_variant"] == good_value
+
+
+@pytest.mark.parametrize(
+    "bad_value", ["", "v3", "V1_LEGACY", "v1-legacy", "legacy", "optimized", 42]
+)
+def test_put_rejects_invalid_sheet_variant(
+    client: TestClient, bad_value: object
+) -> None:
+    """The Literal enum must reject every value outside the allowed set,
+    including casing variants and adjacent spellings."""
+    response = client.put(
+        "/api/v1/settings", json={"sheet_variant": bad_value}
+    )
+    assert response.status_code == 422, response.text
+
+
 def test_put_validates_auto_start_min_pages_bounds(client: TestClient) -> None:
     """Both inclusive edges accepted, just-outside values rejected."""
     # Out of range: 0 and 10001 both 422.

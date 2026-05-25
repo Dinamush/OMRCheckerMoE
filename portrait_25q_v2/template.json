@@ -1,0 +1,98 @@
+{
+  "pageDimensions": [
+    515,
+    666
+  ],
+  "bubbleDimensions": [
+    14,
+    14
+  ],
+  "customLabels": {
+    "CandidateNumber": [
+      "cand1..10"
+    ]
+  },
+  "outputColumns": [
+    "CandidateNumber",
+    "q1..25"
+  ],
+  "fieldBlocks": {
+    "CandidateNumber": {
+      "origin": [
+        112.0,
+        246.0
+      ],
+      "bubbleDimensions": [
+        12,
+        12
+      ],
+      "bubblesGap": 15.0,
+      "labelsGap": 28.0,
+      "fieldLabels": [
+        "cand1..10"
+      ],
+      "fieldType": "QTYPE_INT"
+    },
+    "q01_q13_block": {
+      "origin": [
+        78.0,
+        413.0
+      ],
+      "bubblesGap": 24.0,
+      "labelsGap": 17.5,
+      "fieldLabels": [
+        "q1..13"
+      ],
+      "emptyValue": "NR",
+      "fieldType": "QTYPE_MCQ4"
+    },
+    "q14_q25_block": {
+      "origin": [
+        298.0,
+        413.0
+      ],
+      "bubblesGap": 24.0,
+      "labelsGap": 17.5,
+      "fieldLabels": [
+        "q14..25"
+      ],
+      "emptyValue": "NR",
+      "fieldType": "QTYPE_MCQ4"
+    }
+  },
+  "preProcessors": [
+    {
+      "name": "CropOnMarkers",
+      "options": {
+        "type": "aruco",
+        "arucoDictionary": "DICT_4X4_50",
+        "arucoCornerIds": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "preserveFullImage": true,
+        "referenceMarkerHalfSize": 15.0,
+        "referenceMarkerCenters": [
+          [
+            40,
+            40
+          ],
+          [
+            475,
+            40
+          ],
+          [
+            40,
+            626
+          ],
+          [
+            475,
+            626
+          ]
+        ]
+      }
+    }
+  ]
+}
