@@ -19,6 +19,7 @@ Coverage:
 from __future__ import annotations
 
 import io
+import logging
 import zipfile
 from pathlib import Path
 
@@ -251,6 +252,67 @@ def test_generate_batch_split_pdf_to_zip_collapses_single_segment_name(
     assert meta["segments"][0]["name"] == "prefilled_sheets.pdf"
 
 
+def test_generate_batch_pdf_to_file_skips_invalid_candidate_rows_and_logs(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """One bad candidate number should not abort the whole PDF batch."""
+    rows = [
+        {
+            "student_name": "Alice",
+            "school_name": "Riverview",
+            "exam_name": "Test",
+            "candidate_number": "0000000001",
+        },
+        {
+            "student_name": "Bad Candidate",
+            "school_name": "Riverview",
+            "exam_name": "Test",
+            "candidate_number": "NULL",
+        },
+        {
+            "student_name": "Bob",
+            "school_name": "Riverview",
+            "exam_name": "Test",
+            "candidate_number": "0000000002",
+        },
+        {
+            "student_name": "Too Long",
+            "school_name": "Riverview",
+            "exam_name": "Test",
+            "candidate_number": "12345678901",
+        },
+    ]
+    dst = tmp_path / "out.pdf"
+    with caplog.at_level(logging.WARNING, logger="webui.services.prefill"):
+        meta = prefill_service.generate_batch_pdf_to_file(
+            rows,
+            dst,
+            include_page_numbers=True,
+        )
+
+    assert meta["count"] == 4
+    assert meta["successes"] == 2
+    assert any(
+        "row 2" in err and "got 'NULL'" in err
+        for err in meta["errors"]
+    )
+    assert any(
+        "row 4" in err and "got '12345678901'" in err
+        for err in meta["errors"]
+    )
+    assert "Prefill batch PDF row errors" in caplog.text
+    assert "row 2" in caplog.text
+    assert "got 'NULL'" in caplog.text
+    assert "row 4" in caplog.text
+    assert "got '12345678901'" in caplog.text
+    doc = fitz.open(str(dst))
+    try:
+        assert doc.page_count == 2
+    finally:
+        doc.close()
+
+
 def test_generate_batch_grouped_split_zip_to_file_splits_per_group(
     tmp_path: Path,
 ) -> None:
@@ -318,6 +380,84 @@ def test_generate_batch_grouped_split_zip_to_file_splits_per_group(
     for group_name in ("Demerara.pdf", "Berbice.pdf"):
         segs = by_group[group_name]["segments"]
         assert [(s["first_page"], s["last_page"]) for s in segs] == [(1, 1), (2, 2)]
+
+
+def test_generate_batch_grouped_split_zip_skips_invalid_candidate_rows(
+    tmp_path: Path,
+) -> None:
+    """Invalid candidates in a region should be row errors, not group failure."""
+    rows = [
+        {
+            "student_name": "A",
+            "school_name": "School A",
+            "exam_name": "Test",
+            "candidate_number": "0000000001",
+            "region": "Region 11",
+        },
+        {
+            "student_name": "B",
+            "school_name": "School A",
+            "exam_name": "Test",
+            "candidate_number": "NULL",
+            "region": "Region 11",
+        },
+        {
+            "student_name": "C",
+            "school_name": "School A",
+            "exam_name": "Test",
+            "candidate_number": "0000000003",
+            "region": "Region 11",
+        },
+        {
+            "student_name": "D",
+            "school_name": "School B",
+            "exam_name": "Test",
+            "candidate_number": "0000000004",
+            "region": "Region 4",
+        },
+        {
+            "student_name": "E",
+            "school_name": "School B",
+            "exam_name": "Test",
+            "candidate_number": "NULL",
+            "region": "Region 4",
+        },
+        {
+            "student_name": "F",
+            "school_name": "School B",
+            "exam_name": "Test",
+            "candidate_number": "0000000006",
+            "region": "Region 4",
+        },
+    ]
+    dst = tmp_path / "out.zip"
+    meta = prefill_service.generate_batch_grouped_split_zip_to_file(
+        rows,
+        dst,
+        group_by="region",
+        max_pdf_mb=200,
+        max_pdf_pages=1,
+        include_page_numbers=True,
+    )
+
+    assert meta["count"] == 6
+    assert meta["successes"] == 4
+    assert any(
+        "group 'Region 11.pdf': row 2" in err and "got 'NULL'" in err
+        for err in meta["errors"]
+    )
+    assert any(
+        "group 'Region 4.pdf': row 5" in err and "got 'NULL'" in err
+        for err in meta["errors"]
+    )
+    with zipfile.ZipFile(dst) as zf:
+        names = sorted(zf.namelist())
+    assert names == [
+        "Region 11_part_01_of_02.pdf",
+        "Region 11_part_02_of_02.pdf",
+        "Region 4_part_01_of_02.pdf",
+        "Region 4_part_02_of_02.pdf",
+    ]
 
 
 # ---------------------------------------------------------------------------

@@ -377,6 +377,48 @@ def test_prefill_batch_accepts_region_grouping_with_region_column(
     assert payload["filename"].endswith("_by_region.zip")
 
 
+def test_prefill_batch_grouped_region_reports_invalid_candidate_rows(
+    client: TestClient,
+) -> None:
+    """Grouped generation should succeed for valid rows and report bad rows."""
+    csv_text = _csv(
+        [
+            "Alice,Riverview,Test,0000000001,Region 11",
+            "Bad Null,Riverview,Test,NULL,Region 11",
+            "Bob,Riverview,Test,0000000002,Region 11",
+            "Too Long,Riverview,Test,12345678901,Region 11",
+        ],
+        with_region=True,
+    )
+
+    response = client.post(
+        "/api/v1/prefill/batch",
+        data={
+            "output_mode": "pdf",
+            "group_by": "region",
+            "include_page_numbers": "true",
+            "csv_text": csv_text,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["count"] == 4
+    assert payload["successes"] == 2
+    assert payload["group_by"] == "region"
+    assert any(
+        "group 'Region 11.pdf': row 2" in err and "got 'NULL'" in err
+        for err in payload["errors"]
+    )
+    assert any(
+        "group 'Region 11.pdf': row 4" in err
+        and "got '12345678901'" in err
+        for err in payload["errors"]
+    )
+    assert payload["groups"][0]["successes"] == 2
+    assert len(payload["groups"][0]["errors"]) == 2
+
+
 def test_prefill_batch_rejects_unknown_group_by(client: TestClient) -> None:
     csv_text = _csv(["Alice,Riverview,Test,0000000001"])
     response = client.post(

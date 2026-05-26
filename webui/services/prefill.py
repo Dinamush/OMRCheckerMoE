@@ -114,12 +114,16 @@ def _images_to_pdf_bytes_fast(png_bytes_list: list[bytes]) -> bytes:
 
 def _validate_candidate_number(candidate_number: str) -> None:
     if len(candidate_number) != 10 or not candidate_number.isdigit():
-        raise ValueError("Candidate number must be exactly 10 digits.")
+        display_value = candidate_number if candidate_number else "<blank>"
+        raise ValueError(
+            "Candidate number must be exactly 10 digits; "
+            f"got {display_value!r}."
+        )
 
 
 def _build_payload(stamped_bytes: bytes, row: dict[str, Any]) -> dict[str, Any]:
     """Validate + sanitise a row into a legacy worker payload (includes stamped_bytes)."""
-    candidate_number = _clean_field(row.get("candidate_number"), max_len=10)
+    candidate_number = _clean_field(row.get("candidate_number"), max_len=64)
     _validate_candidate_number(candidate_number)
     return {
         "stamped_bytes": stamped_bytes,
@@ -143,7 +147,7 @@ def _build_fast_payload(
     row's ``marking_profile`` column overrides the batch-level profile when
     present, otherwise the batch default is used.
     """
-    candidate_number = _clean_field(row.get("candidate_number"), max_len=10)
+    candidate_number = _clean_field(row.get("candidate_number"), max_len=64)
     _validate_candidate_number(candidate_number)
 
     row_profile = _clean_field(row.get("marking_profile"), max_len=64) or marking_profile
@@ -176,6 +180,50 @@ def _build_fast_payload(
         "marking_profile": row_profile,
         "answers": parsed_answers,
     }
+
+
+def _valid_fast_payloads(
+    rows: list[dict[str, Any]],
+    *,
+    output_format: str = "png",
+    realism_preset: str = "none",
+    marking_profile: str = "none",
+    answers: Any = None,
+    include_page_numbers: bool = False,
+) -> tuple[list[dict[str, Any]], list[int], list[str]]:
+    """Build render payloads, preserving row-level errors for invalid rows.
+
+    Validation happens before worker submission, so a single bad CSV row
+    should be skipped rather than aborting the whole batch or region group.
+    ``source_rows`` maps payload indexes back to the 1-based CSV row number
+    within the current batch/group for accurate error messages.
+    """
+    payloads: list[dict[str, Any]] = []
+    source_rows: list[int] = []
+    errors: list[str] = []
+
+    for row_number, row in enumerate(rows, start=1):
+        source_row_number = int(row.get("_source_row_number") or row_number)
+        try:
+            payload = _build_fast_payload(
+                row,
+                output_format=output_format,
+                realism_preset=realism_preset,
+                marking_profile=marking_profile,
+                answers=answers,
+            )
+        except Exception as exc:  # noqa: BLE001 - report per-row validation
+            errors.append(f"row {source_row_number}: {type(exc).__name__}: {exc}")
+            continue
+
+        if include_page_numbers:
+            # Number only the sheets that will actually be rendered so the
+            # produced PDF stays continuous even when invalid rows are skipped.
+            payload["page_number"] = len(payloads) + 1
+        payloads.append(payload)
+        source_rows.append(source_row_number)
+
+    return payloads, source_rows, errors
 
 
 # ---------------------------------------------------------------------------
@@ -474,7 +522,7 @@ def generate_single_png(
     marking_profile: str = "none",
     answers: Any = None,
 ) -> bytes:
-    candidate_number = _clean_field(candidate_number, max_len=10)
+    candidate_number = _clean_field(candidate_number, max_len=64)
     _validate_candidate_number(candidate_number)
     realism_preset = normalize_realism_preset(realism_preset)
     marking_profile = normalize_marking_profile(marking_profile or "none")
@@ -520,7 +568,7 @@ def generate_single_pdf(
 ) -> bytes:
     import fitz
     import struct
-    candidate_number = _clean_field(candidate_number, max_len=10)
+    candidate_number = _clean_field(candidate_number, max_len=64)
     _validate_candidate_number(candidate_number)
     png_bytes = generate_single_png(
         student_name,
@@ -572,31 +620,27 @@ def generate_batch_pdf_to_file(
 
     realism_preset = normalize_realism_preset(realism_preset)
     marking_profile = normalize_marking_profile(marking_profile or "none")
-    payloads = []
-    for idx, row in enumerate(rows, start=1):
-        payload = _build_fast_payload(
-            row,
-            output_format="jpeg",
-            realism_preset=realism_preset,
-            marking_profile=marking_profile,
-            answers=answers,
-        )
-        if include_page_numbers:
-            payload["page_number"] = idx
-        payloads.append(payload)
+    payloads, source_rows, errors = _valid_fast_payloads(
+        rows,
+        output_format="jpeg",
+        realism_preset=realism_preset,
+        marking_profile=marking_profile,
+        answers=answers,
+        include_page_numbers=include_page_numbers,
+    )
 
     dst_path.parent.mkdir(parents=True, exist_ok=True)
     doc = fitz.open()
     successes = 0
-    errors: list[str] = []
     last_log = time.perf_counter()
 
     # Log progress at ~10% intervals (min every 100 rows, max every 500).
     _progress_step = max(100, min(500, count // 10 or 1))
     try:
         for idx, img_bytes, err in _iter_pngs_fast(payloads):
+            row_number = source_rows[idx] if idx < len(source_rows) else idx + 1
             if err or img_bytes is None:
-                errors.append(f"row {idx}: {err or 'empty result'}")
+                errors.append(f"row {row_number}: {err or 'empty result'}")
                 continue
             try:
                 # JPEG bytes: read dimensions via fitz (avoids struct parsing JPEG SOF)
@@ -607,7 +651,7 @@ def generate_batch_pdf_to_file(
                 page.insert_image(page.rect, stream=img_bytes)
                 successes += 1
             except Exception as exc:  # noqa: BLE001
-                errors.append(f"row {idx}: {type(exc).__name__}: {exc}")
+                errors.append(f"row {row_number}: {type(exc).__name__}: {exc}")
             # Progress log at ~10% intervals or every 30s
             now = time.perf_counter()
             if successes % _progress_step == 0 and successes > 0 or now - last_log > 30:
@@ -623,10 +667,13 @@ def generate_batch_pdf_to_file(
             successes,
             dst_path,
         )
-        # Full garbage collection (garbage=4) is very expensive on thousands
-        # of image-only pages and looks like a hang after rendering finishes.
-        # These files are newly built, so a plain save is enough and much faster.
-        doc.save(str(dst_path), garbage=0, deflate=False)
+        if successes > 0:
+            # Full garbage collection (garbage=4) is very expensive on thousands
+            # of image-only pages and looks like a hang after rendering finishes.
+            # These files are newly built, so a plain save is enough and much faster.
+            doc.save(str(dst_path), garbage=0, deflate=False)
+        else:
+            dst_path.write_bytes(b"")
         logger.info(
             "Prefill PDF final save complete | pages=%d | elapsed=%.1fs",
             successes,
@@ -643,6 +690,16 @@ def generate_batch_pdf_to_file(
         "rate=%.0f/min | size_mb=%.1f",
         count, successes, len(errors), elapsed, rate, size_bytes / (1024 * 1024),
     )
+    if errors:
+        preview = " | ".join(errors[:10])
+        if len(errors) > 10:
+            preview += f" | ...and {len(errors) - 10} more"
+        logger.warning(
+            "Prefill batch PDF row errors | showing=%d/%d | %s",
+            min(len(errors), 10),
+            len(errors),
+            preview,
+        )
     return {
         "count": count,
         "successes": successes,
@@ -778,7 +835,10 @@ def generate_batch_grouped_zip_to_file(
     ) as zf:
         for key, indexed_rows in grouped.items():
             entry_name = _group_zip_entry_name(key)
-            group_rows = [row for _, row in indexed_rows]
+            group_rows = [
+                {**row, "_source_row_number": original_index + 1}
+                for original_index, row in indexed_rows
+            ]
             with tempfile.NamedTemporaryFile(
                 prefix="prefill_group_", suffix=".pdf", delete=False
             ) as tmp:
@@ -862,38 +922,47 @@ def generate_batch_zip_to_file(
     t_batch = time.perf_counter()
 
     marking_profile = normalize_marking_profile(marking_profile or "none")
-    payloads: list[dict] = []
+    payloads: list[dict[str, Any]] = []
+    source_rows: list[int] = []
     filenames: list[str] = []
+    errors: list[str] = []
     for i, row in enumerate(rows, start=1):
-        payloads.append(
-            _build_fast_payload(
+        source_row_number = int(row.get("_source_row_number") or i)
+        filename = Path(_clean_field(row.get("output_file", "")) or "").name \
+            or f"sheet_{i:03d}.png"
+        if not filename.lower().endswith(".png"):
+            filename += ".png"
+        try:
+            payload = _build_fast_payload(
                 row,
                 realism_preset=realism_preset,
                 marking_profile=marking_profile,
                 answers=answers,
             )
-        )
-        filename = Path(_clean_field(row.get("output_file", "")) or "").name \
-            or f"sheet_{i:03d}.png"
-        if not filename.lower().endswith(".png"):
-            filename += ".png"
+        except Exception as exc:  # noqa: BLE001 - skip bad rows, keep batch alive
+            errors.append(
+                f"row {source_row_number} ({filename}): {type(exc).__name__}: {exc}"
+            )
+            continue
+        payloads.append(payload)
+        source_rows.append(source_row_number)
         filenames.append(filename)
 
     dst_path.parent.mkdir(parents=True, exist_ok=True)
     successes = 0
-    errors: list[str] = []
     with zipfile.ZipFile(
         dst_path, mode="w", compression=zipfile.ZIP_DEFLATED, compresslevel=1
     ) as zf:
         for idx, png_bytes, err in _iter_pngs_fast(payloads, preserve_order=False):
+            row_number = source_rows[idx] if idx < len(source_rows) else idx + 1
             if err or png_bytes is None:
-                errors.append(f"row {idx} ({filenames[idx]}): {err or 'empty result'}")
+                errors.append(f"row {row_number} ({filenames[idx]}): {err or 'empty result'}")
                 continue
             try:
                 zf.writestr(filenames[idx], png_bytes)
                 successes += 1
             except Exception as exc:  # noqa: BLE001
-                errors.append(f"row {idx}: {type(exc).__name__}: {exc}")
+                errors.append(f"row {row_number}: {type(exc).__name__}: {exc}")
 
     elapsed = time.perf_counter() - t_batch
     size_bytes = dst_path.stat().st_size if dst_path.exists() else 0
@@ -903,6 +972,16 @@ def generate_batch_zip_to_file(
         "rate=%.0f/min | size_mb=%.1f",
         count, successes, len(errors), elapsed, rate, size_bytes / (1024 * 1024),
     )
+    if errors:
+        preview = " | ".join(errors[:10])
+        if len(errors) > 10:
+            preview += f" | ...and {len(errors) - 10} more"
+        logger.warning(
+            "Prefill batch ZIP row errors | showing=%d/%d | %s",
+            min(len(errors), 10),
+            len(errors),
+            preview,
+        )
     return {
         "count": count,
         "successes": successes,
@@ -1280,7 +1359,10 @@ def generate_batch_grouped_split_zip_to_file(
             # suffixes; ``entry_base`` may also contain ``region/school``
             # which we want to preserve as a folder prefix in the ZIP.
             stem = entry_base[:-4] if entry_base.lower().endswith(".pdf") else entry_base
-            group_rows = [row for _, row in indexed_rows]
+            group_rows = [
+                {**row, "_source_row_number": original_index + 1}
+                for original_index, row in indexed_rows
+            ]
 
             with tempfile.NamedTemporaryFile(
                 prefix="prefill_group_", suffix=".pdf", delete=False
@@ -1299,6 +1381,10 @@ def generate_batch_grouped_split_zip_to_file(
                 )
                 if group_meta["successes"] == 0:
                     errors.append(f"group {entry_base!r}: all rows failed")
+                    if group_meta.get("errors"):
+                        errors.extend(
+                            f"group {entry_base!r}: {e}" for e in group_meta["errors"]
+                        )
                     group_summaries.append(
                         {
                             "name": entry_base,

@@ -1818,12 +1818,13 @@ async def prefill_batch(
     # an empty PDF/zip the user has to inspect to discover.
     if meta["successes"] == 0:
         _cleanup()
+        error_preview = "; ".join(str(err) for err in meta.get("errors", [])[:10])
+        if len(meta.get("errors", [])) > 10:
+            error_preview += f"; ...and {len(meta['errors']) - 10} more error(s)"
         raise HTTPException(
             status_code=422,
-            detail={
-                "message": "All rows failed to generate.",
-                "errors": meta["errors"],
-            },
+            detail="All rows failed to generate."
+            + (f" Errors: {error_preview}" if error_preview else ""),
         )
 
     # Release the semaphore now — generation is done, file is held for download.

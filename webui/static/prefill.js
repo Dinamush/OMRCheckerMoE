@@ -29,6 +29,52 @@ function showError(el, msg) {
     el.style.display = msg ? '' : 'none';
 }
 
+function formatErrorDetail(detail, fallback = 'Request failed') {
+    if (!detail) return fallback;
+    if (typeof detail === 'string') return detail;
+    if (Array.isArray(detail)) {
+        return detail.map(item => formatErrorDetail(item, '')).filter(Boolean).join('\n') || fallback;
+    }
+    if (typeof detail === 'object') {
+        const message = detail.message || detail.msg || detail.detail || '';
+        const errors = Array.isArray(detail.errors) ? detail.errors : [];
+        const parts = [];
+        if (message) parts.push(formatErrorDetail(message, ''));
+        if (errors.length) {
+            const shown = errors.slice(0, 10).map(err => formatErrorDetail(err, '')).filter(Boolean);
+            parts.push(...shown);
+            if (errors.length > shown.length) {
+                parts.push(`…and ${errors.length - shown.length} more error(s).`);
+            }
+        }
+        if (parts.length) return parts.join('\n');
+        try {
+            return JSON.stringify(detail);
+        } catch (_) {
+            return fallback;
+        }
+    }
+    return String(detail);
+}
+
+function formatGenerationWarning(body) {
+    if (!body || typeof body !== 'object') return '';
+    const count = Number(body.count || 0);
+    const successes = Number(body.successes || 0);
+    const errors = Array.isArray(body.errors) ? body.errors : [];
+    if (!count || successes >= count || !errors.length) return '';
+    const skipped = count - successes;
+    const shown = errors.slice(0, 10).map(err => formatErrorDetail(err, '')).filter(Boolean);
+    const parts = [
+        `Generated ${successes}/${count} sheet(s); skipped ${skipped} row(s).`,
+        ...shown,
+    ];
+    if (errors.length > shown.length) {
+        parts.push(`…and ${errors.length - shown.length} more error(s).`);
+    }
+    return parts.join('\n');
+}
+
 function setLoading(btn, loading) {
     btn.disabled = loading;
     btn.textContent = loading ? 'Generating…' : 'Generate & Download';
@@ -78,7 +124,7 @@ async function postFormAndDownload(url, formData, submitBtn, errorEl, hintEl) {
             let detail = `Server error ${res.status}`;
             try {
                 const body = await res.json();
-                detail = body.detail || detail;
+                detail = formatErrorDetail(body.detail || body, detail);
             } catch (_) {}
             showError(errorEl, detail);
             return;
@@ -87,6 +133,8 @@ async function postFormAndDownload(url, formData, submitBtn, errorEl, hintEl) {
         if (contentType.includes('application/json')) {
             const body = await res.json();
             if (body.download_url) {
+                const warning = formatGenerationWarning(body);
+                if (warning) showError(errorEl, warning);
                 if (hintEl && body.filename) {
                     hintEl.textContent = `Last download from server: ${body.filename}`;
                     hintEl.style.display = '';
