@@ -51,9 +51,39 @@ def _atomic_replace(tmp: Path, dest: Path) -> None:
         except PermissionError:
             if attempt < 2:
                 time.sleep(0.05 * (attempt + 1))
+        except FileNotFoundError:
+            # The temp file vanished before we could rename it — only possible
+            # if a concurrent writer raced us to this exact temp path.  Unique
+            # per-write temp names (see _save_metadata) make this practically
+            # impossible, but tolerate it defensively rather than 500-ing.
+            return
     # Last-resort fallback: not atomic, but avoids a hard crash.
-    shutil.copy2(tmp, dest)
-    tmp.unlink(missing_ok=True)
+    try:
+        shutil.copy2(tmp, dest)
+        tmp.unlink(missing_ok=True)
+    except FileNotFoundError:
+        pass
+
+
+# Per-batch reentrant locks serialising metadata read-modify-write so that
+# concurrent writers (PDF-split progress threads for several uploads plus a
+# status transition from the /process request) never lose each other's
+# updates or race on the temp-file rename.  WeakValueDictionary lets a lock
+# die once no caller still references it; the returned lock stays alive on the
+# caller's stack for the duration of the ``with`` block.
+_METADATA_LOCKS: "weakref.WeakValueDictionary[str, threading.RLock]" = (
+    weakref.WeakValueDictionary()
+)
+_METADATA_LOCKS_MASTER = threading.Lock()
+
+
+def _metadata_lock(batch_id: str) -> "threading.RLock":
+    with _METADATA_LOCKS_MASTER:
+        lock = _METADATA_LOCKS.get(batch_id)
+        if lock is None:
+            lock = threading.RLock()
+            _METADATA_LOCKS[batch_id] = lock
+        return lock
 
 from webui.schemas import (
     Batch,
@@ -180,26 +210,67 @@ def _load_metadata(settings: Settings, batch_id: str) -> dict[str, Any]:
     meta_path = _metadata_path(settings, batch_id)
     if not meta_path.exists():
         raise BatchNotFound(batch_id)
-    with meta_path.open("r", encoding="utf-8") as fh:
+    # Read with retries to ride out two Windows-specific transient races
+    # that surface under heavy concurrent writes:
+    #   * PermissionError [Errno 13] — another thread is mid-``os.replace``
+    #     of metadata.json; Windows briefly denies opens during the rename.
+    #   * FileNotFoundError — the same replace momentarily exposes a gap
+    #     between unlink-old and link-new.
+    #   * JSONDecodeError — the file is being rewritten and a stale partial
+    #     was caught (very rare with rename-based atomic writes but possible
+    #     on the legacy fast path).
+    # Three quick retries at 5/15/35 ms cover every collision we have ever
+    # seen in production; falling through to an empty dict matches the
+    # caller contract (best-effort polling of cancel_requested / progress)
+    # rather than crashing the worker.
+    last_exc: BaseException | None = None
+    for attempt in range(4):
         try:
-            return json.load(fh)
-        except json.JSONDecodeError:
-            # Transient: another thread is mid-write. Return an empty dict so
-            # callers degrade gracefully; the next read will see the full file.
+            with meta_path.open("r", encoding="utf-8") as fh:
+                try:
+                    return json.load(fh)
+                except json.JSONDecodeError:
+                    return {}
+        except (PermissionError, FileNotFoundError) as exc:
+            last_exc = exc
+            if attempt < 3:
+                time.sleep(0.005 * (2 ** attempt))
+                continue
+            logger.debug(
+                "metadata read race exhausted retries | batch=%s | %s: %s",
+                batch_id, type(exc).__name__, exc,
+            )
             return {}
+    # Unreachable, but mypy/pyright like an explicit return.
+    if last_exc is not None:
+        return {}
+    return {}
 
 
 def _save_metadata(settings: Settings, batch_id: str, data: dict[str, Any]) -> None:
     meta_path = _metadata_path(settings, batch_id)
     meta_path.parent.mkdir(parents=True, exist_ok=True)
     data = {k: _serialise(v) for k, v in data.items()}
-    # Write to a sibling temp file then atomically rename so readers never
-    # see a truncated or partially-written file (os.replace is atomic on
-    # both POSIX and Windows NT).
-    tmp = meta_path.with_suffix(".tmp")
-    with tmp.open("w", encoding="utf-8") as fh:
-        json.dump(data, fh, indent=2, sort_keys=True)
-    _atomic_replace(tmp, meta_path)
+    # Write to a UNIQUE sibling temp file then atomically rename so readers
+    # never see a truncated or partially-written file (os.replace is atomic on
+    # both POSIX and Windows NT).  The temp name must be unique per write:
+    # several threads (one PDF-split progress writer per concurrent upload,
+    # plus a /process status transition) can call this simultaneously, and a
+    # shared "metadata.tmp" would let one thread's rename consume the file the
+    # next thread is about to rename -> FileNotFoundError [WinError 2].
+    tmp = meta_path.with_name(
+        f"{meta_path.stem}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    )
+    # Serialise the rename per batch so concurrent writers can't race on the
+    # destination; the unique temp name above already prevents the crash, and
+    # the lock additionally keeps writes well-ordered.
+    with _metadata_lock(batch_id):
+        try:
+            with tmp.open("w", encoding="utf-8") as fh:
+                json.dump(data, fh, indent=2, sort_keys=True)
+            _atomic_replace(tmp, meta_path)
+        finally:
+            tmp.unlink(missing_ok=True)
 
 
 def _file_count(batch_dir: Path) -> int:
@@ -344,15 +415,16 @@ def update_status(
 ) -> Batch:
     """Persist a status transition for a batch."""
     settings = settings or get_settings()
-    meta = _load_metadata(settings, batch_id)
-    meta["status"] = status.value
-    meta["updated_at"] = _now().isoformat()
-    if last_error is not None or status == BatchStatus.failed:
-        meta["last_error"] = last_error
-    elif status in {BatchStatus.queued, BatchStatus.running, BatchStatus.done}:
-        meta["last_error"] = None
-    _save_metadata(settings, batch_id, meta)
-    return _to_batch(settings, batch_id, meta)
+    with _metadata_lock(batch_id):
+        meta = _load_metadata(settings, batch_id)
+        meta["status"] = status.value
+        meta["updated_at"] = _now().isoformat()
+        if last_error is not None or status == BatchStatus.failed:
+            meta["last_error"] = last_error
+        elif status in {BatchStatus.queued, BatchStatus.running, BatchStatus.done}:
+            meta["last_error"] = None
+        _save_metadata(settings, batch_id, meta)
+        return _to_batch(settings, batch_id, meta)
 
 
 def set_rotation(
@@ -366,11 +438,12 @@ def set_rotation(
         raise InvalidBatchRequest(
             f"Invalid rotation {degrees!r}; allowed: {sorted(VALID_ROTATIONS)}"
         )
-    meta = _load_metadata(settings, batch_id)
-    meta["rotation_degrees"] = degrees
-    meta["updated_at"] = _now().isoformat()
-    _save_metadata(settings, batch_id, meta)
-    return _to_batch(settings, batch_id, meta)
+    with _metadata_lock(batch_id):
+        meta = _load_metadata(settings, batch_id)
+        meta["rotation_degrees"] = degrees
+        meta["updated_at"] = _now().isoformat()
+        _save_metadata(settings, batch_id, meta)
+        return _to_batch(settings, batch_id, meta)
 
 
 def set_source(
@@ -381,16 +454,17 @@ def set_source(
 ) -> None:
     """Record the last source used to add files to a batch."""
     settings = settings or get_settings()
-    meta = _load_metadata(settings, batch_id)
-    existing = meta.get("source_mode")
-    if existing and existing != source_mode.value:
-        meta["source_mode"] = SourceMode.mixed.value
-    else:
-        meta["source_mode"] = source_mode.value
-    if source_dir is not None:
-        meta["source_dir"] = source_dir
-    meta["updated_at"] = _now().isoformat()
-    _save_metadata(settings, batch_id, meta)
+    with _metadata_lock(batch_id):
+        meta = _load_metadata(settings, batch_id)
+        existing = meta.get("source_mode")
+        if existing and existing != source_mode.value:
+            meta["source_mode"] = SourceMode.mixed.value
+        else:
+            meta["source_mode"] = source_mode.value
+        if source_dir is not None:
+            meta["source_dir"] = source_dir
+        meta["updated_at"] = _now().isoformat()
+        _save_metadata(settings, batch_id, meta)
 
 
 def list_files(batch_id: str, settings: Settings | None = None) -> list[FileRef]:
@@ -472,11 +546,12 @@ def _write_pdf_split_progress(
     if batch_id is None or settings is None:
         return
     try:
-        meta = _load_metadata(settings, batch_id)
-        meta["pdf_split_pages"] = pages_done
-        meta["pdf_split_total"] = total
-        meta["updated_at"] = _now().isoformat()
-        _save_metadata(settings, batch_id, meta)
+        with _metadata_lock(batch_id):
+            meta = _load_metadata(settings, batch_id)
+            meta["pdf_split_pages"] = pages_done
+            meta["pdf_split_total"] = total
+            meta["updated_at"] = _now().isoformat()
+            _save_metadata(settings, batch_id, meta)
     except Exception:  # noqa: BLE001
         pass  # progress write failure must never abort the split
 
@@ -495,12 +570,13 @@ def _record_pdf_split_error(
     if not batch_id or settings is None:
         return
     try:
-        meta = _load_metadata(settings, batch_id)
-        meta["pdf_split_error"] = message
-        meta["pdf_split_pages"] = 0
-        meta["pdf_split_total"] = 0
-        meta["updated_at"] = _now().isoformat()
-        _save_metadata(settings, batch_id, meta)
+        with _metadata_lock(batch_id):
+            meta = _load_metadata(settings, batch_id)
+            meta["pdf_split_error"] = message
+            meta["pdf_split_pages"] = 0
+            meta["pdf_split_total"] = 0
+            meta["updated_at"] = _now().isoformat()
+            _save_metadata(settings, batch_id, meta)
     except Exception:  # noqa: BLE001
         pass
 
@@ -525,9 +601,10 @@ def save_uploaded_file(
     if suffix in PDF_EXTENSIONS:
         # Clear any error from a previous failed split before attempting the new one.
         try:
-            _meta = _load_metadata(settings, batch_id)
-            _meta["pdf_split_error"] = None
-            _save_metadata(settings, batch_id, _meta)
+            with _metadata_lock(batch_id):
+                _meta = _load_metadata(settings, batch_id)
+                _meta["pdf_split_error"] = None
+                _save_metadata(settings, batch_id, _meta)
         except Exception:  # noqa: BLE001
             pass
         stored = _save_pdf_pages_as_images(
@@ -545,6 +622,74 @@ def save_uploaded_file(
     target.write_bytes(data)
     set_source(batch_id, SourceMode.upload, None, settings)
     return [FileRef(name=target.name, size_bytes=target.stat().st_size)]
+
+
+def pdf_split_scratch_root(settings: Settings | None = None) -> Path:
+    """Return the directory used to stage PDF uploads on disk.
+
+    Lives under the AV-excluded cache root when one exists so multi-GiB
+    uploads don't get scanned mid-write.
+    """
+    settings = settings or get_settings()
+    try:
+        root = settings.ensure_cache_root() / "pdf_split_inputs"
+    except Exception:  # noqa: BLE001
+        root = settings.ensure_storage() / "_pdf_split_inputs"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def save_uploaded_pdf_from_path(
+    batch_id: str,
+    filename: str,
+    source_path: Path,
+    settings: Settings | None = None,
+    *,
+    delete_source: bool = True,
+) -> list[FileRef]:
+    """Split a PDF that has already been streamed to disk.
+
+    Used by the upload handler to skip a redundant in-memory copy of the
+    PDF bytes — for a 3.6 GiB upload that saves ~15-30s of double I/O
+    between "Upload received" and the first "page saved" log line.
+    """
+    settings = settings or get_settings()
+    inputs = _inputs_dir(settings, batch_id)
+    if not inputs.exists():
+        raise BatchNotFound(batch_id)
+    safe = _truncate_filename_stem(_sanitise_filename(filename))
+    suffix = Path(safe).suffix.lower()
+    if suffix not in PDF_EXTENSIONS:
+        raise InvalidBatchRequest(
+            f"save_uploaded_pdf_from_path requires a .pdf file (got {suffix!r})"
+        )
+    try:
+        with _metadata_lock(batch_id):
+            _meta = _load_metadata(settings, batch_id)
+            _meta["pdf_split_error"] = None
+            _save_metadata(settings, batch_id, _meta)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        stored = _save_pdf_pages_as_images(
+            inputs,
+            safe,
+            source_path=source_path,
+            dpi=settings.pdf_render_dpi,
+            grayscale=settings.pdf_render_grayscale,
+            page_format=settings.pdf_page_format,
+            jpeg_quality=settings.pdf_jpeg_quality,
+            batch_id=batch_id,
+            settings=settings,
+        )
+    finally:
+        if delete_source:
+            try:
+                Path(source_path).unlink(missing_ok=True)
+            except OSError:
+                pass
+    set_source(batch_id, SourceMode.upload, None, settings)
+    return stored
 
 
 # Per-worker cache: each ProcessPoolExecutor worker keeps the parsed PDF
@@ -895,8 +1040,9 @@ def _default_pdf_split_workers(settings: Settings | None) -> int:
 def _save_pdf_pages_as_images(
     inputs: Path,
     safe_filename: str,
-    data: bytes,
+    data: bytes | None = None,
     *,
+    source_path: Path | str | None = None,
     dpi: int = 150,
     grayscale: bool = True,
     page_format: str = "jpeg",
@@ -928,21 +1074,103 @@ def _save_pdf_pages_as_images(
     _fmt_name, ext = _resolve_pdf_format(page_format)
     quality = max(60, min(100, int(jpeg_quality)))
 
-    # Determine page count cheaply (one parse) before deciding strategy.
+    # Open the PDF BY PATH (memory-mapped) for the rest of this function.
+    # PyMuPDF/MuPDF crashes the whole process (segfault, no Python exception)
+    # when opened from an in-memory ``stream=`` buffer larger than 2 GiB
+    # because its stream offsets are 32-bit signed.  Opening by path also
+    # avoids the parallel renderer re-writing the same bytes.
+    #
+    # Two entry modes are supported:
+    #   * ``source_path``: caller has already staged the upload on disk
+    #     (e.g. the API streamed the multipart body directly to a temp file).
+    #     We use it in-place and do NOT delete it — caller owns its lifecycle.
+    #   * ``data``: legacy bytes path; we stage to a temp file ourselves and
+    #     clean it up in ``finally``.
+    if source_path is not None:
+        staged_pdf_str = str(source_path)
+        owns_staged = False
+        staged_pdf_path: Path | None = None
+    else:
+        if data is None:
+            raise InvalidBatchRequest(
+                f"PDF {safe_filename!r}: caller must supply data or source_path"
+            )
+        if settings is not None:
+            try:
+                scratch_root = settings.ensure_cache_root() / "pdf_split_inputs"
+            except Exception:  # noqa: BLE001
+                scratch_root = inputs
+        else:
+            scratch_root = inputs
+        scratch_root.mkdir(parents=True, exist_ok=True)
+        staged_pdf_path = (
+            scratch_root / f"{uuid.uuid4().hex}_{Path(safe_filename).name}"
+        )
+        try:
+            staged_pdf_path.write_bytes(data)
+        except OSError as exc:
+            raise InvalidBatchRequest(
+                f"Could not stage PDF {safe_filename!r} to disk: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+        staged_pdf_str = str(staged_pdf_path)
+        owns_staged = True
+
     try:
-        with fitz.open(stream=data, filetype="pdf") as probe:
-            page_count = probe.page_count
-    except InvalidBatchRequest:
-        raise
-    except Exception as exc:
-        raise InvalidBatchRequest(
-            f"Could not convert PDF {safe_filename!r}: "
-            f"{type(exc).__name__}: {exc}"
-        ) from exc
+        # Determine page count cheaply (one parse) before deciding strategy.
+        try:
+            with fitz.open(staged_pdf_str) as probe:
+                page_count = probe.page_count
+        except InvalidBatchRequest:
+            raise
+        except Exception as exc:
+            raise InvalidBatchRequest(
+                f"Could not convert PDF {safe_filename!r}: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
 
-    if page_count == 0:
-        raise InvalidBatchRequest(f"PDF has no pages: {safe_filename}")
+        if page_count == 0:
+            raise InvalidBatchRequest(f"PDF has no pages: {safe_filename}")
 
+        return _split_staged_pdf(
+            inputs=inputs,
+            safe_filename=safe_filename,
+            staged_pdf_str=staged_pdf_str,
+            page_count=page_count,
+            ext=ext,
+            dpi=dpi,
+            grayscale=grayscale,
+            quality=quality,
+            batch_id=batch_id,
+            settings=settings,
+        )
+    finally:
+        if owns_staged and staged_pdf_path is not None:
+            try:
+                staged_pdf_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _split_staged_pdf(
+    *,
+    inputs: Path,
+    safe_filename: str,
+    staged_pdf_str: str,
+    page_count: int,
+    ext: str,
+    dpi: int,
+    grayscale: bool,
+    quality: int,
+    batch_id: str | None,
+    settings: Settings | None,
+) -> list[FileRef]:
+    """Render an already-staged (on-disk) PDF into per-page images.
+
+    Split out from :func:`_save_pdf_pages_as_images` so the staging /
+    temp-file cleanup lifecycle stays in one place while this function owns
+    the per-stem locking and parallel/serial routing.
+    """
     stem = Path(safe_filename).stem
 
     # Path-aware stem truncation: even after the pre-call _truncate_filename_stem()
@@ -992,7 +1220,7 @@ def _save_pdf_pages_as_images(
                 stored, failed_pages = _save_pdf_pages_parallel(
                     inputs=inputs,
                     safe_filename=safe_filename,
-                    data=data,
+                    pdf_path=staged_pdf_str,
                     stem=stem,
                     page_count=page_count,
                     dpi=dpi,
@@ -1012,7 +1240,7 @@ def _save_pdf_pages_as_images(
                     stored, failed_pages = _save_pdf_pages_serial(
                         inputs=inputs,
                         safe_filename=safe_filename,
-                        data=data,
+                        pdf_path=staged_pdf_str,
                         stem=stem,
                         page_count=page_count,
                         dpi=dpi,
@@ -1055,7 +1283,7 @@ def _save_pdf_pages_serial(
     *,
     inputs: Path,
     safe_filename: str,
-    data: bytes,
+    pdf_path: str,
     stem: str,
     page_count: int,
     dpi: int,
@@ -1065,7 +1293,12 @@ def _save_pdf_pages_serial(
     batch_id: str | None,
     settings: Settings | None,
 ) -> tuple[list[FileRef], list[int]]:
-    """Single-threaded PDF -> image render. Used for small PDFs."""
+    """Single-threaded PDF -> image render. Used for small PDFs.
+
+    Opens the staged PDF **by path** (memory-mapped) rather than from an
+    in-memory ``stream=`` buffer; the latter segfaults MuPDF for files
+    larger than 2 GiB.
+    """
     import fitz
 
     stored: list[FileRef] = []
@@ -1073,7 +1306,7 @@ def _save_pdf_pages_serial(
     fast_path_count = 0
     colorspace = fitz.csGRAY if grayscale else fitz.csRGB
 
-    with fitz.open(stream=data, filetype="pdf") as pdf:
+    with fitz.open(pdf_path) as pdf:
         for page_index, page in enumerate(pdf, start=1):
             try:
                 # Fast path: extract a full-page embedded image directly.
@@ -1141,7 +1374,7 @@ def _save_pdf_pages_parallel(
     *,
     inputs: Path,
     safe_filename: str,
-    data: bytes,
+    pdf_path: str,
     stem: str,
     page_count: int,
     dpi: int,
@@ -1154,28 +1387,13 @@ def _save_pdf_pages_parallel(
 ) -> tuple[list[FileRef], list[int]]:
     """Parallel PDF -> image render via :class:`ProcessPoolExecutor`.
 
-    Each worker process opens the PDF once (cached in
+    Each worker process opens the already-staged PDF once (cached in
     :data:`_PDF_WORKER_CACHE`) and renders the pages routed to it. The PDF
-    bytes are written to a single temporary file under the scratch cache
-    root and each worker opens it by path — that avoids pickling the full
-    PDF bytes (potentially 100+ MB) once per worker process, and keeps the
-    temp file inside the SEP-excluded directory.
+    is referenced by path (staged on disk by the caller) so each task is
+    tiny to pickle and the giant PDF bytes are never copied per worker.
+    The caller owns the staged file's lifecycle and deletes it afterwards.
     """
-    # Stage the PDF as a single file under the scratch cache. Using the
-    # cache root means the temp file lands inside the AV exclusion (one
-    # place, not %TEMP%).
-    if settings is not None:
-        try:
-            scratch_root = settings.ensure_cache_root() / "pdf_split_inputs"
-        except Exception:  # noqa: BLE001
-            scratch_root = inputs
-    else:
-        scratch_root = inputs
-    scratch_root.mkdir(parents=True, exist_ok=True)
-    pdf_tmp_name = f"{uuid.uuid4().hex}_{Path(safe_filename).name}"
-    pdf_tmp_path = scratch_root / pdf_tmp_name
-    pdf_tmp_path.write_bytes(data)
-    pdf_path_str = str(pdf_tmp_path)
+    pdf_path_str = pdf_path
 
     stored_by_index: dict[int, FileRef] = {}
     failed_pages: list[int] = []
@@ -1264,12 +1482,10 @@ def _save_pdf_pages_parallel(
                 safe_filename, fast_path_count, page_count, fallback_count,
             )
     finally:
-        # Always clean up the staged PDF — workers have already closed
-        # their handles when the executor shut down.
-        try:
-            pdf_tmp_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        # The staged PDF is owned and cleaned up by the caller
+        # (_save_pdf_pages_as_images); workers have released their handles
+        # once the futures completed.  Nothing to clean up here.
+        pass
 
     failed_pages.sort()
     # Return refs in page order so the UI list is naturally sorted by page.
@@ -1419,9 +1635,10 @@ def save_json_document(
     with tmp.open("w", encoding="utf-8") as fh:
         json.dump(content, fh, indent=2, sort_keys=True)
     _atomic_replace(tmp, path)
-    meta = _load_metadata(settings, batch_id)
-    meta["updated_at"] = _now().isoformat()
-    _save_metadata(settings, batch_id, meta)
+    with _metadata_lock(batch_id):
+        meta = _load_metadata(settings, batch_id)
+        meta["updated_at"] = _now().isoformat()
+        _save_metadata(settings, batch_id, meta)
 
 
 def get_batch_metadata(
@@ -1439,11 +1656,12 @@ def update_batch_metadata(
 ) -> dict[str, Any]:
     """Merge arbitrary keys into metadata.json and return the new payload."""
     settings = settings or get_settings()
-    meta = _load_metadata(settings, batch_id)
-    meta.update(updates)
-    meta["updated_at"] = _now().isoformat()
-    _save_metadata(settings, batch_id, meta)
-    return meta
+    with _metadata_lock(batch_id):
+        meta = _load_metadata(settings, batch_id)
+        meta.update(updates)
+        meta["updated_at"] = _now().isoformat()
+        _save_metadata(settings, batch_id, meta)
+        return meta
 
 
 def find_results_csv(batch_id: str, settings: Settings | None = None) -> Path | None:

@@ -113,13 +113,18 @@ def apply_preset_to_batch(
     preset_name: str,
     settings: Settings | None = None,
 ) -> None:
-    """Copy all files from a preset directory into a batch root."""
+    """Copy runtime preset files into a batch root.
+
+    Preset folders can include maintainer tooling such as generator scripts.
+    Copying those ``.py`` files into ``webui/storage`` makes Uvicorn's reload
+    watcher restart the server during batch creation, interrupting uploads.
+    """
     s = settings or get_settings()
     preset_dir = _resolve_preset_dir(s, preset_name)
     if not preset_dir.is_dir():
         raise ValueError(f"Preset {preset_name!r} not found.")
     for item in preset_dir.iterdir():
-        if item.is_file():
+        if item.is_file() and item.suffix.lower() != ".py":
             shutil.copy2(item, batch_root / item.name)
 
 

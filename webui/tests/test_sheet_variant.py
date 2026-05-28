@@ -29,6 +29,9 @@ def presets_dir(
     (tmp_path / VARIANTS_SMQ25_0 / "template.json").write_text(
         json.dumps({"variant_marker": "v1_legacy"}), encoding="utf-8"
     )
+    (tmp_path / VARIANTS_SMQ25_0 / "generate_blank.py").write_text(
+        "print('maintainer tooling')\n", encoding="utf-8"
+    )
 
     (tmp_path / PORTRAIT_SMQ25_1).mkdir()
     (tmp_path / PORTRAIT_SMQ25_1 / "template.json").write_text(
@@ -124,6 +127,7 @@ def test_apply_preset_copies_variant_files_into_batch(
     assert template_path.exists()
     body = json.loads(template_path.read_text(encoding="utf-8"))
     assert body["variant_marker"] == expected_marker
+    assert not (batch_root / "generate_blank.py").exists()
 
     config_path = batch_root / "config.json"
     assert config_path.exists() is expect_config

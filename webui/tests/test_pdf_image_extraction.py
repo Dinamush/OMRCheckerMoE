@@ -219,11 +219,16 @@ def test_serial_fast_path_produces_valid_image_files(tmp_path: Path) -> None:
     inputs = tmp_path / "inputs"
     inputs.mkdir()
 
+    # The renderer now opens the PDF by path (memory-mapped) rather than from
+    # an in-memory stream, so stage the bytes to a temp file first.
+    staged = tmp_path / "scan_staged.pdf"
+    staged.write_bytes(pdf_bytes)
+
     from webui.services.batches import _save_pdf_pages_serial
     stored, failed = _save_pdf_pages_serial(
         inputs=inputs,
         safe_filename="scan.pdf",
-        data=pdf_bytes,
+        pdf_path=str(staged),
         stem="scan",
         page_count=2,
         dpi=150,

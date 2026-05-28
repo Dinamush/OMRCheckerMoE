@@ -141,6 +141,13 @@ const _buildFileListItemHtml = (file, isActive, index) => `
     </li>
 `
 
+// Scaling guard: rendering 20,000+ file rows in one innerHTML assignment
+// froze the browser for many seconds, so file clicks and the post-OMR
+// auto-refresh felt broken.  Cap the visible window; users find specific
+// pages through the existing filter (which searches against the full list,
+// not the rendered subset).
+const FILE_NAVIGATOR_RENDER_LIMIT = 500
+
 const renderFileNavigator = (visibleFiles, selectedFileName) => {
     const elements = getFileBrowserElements()
     if (!elements.list) return
@@ -148,11 +155,29 @@ const renderFileNavigator = (visibleFiles, selectedFileName) => {
     if (elements.totalCount) {
         elements.totalCount.textContent = `(${fileBrowserState.files.length})`
     }
+
+    // If the selected file is outside the first FILE_NAVIGATOR_RENDER_LIMIT,
+    // include it at the end so it stays visible and remains selectable.
+    let renderedFiles = visibleFiles.slice(0, FILE_NAVIGATOR_RENDER_LIMIT)
+    const selectedInRendered = renderedFiles.some((f) => f.name === selectedFileName)
+    if (!selectedInRendered) {
+        const selected = visibleFiles.find((f) => f.name === selectedFileName)
+        if (selected) renderedFiles = renderedFiles.concat(selected)
+    }
+    const truncated = visibleFiles.length > renderedFiles.length
+
     if (elements.filteredCount) {
-        elements.filteredCount.textContent = `Showing ${visibleFiles.length} of ${fileBrowserState.files.length}`
+        if (truncated) {
+            elements.filteredCount.textContent =
+                `Showing ${renderedFiles.length} of ${visibleFiles.length}` +
+                ` (filter to find specific pages — full list still searchable)`
+        } else {
+            elements.filteredCount.textContent =
+                `Showing ${visibleFiles.length} of ${fileBrowserState.files.length}`
+        }
     }
 
-    if (visibleFiles.length === 0) {
+    if (renderedFiles.length === 0) {
         _renderedFileNames = []
         const query = fileBrowserState.filterQuery.trim()
         elements.list.innerHTML = `<li class="file-list-empty">${query ? `No files match "${escapeHtml(query)}".` : "No files uploaded yet."}</li>`
@@ -166,25 +191,26 @@ const renderFileNavigator = (visibleFiles, selectedFileName) => {
     const prev = _renderedFileNames
     const canAppend =
         prev.length > 0 &&
-        visibleFiles.length > prev.length &&
-        prev.every((name, i) => visibleFiles[i]?.name === name)
+        renderedFiles.length > prev.length &&
+        renderedFiles.length <= FILE_NAVIGATOR_RENDER_LIMIT + 1 &&
+        prev.every((name, i) => renderedFiles[i]?.name === name)
 
     if (canAppend) {
         const template = document.createElement("template")
         const fragment = document.createDocumentFragment()
-        for (let i = prev.length; i < visibleFiles.length; i++) {
-            template.innerHTML = _buildFileListItemHtml(visibleFiles[i], visibleFiles[i].name === selectedFileName, i).trim()
+        for (let i = prev.length; i < renderedFiles.length; i++) {
+            template.innerHTML = _buildFileListItemHtml(renderedFiles[i], renderedFiles[i].name === selectedFileName, i).trim()
             fragment.appendChild(template.content.firstChild)
         }
         elements.list.appendChild(fragment)
-        _renderedFileNames = visibleFiles.map((f) => f.name)
+        _renderedFileNames = renderedFiles.map((f) => f.name)
         _updateActiveStates(elements.list, selectedFileName)
         return
     }
 
     // Full rebuild (first render, filter change, delete, reorder, etc.)
-    _renderedFileNames = visibleFiles.map((f) => f.name)
-    elements.list.innerHTML = visibleFiles
+    _renderedFileNames = renderedFiles.map((f) => f.name)
+    elements.list.innerHTML = renderedFiles
         .map((file, index) => _buildFileListItemHtml(file, file.name === selectedFileName, index))
         .join("")
 }
@@ -638,10 +664,16 @@ const renderResultCard = (row, responseColumns, index, activeIndex = 0) => {
         </div>
     `
 
+    // Default to the Review pane so the scanned sheet + annotated OMR output
+    // are visible the moment a result card is opened.  The Answers view is
+    // one click away and is reasonable for power users digging into the
+    // numeric responses, but the user reported "I can't open and view the
+    // sheets in the results section" because the previous default hid the
+    // images behind the Answers tab.
     const viewToggle = `
         <div class="result-view-toggle" role="group" aria-label="Result view mode">
-            <button class="btn small active" type="button" data-view-toggle="answers">Answers</button>
-            <button class="btn small" type="button" data-view-toggle="review">Review</button>
+            <button class="btn small" type="button" data-view-toggle="answers">Answers</button>
+            <button class="btn small active" type="button" data-view-toggle="review">Review</button>
         </div>
     `
 
@@ -658,10 +690,10 @@ const renderResultCard = (row, responseColumns, index, activeIndex = 0) => {
                     <span class="pill status-failed">Failed</span>
                 </div>
                 ${viewToggle}
-                <div data-view-panel="answers">
+                <div data-view-panel="answers" hidden>
                     ${row.output_path ? `<p class="muted small mono result-output-path">Output: ${escapeHtml(row.output_path)}</p>` : ""}
                 </div>
-                <div data-view-panel="review" hidden>
+                <div data-view-panel="review">
                     ${reviewPane}
                 </div>
             </article>
@@ -680,12 +712,12 @@ const renderResultCard = (row, responseColumns, index, activeIndex = 0) => {
                 ${row.score ? `<span class="pill status-done">Score ${escapeHtml(row.score)}</span>` : ""}
             </div>
             ${viewToggle}
-            <div data-view-panel="answers">
+            <div data-view-panel="answers" hidden>
                 <div class="answer-grid">${answers}</div>
                 <p class="muted small result-risk-note">Erasure risk is a review heuristic from the CSV output. Multiple marks on one question can indicate a student erased one answer and selected another, but the residual mark still read as filled.</p>
                 ${row.output_path ? `<p class="muted small mono result-output-path">Output: ${escapeHtml(row.output_path)}</p>` : ""}
             </div>
-            <div data-view-panel="review" hidden>
+            <div data-view-panel="review">
                 ${reviewPane}
                 <div class="answer-grid review-answer-grid">${answers}</div>
             </div>
@@ -717,11 +749,20 @@ const renderResults = (container, data) => {
         return 0
     })()
 
-    const tabs = data.rows.map((row, index) => {
+    // Scaling guard: rendering 20,000 result tabs + cards in one innerHTML
+    // assignment generated ~50 MB of HTML and froze the browser for many
+    // seconds, so clicks (file navigator, view toggle, etc.) felt dead and
+    // the post-OMR auto-refresh appeared to do nothing.  Cap the
+    // per-card UI to the same 100-row preview used by the raw CSV table;
+    // the full data set remains available via the CSV download link below.
+    const RESULTS_CARD_LIMIT = 100
+    const cardRows = data.rows.slice(0, RESULTS_CARD_LIMIT)
+    const cardActiveIndex = _selectedIndex < cardRows.length ? _selectedIndex : 0
+    const tabs = cardRows.map((row, index) => {
         const fileId = row.file_id || `File ${index + 1}`
         const qcFlags = Array.isArray(row.qc_flags) ? row.qc_flags : []
         const qcLabel = qcFlags.length ? `<span class="muted small">QC: ${escapeHtml(qcFlags.join(", "))}</span>` : ""
-        const isActive = index === _selectedIndex
+        const isActive = index === cardActiveIndex
         return `
             <button
                 class="result-file-tab${isActive ? " active" : ""}"
@@ -736,11 +777,12 @@ const renderResults = (container, data) => {
             </button>
         `
     }).join("")
-    // Audit fix UI-5: render each card with the preserved active index so
-    // exactly one card is visible across re-renders.
-    const cards = data.rows
-        .map((row, index) => renderResultCard(row, responseColumns, index, _selectedIndex))
+    const cards = cardRows
+        .map((row, index) => renderResultCard(row, responseColumns, index, cardActiveIndex))
         .join("")
+    const cardTruncationNote = data.rows.length > RESULTS_CARD_LIMIT
+        ? `<p class="muted small" style="margin:6px 0 10px">Showing first ${RESULTS_CARD_LIMIT} of ${data.rows.length} result cards. Use the raw CSV table below or <a href="${apiUrl('/results/download')}">download the full CSV</a> to see every row.</p>`
+        : ""
     const header = columns.map((col) => `<th>${escapeHtml(col)}</th>`).join("")
     const CSV_PREVIEW_LIMIT = 100
     const allRows = data.rows
@@ -757,6 +799,7 @@ const renderResults = (container, data) => {
         : ""
 
     container.innerHTML = `
+        ${cardTruncationNote}
         <div class="results-shell">
             <div class="result-file-list" role="tablist" aria-label="Result files">${tabs}</div>
             <div class="result-file-detail">${cards}</div>
@@ -803,13 +846,15 @@ const handleViewToggle = (event) => {
     })
 }
 
-const escapeHtml = (value) => {
-    return String(value)
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#39;")
+if (!window.escapeHtml) {
+    window.escapeHtml = (value) => {
+        return String(value)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#39;")
+    }
 }
 
 const editorStates = new WeakMap()

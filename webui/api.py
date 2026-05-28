@@ -21,6 +21,7 @@ import csv
 import io
 import os
 import tempfile
+import uuid
 
 from fastapi import (
     APIRouter,
@@ -786,27 +787,21 @@ async def upload_files(
 
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
-    # Read all upload bytes up front: we need to know each file's size for
-    # the size check anyway, and the UploadFile stream is consumed once.
+    logger.info(
+        "Upload received | batch=%s | files=%d | names=%s",
+        batch_id,
+        len(files),
+        [u.filename for u in files],
+    )
     image_refs: list[FileRef] = []
-    pdf_jobs: list[tuple[str, bytes]] = []
+    # Pre-staged PDF uploads: each entry is (display_filename, on-disk path,
+    # size_bytes).  The bytes have already been streamed to that path so we
+    # never hold the whole PDF in RAM — critical for multi-GiB uploads.
+    pdf_jobs: list[tuple[str, Path, int]] = []
     inferred_preset: str | None = None
     has_prefilled_sheet_upload = False
+    scratch_root = batches_service.pdf_split_scratch_root(settings)
     for upload in files:
-        data = await upload.read()
-        if len(data) > settings.max_upload_bytes:
-            raise HTTPException(
-                status_code=413,
-                detail=(
-                    f"File {upload.filename!r} exceeds max_upload_bytes "
-                    f"({settings.max_upload_bytes} bytes)"
-                ),
-            )
-        # Try to infer the realism preset from the filename so we have an
-        # audit trail when a prefill-generated file is later debugged. This
-        # is best-effort only; legitimate user uploads with these names are
-        # rare. ``adversarial`` matches first because both ``moderate`` and
-        # ``adversarial`` contain ``a``.
         name_lower = (upload.filename or "").lower()
         if _is_prefilled_sheet_upload(upload.filename):
             has_prefilled_sheet_upload = True
@@ -816,9 +811,56 @@ async def upload_files(
                     inferred_preset = candidate
                 break
         if _is_pdf_upload(upload):
-            pdf_jobs.append((upload.filename or "upload.pdf", data))
+            # Stream the multipart body chunks straight to disk.  For a 3.6 GiB
+            # PDF this avoids both a ~30s in-RAM slurp via ``upload.read()``
+            # and a subsequent identical-size second write inside the splitter
+            # — total time-to-first-page is dominated by a single sequential
+            # write of ~15s instead of two passes of ~30s.
+            staged_name = (
+                f"{uuid.uuid4().hex}_{Path(upload.filename or 'upload.pdf').name}"
+            )
+            staged_path = scratch_root / staged_name
+            total = 0
+            try:
+                with staged_path.open("wb") as fh:
+                    while True:
+                        chunk = await upload.read(1 << 20)  # 1 MiB chunks
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > settings.max_upload_bytes:
+                            fh.close()
+                            staged_path.unlink(missing_ok=True)
+                            raise HTTPException(
+                                status_code=413,
+                                detail=(
+                                    f"File {upload.filename!r} exceeds "
+                                    f"max_upload_bytes "
+                                    f"({settings.max_upload_bytes} bytes)"
+                                ),
+                            )
+                        fh.write(chunk)
+            except HTTPException:
+                raise
+            except Exception:
+                staged_path.unlink(missing_ok=True)
+                raise
+            pdf_jobs.append(
+                (upload.filename or "upload.pdf", staged_path, total)
+            )
             continue
-        # Synchronous image save (fast, no rendering).
+        # Non-PDF (image) uploads stay on the in-memory path: they're tiny
+        # relative to PDFs and the synchronous save_uploaded_file expects
+        # bytes.  Enforce max_upload_bytes here.
+        data = await upload.read()
+        if len(data) > settings.max_upload_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"File {upload.filename!r} exceeds max_upload_bytes "
+                    f"({settings.max_upload_bytes} bytes)"
+                ),
+            )
         refs = await asyncio.to_thread(
             batches_service.save_uploaded_file,
             batch_id,
@@ -855,12 +897,22 @@ async def upload_files(
         # Each task is wrapped in a closure so that any exception (corrupt
         # PDF, disk full, etc.) is caught and persisted into batch metadata
         # rather than silently swallowed by the BackgroundTasks runner.
-        for filename, data in pdf_jobs:
+        for filename, staged_path, size_bytes in pdf_jobs:
             stem = Path(filename).stem
 
-            def _run_pdf_split(fn=filename, d=data, s=stem):
+            def _run_pdf_split(fn=filename, sp=staged_path, sz=size_bytes, s=stem):
+                logger.info(
+                    "PDF split start | batch=%s | file=%s | bytes=%d",
+                    batch_id, fn, sz,
+                )
                 try:
-                    batches_service.save_uploaded_file(batch_id, fn, d, settings)
+                    refs = batches_service.save_uploaded_pdf_from_path(
+                        batch_id, fn, sp, settings
+                    )
+                    logger.info(
+                        "PDF split done | batch=%s | file=%s | pages=%d",
+                        batch_id, fn, len(refs),
+                    )
                 except Exception as exc:  # noqa: BLE001
                     # Audit fix API-6: previously the full exception string
                     # (often containing filesystem paths) was persisted into
@@ -876,6 +928,14 @@ async def upload_files(
                         f"See server logs for details."
                     )
                     batches_service._record_pdf_split_error(batch_id, settings, error_msg)
+                finally:
+                    # save_uploaded_pdf_from_path already deletes the staged
+                    # file on success; defensively clean up if it leaked
+                    # (e.g. before this background task even started running).
+                    try:
+                        Path(sp).unlink(missing_ok=True)
+                    except OSError:
+                        pass
 
             background_tasks.add_task(_run_pdf_split)
         return JSONResponse(
@@ -1083,6 +1143,11 @@ async def process_batch(
     batch = batches_service.get_batch(batch_id, settings)
     _assert_batch_ready_to_run(batch, settings)
     omr_service.queue_run(batch_id, settings)
+    logger.info(
+        "Process queued | batch=%s | files=%d",
+        batch_id,
+        batch.file_count,
+    )
     background_tasks.add_task(omr_service.run_batch_sync, batch_id, settings)
     return ProcessAccepted(batch_id=batch_id, status=BatchStatus.queued)
 

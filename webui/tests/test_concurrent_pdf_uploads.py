@@ -194,3 +194,111 @@ def test_concurrent_different_stems_both_complete(client: TestClient) -> None:
         f"Missing beta pages; got: {sorted(names)}"
     )
     assert len(names) == len(set(names)), "Duplicate filenames detected"
+
+
+# ---------------------------------------------------------------------------
+# Concurrent metadata writes must not crash on the temp-file rename.
+#
+# Regression: with a shared "metadata.tmp" name, many threads writing batch
+# metadata at once (the PDF-split progress writer for several uploads plus a
+# /process status transition) raced on os.replace and raised
+# FileNotFoundError [WinError 2] '...metadata.tmp' -> '...metadata.json',
+# 500-ing the /process request on large multi-PDF batches.
+# ---------------------------------------------------------------------------
+
+def test_concurrent_metadata_writes_do_not_crash(client: TestClient) -> None:
+    """Hammering metadata writes from many threads must never raise."""
+    from webui.services import batches as bm
+    from webui.schemas import BatchStatus, SourceMode
+    from webui.settings import get_settings
+
+    batch_id = _create_batch(client, "Concurrent metadata test")
+    settings = get_settings()
+
+    errors: list[BaseException] = []
+    barrier = threading.Barrier(12)
+
+    def writer(kind: int) -> None:
+        try:
+            barrier.wait(timeout=5)
+            for i in range(40):
+                if kind % 3 == 0:
+                    bm._write_pdf_split_progress(batch_id, settings, i, 40)
+                elif kind % 3 == 1:
+                    bm.update_status(batch_id, BatchStatus.queued, settings=settings)
+                else:
+                    bm.set_source(batch_id, SourceMode.upload, None, settings)
+        except BaseException as exc:  # noqa: BLE001 — capture for assertion
+            errors.append(exc)
+
+    threads = [threading.Thread(target=writer, args=(k,)) for k in range(12)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=20)
+
+    assert not errors, f"Concurrent metadata writes raised: {errors!r}"
+
+    # Metadata is still valid, readable JSON after the storm.
+    meta = bm.get_batch_metadata(batch_id, settings)
+    assert meta.get("id") == batch_id
+    assert meta.get("pdf_split_total") in {0, 40}
+
+
+def test_concurrent_metadata_reads_during_replace_do_not_raise(
+    client: TestClient,
+) -> None:
+    """Readers must ride out the Windows-replace permission/missing race.
+
+    Regression: while one thread runs ``os.replace(metadata.tmp,
+    metadata.json)`` a concurrent reader could get ``PermissionError
+    [Errno 13]`` (Windows briefly denies the open) or ``FileNotFoundError``.
+    The OMR run polled ``cancel_requested`` via this path on every page,
+    so a heavy upload regularly killed the OMR run.
+    """
+    from webui.services import batches as bm
+    from webui.schemas import BatchStatus
+    from webui.settings import get_settings
+
+    batch_id = _create_batch(client, "Read race test")
+    settings = get_settings()
+
+    errors: list[BaseException] = []
+    stop = threading.Event()
+    barrier = threading.Barrier(8)
+
+    def writer() -> None:
+        try:
+            barrier.wait(timeout=5)
+            i = 0
+            while not stop.is_set():
+                bm._write_pdf_split_progress(batch_id, settings, i, 1000)
+                i += 1
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    def reader() -> None:
+        try:
+            barrier.wait(timeout=5)
+            for _ in range(400):
+                bm.get_batch_metadata(batch_id, settings)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=writer) for _ in range(4)] + \
+              [threading.Thread(target=reader) for _ in range(4)]
+    for t in threads:
+        t.start()
+    # Let readers finish, then stop writers.
+    for t in threads[4:]:
+        t.join(timeout=15)
+    stop.set()
+    for t in threads[:4]:
+        t.join(timeout=5)
+
+    assert not errors, f"Concurrent metadata reads raised: {errors!r}"
+
+    # Final state is still a valid Batch and round-trips through update_status.
+    bm.update_status(batch_id, BatchStatus.queued, settings=settings)
+    meta = bm.get_batch_metadata(batch_id, settings)
+    assert meta.get("status") == "queued"
