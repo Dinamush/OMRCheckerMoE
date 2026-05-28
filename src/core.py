@@ -569,35 +569,38 @@ class ImageInstanceOps:
                         )
 
                     field_label = field_block_bubbles[0].field_label
-                    is_question = str(field_label).lower().startswith("q")
-                    if is_question:
-                        multi_mark_equal_delta = float(
-                            getattr(config.outputs, "multi_mark_equal_delta", 0.06)
-                        )
-                        marked_options = [
-                            (field_value, intensity)
-                            for _, field_value, intensity, is_marked in bubble_measurements
-                            if is_marked
-                        ]
-                        response, is_multi = select_question_response(
-                            marked_options=marked_options,
-                            empty_value=field_block.empty_val,
-                            multi_mark_equal_delta=multi_mark_equal_delta,
-                        )
-                        omr_response[field_label] = response
-                        multi_marked = multi_marked or is_multi
-                    else:
-                        for _, field_value, _, is_marked in bubble_measurements:
-                            if not is_marked:
-                                continue
-                            multi_marked_local = field_label in omr_response
-                            omr_response[field_label] = (
-                                (omr_response[field_label] + field_value)
-                                if multi_marked_local
-                                else field_value
-                            )
-                        if field_label not in omr_response:
-                            omr_response[field_label] = field_block.empty_val
+                    # Every field strip — whether an MCQ option group (q*,
+                    # A/B/C/D) or an integer digit column (candidate number,
+                    # roll number; values 0-9) — is single-select: exactly
+                    # one bubble in the strip should be filled.  Both must
+                    # therefore resolve to the single darkest bubble and only
+                    # flag a genuine, equally-dark double-mark for manual
+                    # review.
+                    #
+                    # Previously INT/roll columns took a separate branch that
+                    # blindly CONCATENATED every bubble above threshold
+                    # ("9" + "8" -> "98") and never set multi_marked.  A faint
+                    # second mark (ghost/erasure/smudge) clearing the per-strip
+                    # threshold therefore corrupted the candidate number with
+                    # an extra digit and was not even quarantined for review
+                    # (audit finding CORE-3).  Routing INT strips through the
+                    # same darkest-bubble selection eliminates that silent
+                    # corruption while still flagging truly ambiguous columns.
+                    multi_mark_equal_delta = float(
+                        getattr(config.outputs, "multi_mark_equal_delta", 0.06)
+                    )
+                    marked_options = [
+                        (field_value, intensity)
+                        for _, field_value, intensity, is_marked in bubble_measurements
+                        if is_marked
+                    ]
+                    response, is_multi = select_question_response(
+                        marked_options=marked_options,
+                        empty_value=field_block.empty_val,
+                        multi_mark_equal_delta=multi_mark_equal_delta,
+                    )
+                    omr_response[field_label] = response
+                    multi_marked = multi_marked or is_multi
 
                     if config.outputs.show_image_level >= 5:
                         if key in all_c_box_vals:
