@@ -48,7 +48,7 @@ _OMR_PAGE_HEIGHT = 515
 # Stores CENTER coordinates of the first bubble in each block (q1-A, q6-A,
 # …) in the 666x515 OMR processing canvas. These were empirically
 # calibrated via Hough-circle detection against the actual printed bubble
-# outlines on ``prefill_only_package/blank_template_reference.png`` (see
+# outlines on ``prefill_package/blank_template_reference.png`` (see
 # ``webui/tests/_calibrate_bubbles.py``).
 #
 # Note: the OMR template's ``origin`` field stores the TOP-LEFT of the
@@ -56,7 +56,7 @@ _OMR_PAGE_HEIGHT = 515
 # starting at origin). The values below are SHIFTED +box/2 from the OMR
 # template origin so they represent bubble *centres* — which is what the
 # drawing code needs to place ellipses dead-on the printed circles. Keep
-# the OMR template ``custom_25_definitive_final/template.json`` in sync
+# the OMR template ``MoE-April-2026-Landscape-NNQ25-0/template.json`` in sync
 # (template origin = these center coords - 5 in each axis).
 _ANSWER_BLOCKS: tuple[tuple[float, float, float, float, int], ...] = (
     (57.7,  264.3, 20.0, 41.9,  1),   # q1-q5

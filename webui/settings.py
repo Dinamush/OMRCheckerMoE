@@ -59,6 +59,11 @@ RUNTIME_MUTABLE_SETTINGS: frozenset[str] = frozenset({
     # these settings only define the cap that each segment must satisfy.
     "prefill_split_max_pdf_mb",
     "prefill_split_max_pdf_pages",
+    # Cap on the "print N blank sheets" feature exposed on /prefill.
+    # The legacy landscape variant is a 1-page raster PDF; cloning the
+    # same page N times stays cheap but we still need an upper bound so
+    # a runaway request can't generate a 100 000-page job in one shot.
+    "prefill_blank_max_sheets",
     "max_upload_bytes",
 })
 
@@ -66,11 +71,11 @@ RUNTIME_MUTABLE_SETTINGS: frozenset[str] = frozenset({
 # module-level constant so the schema layer (``schemas_settings.py``) and
 # the preset router (``services/presets.py``) share a single source of truth.
 #
-# ``v1_legacy``  — the original ``portrait_25q/template.json`` shipped with
+# ``v1_legacy``  — the original ``MoE-May-2026-Variants-SMQ25-0/template.json`` shipped with
 #                  the repo. This stays the default so existing batches keep
 #                  their behaviour with zero migration effort.
 # ``v2_optimized`` — the sweep-validated successor materialised under
-#                    ``portrait_25q_v2/`` (12 OMR-px candidate bubbles,
+#                    ``MoE-May-2026-Portrait-SMQ25-1/`` (12 OMR-px candidate bubbles,
 #                    corrected origin + gap conventions, robust marker
 #                    sizing). Opt-in only.
 SHEET_VARIANTS: tuple[str, ...] = ("v1_legacy", "v2_optimized")
@@ -209,6 +214,23 @@ class Settings(BaseSettings):
             "Default 500 leaves 2x margin under that ceiling and aligns "
             "with one full paper-tray refill. Override with "
             "OMR_WEBUI_PREFILL_SPLIT_MAX_PDF_PAGES."
+        ),
+    )
+
+    prefill_blank_max_sheets: int = Field(
+        default=10_000,
+        ge=1,
+        le=100_000,
+        description=(
+            "Maximum number of blank sheets the /api/v1/prefill/blank "
+            "endpoint will produce in a single request. The shared "
+            "underlying page raster is deduped on save, so the on-disk "
+            "PDF stays compact even for very large N — but uncapped "
+            "input would still let one request monopolise the batch "
+            "semaphore. 10 000 covers a full week of physical printing "
+            "at most exam venues and can be raised on the /settings "
+            "page if needed. Override with "
+            "OMR_WEBUI_PREFILL_BLANK_MAX_SHEETS."
         ),
     )
 
@@ -360,7 +382,7 @@ class Settings(BaseSettings):
     )
 
     default_preset: str | None = Field(
-        default="custom_25_definitive_final",
+        default="MoE-April-2026-Landscape-NNQ25-0",
         description=(
             "Preset applied automatically when a new batch is created. "
             "Set to null or empty string to disable auto-apply."
@@ -371,11 +393,10 @@ class Settings(BaseSettings):
         default="v1_legacy",
         description=(
             "Which answer-sheet layout variant should be used for variant-aware "
-            "presets. 'v1_legacy' (default) uses the original portrait_25q/template.json "
-            "shipped with the repo so existing batches keep their behaviour. "
-            "'v2_optimized' routes the portrait_25q preset name to portrait_25q_v2/, "
-            "a sweep-validated layout with larger candidate bubbles (12 OMR-px), "
-            "corrected origin / gap conventions, and robust marker sizing. "
+            "presets. 'v1_legacy' (default) uses MoE-May-2026-Variants-SMQ25-0. "
+            "'v2_optimized' routes the logical preset MoE-May-2026-Portrait-SMQ25 to "
+            "MoE-May-2026-Portrait-SMQ25-1 (sweep-validated layout with larger "
+            "candidate bubbles, corrected origins, and robust marker sizing). "
             "Change only after you have re-printed sheets that match the selected "
             "geometry. Override with OMR_WEBUI_SHEET_VARIANT."
         ),

@@ -1,6 +1,6 @@
-"""Geometry regression tests for the legacy portrait_25q sheet.
+"""Geometry regression tests for the legacy MoE-May-2026-Variants-SMQ25-0 sheet.
 
-Each test pins down one constraint from ``portrait_25q/DESIGN.md`` that
+Each test pins down one constraint from ``MoE-May-2026-Variants-SMQ25-0/DESIGN.md`` that
 has previously regressed (or is at risk of regressing) when constants
 are tuned. Keeping them as arithmetic invariants -- rather than pixel
 diffs of the rendered PNG -- means refactoring the renderer is safe as
@@ -9,10 +9,19 @@ long as the geometry stays correct.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
 
-from portrait_25q import generate_blank
+from webui.sheet_registry import VARIANTS_V1_DIR
+
+_spec = importlib.util.spec_from_file_location(
+    "generate_blank",
+    VARIANTS_V1_DIR / "generate_blank.py",
+)
+assert _spec and _spec.loader
+generate_blank = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(generate_blank)
 
 
 def test_answer_grid_respects_bottom_marker_quiet_zone() -> None:

@@ -38,18 +38,18 @@ datas = [
     (str(ROOT / "src" / "schemas"),      "src/schemas"),
     # Sample sheets so first-time users can try the app immediately
     (str(ROOT / "samples"),              "samples"),
-    # Root-level presets discovered by the web UI. Keep portrait_25q selective
+    # Root-level presets discovered by the web UI. Keep MoE-May-2026-Variants-SMQ25-0 selective
     # so sweep scratch directories are not bundled into the desktop build.
-    (str(ROOT / "custom_25_definitive_final"), "custom_25_definitive_final"),
-    (str(ROOT / "old_custom25_answer_sheet_v1"), "old_custom25_answer_sheet_v1"),
-    (str(ROOT / "portrait_25q" / "template.json"), "portrait_25q"),
-    (str(ROOT / "portrait_25q" / "README.md"), "portrait_25q"),
-    (str(ROOT / "portrait_25q" / "DESIGN.md"), "portrait_25q"),
-    (str(ROOT / "portrait_25q" / "reference"), "portrait_25q/reference"),
-    (str(ROOT / "portrait_25q_v2"), "portrait_25q_v2"),
+    (str(ROOT / "MoE-April-2026-Landscape-NNQ25-0"), "MoE-April-2026-Landscape-NNQ25-0"),
+    (str(ROOT / "MoE-April-2026-Portrait-NNQ25-0"), "MoE-April-2026-Portrait-NNQ25-0"),
+    (str(ROOT / "MoE-May-2026-Variants-SMQ25-0" / "template.json"), "MoE-May-2026-Variants-SMQ25-0"),
+    (str(ROOT / "MoE-May-2026-Variants-SMQ25-0" / "README.md"), "MoE-May-2026-Variants-SMQ25-0"),
+    (str(ROOT / "MoE-May-2026-Variants-SMQ25-0" / "DESIGN.md"), "MoE-May-2026-Variants-SMQ25-0"),
+    (str(ROOT / "MoE-May-2026-Variants-SMQ25-0" / "reference"), "MoE-May-2026-Variants-SMQ25-0/reference"),
+    (str(ROOT / "MoE-May-2026-Portrait-SMQ25-1"), "MoE-May-2026-Portrait-SMQ25-1"),
     # Prefill blank template image (read at runtime by the prefill service)
-    (str(ROOT / "prefill_only_package" / "blank_template_reference.png"),
-     "prefill_only_package"),
+    (str(ROOT / "prefill_package" / "blank_template_reference.png"),
+     "prefill_package"),
 ]
 
 # ---------------------------------------------------------------------------
@@ -106,7 +106,7 @@ hiddenimports = [
     "webui.log_stream",
     "webui.schemas_settings",
     "webui.services.scan_simulation",
-    "prefill_only_package.prefill_answer_sheet_final",
+    "prefill_package.prefill_answer_sheet_final",
     # OMR engine processor plugins. ``src.processors.manager`` discovers
     # these dynamically via ``pkgutil.walk_packages`` which does NOT see
     # modules stored inside a frozen PYZ archive, so we list them here.

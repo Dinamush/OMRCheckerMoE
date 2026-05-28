@@ -180,7 +180,7 @@ def _detect_aruco_ids(png_bytes: bytes) -> set[int]:
 
 def _candidate_geometry_for_test(candidate_number: str = "9010690012"):
     """Return (pil_image, region, bubbles, markers) for a fresh generated sheet."""
-    from prefill_only_package import prefill_answer_sheet_final as m
+    from prefill_package import prefill_answer_sheet_final as m
     from webui.services.scan_simulation import BubbleGeometry, MarkerBox
 
     clean_png = prefill_service.generate_single_png(
@@ -369,7 +369,7 @@ def test_aruco_marker_boxes_only_returns_corners_that_were_drawn() -> None:
     ``draw_aruco_corners``: every returned box must fit on the canvas and
     correspond to a marker that was actually stamped, so downstream scan
     simulation never operates on an off-canvas placeholder."""
-    from prefill_only_package import prefill_answer_sheet_final as m
+    from prefill_package import prefill_answer_sheet_final as m
 
     canvases = [
         (666, 515),     # production processing canvas

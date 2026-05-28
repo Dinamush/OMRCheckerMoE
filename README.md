@@ -11,15 +11,18 @@ OMR stands for Optical Mark Recognition, used to detect and interpret human-mark
 This repository is a fork of [Udayraj123/OMRChecker](https://github.com/Udayraj123/OMRChecker). The upstream engine handles the hard work of image alignment, bubble detection, and CSV output. On top of that foundation this fork adds:
 
 - **FastAPI web UI + JSON API** — a full-featured browser interface and REST API for creating batches, uploading scans, editing templates, running OMR, and downloading results (see [Web UI and JSON API](#web-ui-and-json-api)).
-- **Prefill Sheets workflow** — generate personalised pre-filled answer sheets from a blank landscape template using a calibrated 25-question OMR template (`custom_25_definitive_final/`) and a standalone prefill library (`prefill_only_package/`).
+- **Prefill Sheets workflow** — generate personalised pre-filled answer sheets from a blank landscape template using a calibrated 25-question OMR template (`MoE-April-2026-Landscape-NNQ25-0/`) and a standalone prefill library (`prefill_package/`).
 - **Student-style bubble fill** — simulate how real students mark bubbles, with ten distinct marking profiles and flexible answer-key shortcuts, enabling end-to-end pipeline testing without manual scanning (see [Student-style bubble fill](#student-style-bubble-fill)).
-- **High-throughput pipelined processing** — per-image dimension inference and background-task processing for large batch runs without blocking (see [`docs/research_brief_omr_throughput_2026.md`](docs/research_brief_omr_throughput_2026.md)).
-- **Scan simulation** — realistic degradation and scan-artefact injection for synthetic test datasets (see [`docs/research_brief_scan_simulation_2026.md`](docs/research_brief_scan_simulation_2026.md)).
-- **Codebase audit** — a documented review of the codebase with tracked fixes (see [`docs/audit_report_20260524.md`](docs/audit_report_20260524.md)).
+- **High-throughput pipelined processing** — per-image dimension inference and background-task processing for large batch runs without blocking (see [`docs/research/research_brief_omr_throughput_2026.md`](docs/research/research_brief_omr_throughput_2026.md)).
+- **Scan simulation** — realistic degradation and scan-artefact injection for synthetic test datasets (see [`docs/research/research_brief_scan_simulation_2026.md`](docs/research/research_brief_scan_simulation_2026.md)).
+- **Codebase audit** — a documented review of the codebase with tracked fixes (see [`docs/audits/audit_report_20260524.md`](docs/audits/audit_report_20260524.md)).
 
 #### **Quick Links**
 
 - [Installation](#getting-started)
+- [Repository map](REPO_LAYOUT.md) — every top-level directory explained
+- [Sheet directory index](SHEETS.md) — canonical preset names + legacy aliases
+- [Architecture overview](docs/architecture/ARCHITECTURE.md) — preset / variant / template model
 - [User Guide](https://github.com/Udayraj123/OMRChecker/wiki)
 - [Contributor Guide](https://github.com/Udayraj123/OMRChecker/blob/master/CONTRIBUTING.md)
 - [Project Ideas List](https://github.com/users/Udayraj123/projects/2/views/1)
@@ -287,7 +290,7 @@ Tests for the web UI live in `webui/tests/` and run as part of the standard `pyt
 
 The `/prefill` page generates pre-filled answer sheets from the blank landscape template, bubbling in a student's candidate number and printing their name, school, and exam name into the text boxes. It is useful for issuing personalised sheets before an exam.
 
-The feature lives in `prefill_only_package/` and is exposed through the web UI and the JSON API.
+The feature lives in `prefill_package/` and is exposed through the web UI and the JSON API.
 
 **Web UI** — navigate to `http://127.0.0.1:8000/prefill`:
 
@@ -308,7 +311,7 @@ student_name,school_name,exam_name,candidate_number,output_file
 Johnathan Ragnauth Brigmohan,The New Sapodilla Primary,Grade 4 Reading,9010690012,johnathan.png
 ```
 
-Candidate numbers must be exactly 10 digits. Bubble placement is calibrated to `prefill_only_package/blank_template_reference.png` — do not swap in a different template without re-calibrating the `CFG` values in `prefill_answer_sheet_final.py`.
+Candidate numbers must be exactly 10 digits. Bubble placement is calibrated to `prefill_package/blank_template_reference.png` — do not swap in a different template without re-calibrating the `CFG` values in `prefill_answer_sheet_final.py`.
 
 ## Student-style bubble fill
 
@@ -377,8 +380,8 @@ Pass `marking_profile=heavy_pencil` (or any profile name from the list endpoint)
 
 ### Further reading
 
-- [`docs/student_fill_feature_design.md`](docs/student_fill_feature_design.md) — full feature specification
-- [`docs/student_fill_e2e_report_20260524.md`](docs/student_fill_e2e_report_20260524.md) — end-to-end test report
+- [`docs/features/student-fill/student_fill_feature_design.md`](docs/features/student-fill/student_fill_feature_design.md) — full feature specification
+- [`docs/audits/student_fill_e2e_report_20260524.md`](docs/audits/student_fill_e2e_report_20260524.md) — end-to-end test report
 
 ### Common Issues
 
@@ -445,9 +448,9 @@ OMRCheckerMoE/
 │   └── tests/                    # Unit tests for the engine
 ├── webui/                        # FastAPI service + Jinja templates + JS for the web UI
 │   └── tests/                    # Web UI test suite (runs as part of pytest)
-├── prefill_only_package/         # Standalone answer-sheet prefill module (used as a library by webui too)
-├── custom_25_definitive_final/   # Current calibrated 25-question OMR template + sample inputs
-├── old_custom25_answer_sheet_v1/ # Legacy 25Q template variant (kept for reference)
+├── prefill_package/         # Standalone answer-sheet prefill module (used as a library by webui too)
+├── MoE-April-2026-Landscape-NNQ25-0/   # Current calibrated 25-question OMR template + sample inputs
+├── MoE-April-2026-Portrait-NNQ25-0/ # Legacy 25Q template variant (kept for reference)
 ├── samples/                      # Example sheets and templates for the core engine
 ├── scripts/                      # One-off tools, benchmarks, smoke tests, and bubble-geometry calibration helpers
 └── docs/                         # Markdown reports, design docs, and research briefs
@@ -487,12 +490,12 @@ Hooks are defined in `.pre-commit-config.yaml` and run Black, isort, and other l
 
 | Document | Description |
 | --- | --- |
-| [`docs/audit_report_20260524.md`](docs/audit_report_20260524.md) | Codebase audit and documented fixes |
-| [`docs/student_fill_feature_design.md`](docs/student_fill_feature_design.md) | Student-fill feature specification |
-| [`docs/student_fill_e2e_report_20260524.md`](docs/student_fill_e2e_report_20260524.md) | End-to-end validation report for student-fill |
-| [`docs/research_brief_omr_throughput_2026.md`](docs/research_brief_omr_throughput_2026.md) | High-throughput OMR pipeline research |
-| [`docs/research_brief_scan_simulation_2026.md`](docs/research_brief_scan_simulation_2026.md) | Scan simulation research |
-| [`docs/marker_robustness_benchmark_20260523.md`](docs/marker_robustness_benchmark_20260523.md) | ArUco marker robustness benchmark |
+| [`docs/audits/audit_report_20260524.md`](docs/audits/audit_report_20260524.md) | Codebase audit and documented fixes |
+| [`docs/features/student-fill/student_fill_feature_design.md`](docs/features/student-fill/student_fill_feature_design.md) | Student-fill feature specification |
+| [`docs/audits/student_fill_e2e_report_20260524.md`](docs/audits/student_fill_e2e_report_20260524.md) | End-to-end validation report for student-fill |
+| [`docs/research/research_brief_omr_throughput_2026.md`](docs/research/research_brief_omr_throughput_2026.md) | High-throughput OMR pipeline research |
+| [`docs/research/research_brief_scan_simulation_2026.md`](docs/research/research_brief_scan_simulation_2026.md) | Scan simulation research |
+| [`docs/audits/marker_robustness_benchmark_20260523.md`](docs/audits/marker_robustness_benchmark_20260523.md) | ArUco marker robustness benchmark |
 
 ## FAQ
 

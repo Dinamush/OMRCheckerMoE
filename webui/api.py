@@ -1865,3 +1865,217 @@ async def prefill_batch(
 async def prefill_batch_download(token: str, background_tasks: BackgroundTasks):
     """One-time token download endpoint. Returns the generated file and deletes it."""
     return _download_entry_response(token, background_tasks)
+
+
+# ---------------------------------------------------------------------------
+# Print-N-blank-sheets endpoint.
+# ---------------------------------------------------------------------------
+
+
+def _run_blank_sheets_pdf(
+    dst_path: Path,
+    variant: str,
+    count: int,
+    include_page_numbers: bool,
+) -> dict:
+    """Adapter that calls ``generate_blank_sheets_pdf_to_file`` with introspection."""
+    import inspect
+
+    target = prefill_service.generate_blank_sheets_pdf_to_file
+    try:
+        params = inspect.signature(target).parameters
+    except (TypeError, ValueError):
+        params = {}
+    kwargs: dict[str, Any] = {"variant": variant, "count": count}
+    if "include_page_numbers" in params:
+        kwargs["include_page_numbers"] = include_page_numbers
+    return target(dst_path, **kwargs)
+
+
+def _run_blank_sheets_split_zip(
+    dst_path: Path,
+    variant: str,
+    count: int,
+    max_pdf_mb: int,
+    max_pdf_pages: int,
+    include_page_numbers: bool,
+) -> dict:
+    """Adapter that calls ``generate_blank_sheets_split_zip_to_file``."""
+    import inspect
+
+    target = prefill_service.generate_blank_sheets_split_zip_to_file
+    try:
+        params = inspect.signature(target).parameters
+    except (TypeError, ValueError):
+        params = {}
+    kwargs: dict[str, Any] = {
+        "variant": variant,
+        "count": count,
+        "max_pdf_mb": max_pdf_mb,
+        "max_pdf_pages": max_pdf_pages,
+    }
+    if "include_page_numbers" in params:
+        kwargs["include_page_numbers"] = include_page_numbers
+    return target(dst_path, **kwargs)
+
+
+@router.get("/prefill/blank/variants")
+async def prefill_blank_variants() -> dict:
+    """Return the registered blank-sheet variants for the UI dropdown."""
+    return {
+        "variants": prefill_service.list_blank_sheet_variants(),
+        "default": prefill_service.DEFAULT_BLANK_SHEET_VARIANT,
+    }
+
+
+@router.post("/prefill/blank")
+async def prefill_blank(
+    background_tasks: BackgroundTasks,
+    request: Request,
+) -> dict:
+    """Generate N copies of a blank answer-sheet variant as a printable PDF.
+
+    Designed for the common "I need 500 unfilled sheets to hand out at
+    the venue" workflow that has nothing to do with candidate prefill.
+    Sources the page from a 1-page asset bundled with the application
+    (currently the legacy landscape MoE-April-2026-Landscape-NNQ25-0 sheet
+    with ArUco markers) and clones it N times into a single PDF. When
+    ``split_pdfs=true`` the combined PDF is post-split into
+    printer-safe ZIP segments using the same size/page caps as the
+    batch endpoint, with page numbering continuous across segments.
+    """
+    settings = get_settings()
+    try:
+        form = await request.form(
+            max_part_size=settings.max_upload_bytes,
+            max_files=10,
+            max_fields=100,
+        )
+    except Exception as exc:  # noqa: BLE001 - normalise parser failures
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    variant_raw = form.get("variant")
+    count_raw = form.get("count")
+    include_page_numbers = str(form.get("include_page_numbers") or "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    split_pdfs = str(form.get("split_pdfs") or "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+    try:
+        variant = prefill_service.normalize_blank_sheet_variant(variant_raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    try:
+        count = int(str(count_raw).strip()) if count_raw is not None else 0
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=422,
+            detail="count must be a positive integer.",
+        )
+    if count < 1:
+        raise HTTPException(
+            status_code=422,
+            detail="count must be >= 1.",
+        )
+
+    blank_cap = settings.prefill_blank_max_sheets
+    if count > blank_cap:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"count={count} exceeds the per-request cap of {blank_cap}. "
+                "Lower the count or raise prefill_blank_max_sheets on the "
+                "/settings page."
+            ),
+        )
+
+    if not _PREFILL_BATCH_SEM.acquire(blocking=False):
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Server is already running {_PREFILL_BATCH_LIMIT} prefill batch "
+                "job(s). Try again shortly."
+            ),
+            headers={"Retry-After": "10"},
+        )
+
+    suffix = ".zip" if split_pdfs else ".pdf"
+    media_type = "application/zip" if split_pdfs else "application/pdf"
+    stem = prefill_service.BLANK_SHEET_VARIANTS[variant].get(
+        "default_stem", f"blank_{variant}"
+    )
+    filename = f"{stem}_x{count}{'_split' if split_pdfs else ''}{suffix}"
+
+    fd, tmp_path_str = tempfile.mkstemp(prefix="blank_", suffix=suffix)
+    os.close(fd)
+    tmp_path = Path(tmp_path_str)
+
+    def _cleanup() -> None:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        _PREFILL_BATCH_SEM.release()
+
+    def _release_sem() -> None:
+        _PREFILL_BATCH_SEM.release()
+
+    split_max_mb = settings.prefill_split_max_pdf_mb
+    split_max_pages = settings.prefill_split_max_pdf_pages
+
+    try:
+        if split_pdfs:
+            meta = await asyncio.to_thread(
+                _run_blank_sheets_split_zip,
+                tmp_path,
+                variant,
+                count,
+                split_max_mb,
+                split_max_pages,
+                include_page_numbers,
+            )
+        else:
+            meta = await asyncio.to_thread(
+                _run_blank_sheets_pdf,
+                tmp_path,
+                variant,
+                count,
+                include_page_numbers,
+            )
+    except (ValueError, FileNotFoundError) as exc:
+        _cleanup()
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:  # noqa: BLE001
+        _cleanup()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Blank sheet generation failed: {type(exc).__name__}: {exc}",
+        )
+
+    if meta["successes"] == 0:
+        _cleanup()
+        raise HTTPException(
+            status_code=500,
+            detail="Blank sheet generation produced no pages.",
+        )
+
+    _release_sem()
+    token = _register_download(tmp_path, media_type, filename)
+    return {
+        "download_url": f"/api/v1/prefill/batch/download/{token}",
+        "filename": filename,
+        "variant": variant,
+        "count": meta["count"],
+        "successes": meta["successes"],
+        "errors": meta["errors"],
+        "elapsed_s": meta["elapsed_s"],
+        "size_bytes": meta["size_bytes"],
+        "page_numbers": include_page_numbers,
+        "split_pdfs": split_pdfs,
+        "split_max_pdf_mb": split_max_mb if split_pdfs else None,
+        "split_max_pdf_pages": split_max_pages if split_pdfs else None,
+        "segments": meta.get("segments", []) if split_pdfs else [],
+    }

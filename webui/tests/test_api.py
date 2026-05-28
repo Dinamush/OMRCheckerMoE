@@ -4,7 +4,7 @@ The flow under test mirrors how a real client uses the API::
 
     create batch -> upload file -> set template/config -> process -> results
 
-We run the engine against ``custom_25_definitive_final/inputs/`` images so
+We run the engine against ``MoE-April-2026-Landscape-NNQ25-0/inputs/`` images so
 no new fixtures are needed.  OpenCV UI calls are mocked in the shared
 ``conftest.py``.
 """

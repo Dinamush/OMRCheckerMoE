@@ -54,6 +54,7 @@ class RuntimeSettingsResponse(BaseModel):
     prefill_csv_max_bytes: int = Field(ge=1 * 1024 * 1024, le=4 * 1024 * 1024 * 1024)
     prefill_split_max_pdf_mb: int = Field(ge=10, le=200)
     prefill_split_max_pdf_pages: int = Field(ge=50, le=999)
+    prefill_blank_max_sheets: int = Field(ge=1, le=100_000)
     max_upload_bytes: int = Field(ge=1 * 1024 * 1024, le=64 * 1024 * 1024 * 1024)
 
 
@@ -94,6 +95,7 @@ class RuntimeSettingsUpdate(BaseModel):
     )
     prefill_split_max_pdf_mb: Optional[int] = Field(default=None, ge=10, le=200)
     prefill_split_max_pdf_pages: Optional[int] = Field(default=None, ge=50, le=999)
+    prefill_blank_max_sheets: Optional[int] = Field(default=None, ge=1, le=100_000)
     max_upload_bytes: Optional[int] = Field(
         default=None, ge=1 * 1024 * 1024, le=64 * 1024 * 1024 * 1024
     )

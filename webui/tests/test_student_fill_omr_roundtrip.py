@@ -34,7 +34,7 @@ from webui.services.student_fill import NUM_QUESTIONS, parse_answers
 # Repo / fixture paths
 # ---------------------------------------------------------------------------
 REPO_ROOT = Path(__file__).resolve().parents[2]
-CUSTOM_DIR = REPO_ROOT / "custom_25_definitive_final"
+CUSTOM_DIR = REPO_ROOT / "MoE-April-2026-Landscape-NNQ25-0"
 SAMPLE_TEMPLATE = CUSTOM_DIR / "template.json"
 
 _CONFIG_PAYLOAD = {

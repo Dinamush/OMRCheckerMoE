@@ -10,6 +10,7 @@
 <div class="prefill-tabs">
     <button class="tab-btn active" data-tab="single">Single Sheet</button>
     <button class="tab-btn" data-tab="batch">Batch</button>
+    <button class="tab-btn" data-tab="blank">Blank Sheets</button>
 </div>
 
 <!-- ─── Single Sheet ─────────────────────────────────────────────────── -->
@@ -292,6 +293,80 @@
         <div class="actions">
             <button type="button" id="batch-submit" class="btn primary">Generate &amp; Download</button>
         </div>
+    </div>
+</div>
+
+<!-- ─── Blank Sheets ──────────────────────────────────────────────────── -->
+<div id="tab-blank" class="tab-pane" style="display:none;">
+    <div class="panel">
+        <h2>Print N Blank Sheets</h2>
+        <p class="muted small" style="margin-block:0.25rem 1rem;">
+            Generate <em>N</em> copies of an unfilled answer sheet for printing
+            and handing out at the venue. The page raster is bundled with the
+            application, so this is deterministic, offline, and very fast even
+            for large counts.
+        </p>
+
+        <form id="blank-form" novalidate>
+            <div class="stack">
+                <div class="form-group">
+                    <label for="blank-variant">Sheet variant</label>
+                    <select id="blank-variant" name="variant">
+                        <!-- options injected by JS from /api/v1/prefill/blank/variants -->
+                        <option value="MoE-April-2026-Landscape-NNQ25-0" selected>
+                            April 2026 landscape (NNQ25) — production sheet with ArUco markers
+                        </option>
+                    </select>
+                    <p class="muted small">
+                        Each variant ships as a single-page US-letter PDF whose
+                        page is cloned <em>N</em> times into the output. ArUco
+                        corner markers are baked into the source so each
+                        printed page is already alignable by the OMR engine.
+                    </p>
+                </div>
+
+                <div class="form-group">
+                    <label for="blank-count">Number of copies <span class="muted small">(integer ≥ 1)</span></label>
+                    <input id="blank-count" name="count" type="number"
+                           min="1" step="1" value="50" required />
+                    <p class="muted small" id="blank-count-hint">
+                        Capped by the operator setting <code>prefill_blank_max_sheets</code>
+                        on the <a href="/settings">/settings</a> page.
+                    </p>
+                </div>
+
+                <div class="form-group">
+                    <label class="radio-label" for="blank-include-page-numbers">
+                        <input id="blank-include-page-numbers" name="include_page_numbers" type="checkbox" />
+                        Number pages (<code>n / N</code>) in the bottom-right corner
+                    </label>
+                    <p class="muted small">
+                        Stamps <code>n / N</code> at the bottom of each page so
+                        invigilators can hand out copies in order. Continuous
+                        across split segments when splitting is enabled below.
+                    </p>
+                </div>
+
+                <div class="form-group">
+                    <label class="radio-label" for="blank-split-pdfs">
+                        <input id="blank-split-pdfs" name="split_pdfs" type="checkbox" />
+                        Split output into smaller PDFs <span class="muted small">(printer-safe segments)</span>
+                    </label>
+                    <p class="muted small">
+                        Wraps the output in a ZIP of
+                        <code>blank_..._part_NN_of_TT.pdf</code> segments,
+                        each kept within the size and page caps configured
+                        on the <a href="/settings">/settings</a> page. Page
+                        numbers stay continuous across segments.
+                    </p>
+                </div>
+            </div>
+
+            <div id="blank-error" class="error small" style="display:none;margin-block-end:0.75rem;"></div>
+            <div class="actions">
+                <button type="submit" id="blank-submit" class="btn primary">Generate &amp; Download</button>
+            </div>
+        </form>
     </div>
 </div>
 {% endblock %}

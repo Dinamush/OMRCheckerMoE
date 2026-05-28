@@ -580,3 +580,59 @@ batchSubmit.addEventListener('click', async () => {
 
     await postFormAndDownload('/api/v1/prefill/batch', fd, batchSubmit, batchError);
 });
+
+// ── Blank Sheets submit ──────────────────────────────────────────────
+
+const blankForm = document.getElementById('blank-form');
+const blankSubmit = document.getElementById('blank-submit');
+const blankError = document.getElementById('blank-error');
+const blankVariant = document.getElementById('blank-variant');
+const blankCount = document.getElementById('blank-count');
+const blankIncludePageNumbers = document.getElementById('blank-include-page-numbers');
+const blankSplitPdfs = document.getElementById('blank-split-pdfs');
+
+const loadBlankVariants = async () => {
+    if (!blankVariant) return;
+    try {
+        const res = await fetch('/api/v1/prefill/blank/variants');
+        if (!res.ok) return;
+        const body = await res.json();
+        const variants = Array.isArray(body.variants) ? body.variants : [];
+        if (!variants.length) return;
+        const defaultKey = body.default || (variants[0] && variants[0].key) || '';
+        blankVariant.innerHTML = variants.map(v => {
+            const selected = v.key === defaultKey ? ' selected' : '';
+            return `<option value="${v.key}"${selected}>${v.label}</option>`;
+        }).join('');
+    } catch (_) {
+        // Keep the static fallback option already in the markup.
+    }
+};
+
+loadBlankVariants();
+
+if (blankForm) {
+    blankForm.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        showError(blankError, '');
+
+        const rawCount = blankCount ? blankCount.value.trim() : '';
+        const count = Number.parseInt(rawCount, 10);
+        if (!Number.isFinite(count) || count < 1) {
+            showError(blankError, 'Enter a positive whole number of copies.');
+            return;
+        }
+
+        const fd = new FormData();
+        fd.append('variant', blankVariant ? blankVariant.value : '');
+        fd.append('count', String(count));
+        if (blankIncludePageNumbers && blankIncludePageNumbers.checked) {
+            fd.append('include_page_numbers', 'true');
+        }
+        if (blankSplitPdfs && blankSplitPdfs.checked) {
+            fd.append('split_pdfs', 'true');
+        }
+
+        await postFormAndDownload('/api/v1/prefill/blank', fd, blankSubmit, blankError);
+    });
+}

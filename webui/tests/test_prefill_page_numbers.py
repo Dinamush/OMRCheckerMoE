@@ -21,7 +21,7 @@ import numpy as np
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from prefill_only_package import prefill_answer_sheet_final as prefill_module
+from prefill_package import prefill_answer_sheet_final as prefill_module
 from webui.services import prefill as prefill_service
 
 

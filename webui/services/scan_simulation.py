@@ -399,7 +399,7 @@ def _protect_markers(
             continue
 
         # ≥1 ArUco bit-cell of white margin around the restamp. Research
-        # (see docs/research_brief_scan_simulation_2026.md and the 2024
+        # (see docs/research/research_brief_scan_simulation_2026.md and the 2024
         # planar-fiducial comparative study) puts the minimum reliable
         # quiet zone at ~1 cell; for our 4×4 markers that is stamp_size/4.
         # A slightly tighter ratio (stamp_size/5) keeps the stamp away

@@ -1,6 +1,6 @@
 """Service layer for the prefill answer-sheet feature.
 
-Wraps ``prefill_only_package.prefill_answer_sheet_final``. Batch outputs are
+Wraps ``prefill_package.prefill_answer_sheet_final``. Batch outputs are
 streamed directly to a temp file on disk so peak memory is bounded regardless
 of row count (a 5k-row PDF must not OOM the server).
 """
@@ -44,7 +44,38 @@ if getattr(sys, "frozen", False):
     _PKG_ROOT = Path(sys._MEIPASS)  # type: ignore[attr-defined]
 else:
     _PKG_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_TEMPLATE = _PKG_ROOT / "prefill_only_package" / "blank_template_reference.png"
+DEFAULT_TEMPLATE = _PKG_ROOT / "prefill_package" / "blank_template_reference.png"
+
+# Registry of "print blank sheet" variants. Each entry maps a stable key
+# (used by the ``/api/v1/prefill/blank`` form and persisted in tests) to a
+# 1-page source PDF on disk plus a human-readable label for the UI. The
+# blank-sheet generator clones the source page N times into the output
+# PDF, optionally stamping continuous page numbers and post-splitting into
+# printer-safe segments — the same workflow the existing batch endpoint
+# uses, minus per-row rendering.
+#
+# When adding a new variant make sure its source PDF is bundled by
+# ``OMRChecker.spec`` (otherwise the desktop build will 404 at runtime).
+from webui.sheet_registry import (
+    LANDSCAPE_DIR,
+    LANDSCAPE_NNQ25_0,
+    LEGACY_LANDSCAPE,
+    normalize_preset_name,
+)
+
+BLANK_SHEET_VARIANTS: dict[str, dict[str, Any]] = {
+    LANDSCAPE_NNQ25_0: {
+        "label": (
+            "April 2026 landscape (NNQ25) — production sheet with ArUco markers"
+        ),
+        "source_pdf": (
+            LANDSCAPE_DIR / "blank_legacy_landscape_answer_sheet_with_markers.pdf"
+        ),
+        "default_stem": "blank_MoE-April-2026-Landscape-NNQ25-0",
+    },
+}
+
+DEFAULT_BLANK_SHEET_VARIANT = LANDSCAPE_NNQ25_0
 
 logger = logging.getLogger(__name__)
 
@@ -66,14 +97,14 @@ def _clean_field(value: Any, *, max_len: int = _MAX_FIELD_LEN) -> str:
 
 def _import_prefill():
     """Lazy import to avoid loading PIL at module-level if not needed."""
-    from prefill_only_package.prefill_answer_sheet_final import prefill_sheet
+    from prefill_package.prefill_answer_sheet_final import prefill_sheet
 
     return prefill_sheet
 
 
 def _import_prefill_module():
     """Lazy import of the full prefill module (needed for batch helpers)."""
-    import prefill_only_package.prefill_answer_sheet_final as m
+    import prefill_package.prefill_answer_sheet_final as m
 
     return m
 
@@ -1474,4 +1505,269 @@ def generate_batch_grouped_split_zip_to_file(
         "elapsed_s": round(elapsed, 2),
         "size_bytes": size_bytes,
         "groups": group_summaries,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Blank-sheet bulk printing.
+#
+# Operators frequently need N physical copies of the *unfilled* answer
+# sheet to hand out at exam venues — completely separate from the
+# candidate-data-bubbled batch flow. This section turns that into a
+# first-class feature: choose a variant, choose N, optionally number the
+# pages and/or split the output into printer-safe segments. The source
+# PDF is a 1-page asset bundled with the application (see
+# :data:`BLANK_SHEET_VARIANTS`); we clone its page N times via
+# :func:`fitz.Document.insert_pdf` so the embedded page raster is shared
+# across all N pages and the output stays compact (~one image worth of
+# bytes plus per-page xref overhead) regardless of N.
+# ---------------------------------------------------------------------------
+
+
+def normalize_blank_sheet_variant(value: Any) -> str:
+    """Return a registered blank-sheet variant key or raise ``ValueError``.
+
+    Accepts ``None``/empty strings as a request for the default variant
+    so the API layer can treat the form field as optional. Anything else
+    must match a key in :data:`BLANK_SHEET_VARIANTS` exactly.
+    """
+    if value is None:
+        return DEFAULT_BLANK_SHEET_VARIANT
+    text = str(value).strip()
+    if not text:
+        return DEFAULT_BLANK_SHEET_VARIANT
+    text = normalize_preset_name(text)
+    if text == LEGACY_LANDSCAPE:
+        text = LANDSCAPE_NNQ25_0
+    if text not in BLANK_SHEET_VARIANTS:
+        allowed = ", ".join(sorted(BLANK_SHEET_VARIANTS))
+        raise ValueError(
+            f"Unknown blank sheet variant {text!r}. Allowed values: {allowed}."
+        )
+    return text
+
+
+def list_blank_sheet_variants() -> list[dict[str, str]]:
+    """Return the registered variants in a UI-friendly shape."""
+    return [
+        {"key": key, "label": meta["label"]}
+        for key, meta in BLANK_SHEET_VARIANTS.items()
+    ]
+
+
+def _resolve_blank_sheet_source(variant: str) -> Path:
+    """Return the on-disk source PDF for ``variant`` (validated and existing)."""
+    meta = BLANK_SHEET_VARIANTS.get(variant)
+    if meta is None:
+        raise ValueError(f"Unknown blank sheet variant {variant!r}.")
+    src: Path = meta["source_pdf"]
+    if not src.exists():
+        raise FileNotFoundError(
+            f"Blank sheet source PDF for variant {variant!r} is missing at "
+            f"{src}. Re-run the generator or check the PyInstaller spec "
+            "bundles the source directory."
+        )
+    return src
+
+
+def _stamp_page_number_on_pdf_page(page, page_number: int, total: int) -> None:
+    """Stamp ``page_number / total`` in the bottom-right of a PyMuPDF page.
+
+    Positioned to clear the bottom-right ArUco fiducial of the custom-25
+    landscape sheet (marker centre ≈ x=782.5, y=593.9 pt; marker side
+    ≈ 26 pt) by drawing the text at y_baseline = page_height - 12 pt
+    (i.e. comfortably inside the bottom margin) and right-aligned with a
+    32 pt right-edge margin so the text sits to the LEFT of the corner
+    marker rather than overlapping it. Any correctly-laid-out US-letter
+    answer sheet leaves the bottom-edge strip empty of bubbles, so this
+    stays safe for future variants too.
+    """
+    import fitz  # PyMuPDF: already a hard dependency of this module
+
+    text = f"{page_number} / {total}"
+    fontname = "helv"
+    fontsize = 10
+    text_width = fitz.get_text_length(text, fontsize=fontsize, fontname=fontname)
+    page_rect = page.rect
+    x_right_margin = 32  # pt — inside the right edge, outside the corner marker
+    y_baseline = page_rect.height - 12  # 12 pt up from the bottom edge
+    x = max(0.0, page_rect.width - x_right_margin - text_width)
+    page.insert_text(
+        (x, y_baseline),
+        text,
+        fontsize=fontsize,
+        fontname=fontname,
+        color=(0, 0, 0),
+    )
+
+
+def generate_blank_sheets_pdf_to_file(
+    dst_path: Path,
+    *,
+    variant: str = DEFAULT_BLANK_SHEET_VARIANT,
+    count: int,
+    include_page_numbers: bool = False,
+) -> dict:
+    """Render N copies of a blank answer-sheet variant into a single PDF.
+
+    The source PDF is opened once and its single page is inserted into a
+    fresh PyMuPDF document N times. ``garbage=4, deflate=True`` on save
+    dedupes the shared embedded image so the output stays compact for
+    large N (e.g. 5000 sheets stays in the low-MB range rather than
+    growing linearly with N). Returns a metadata dict in the same shape
+    as the batch helpers so the API layer can reuse its download-token
+    plumbing unchanged.
+    """
+    import fitz
+
+    if count < 1:
+        raise ValueError("count must be >= 1.")
+    variant = normalize_blank_sheet_variant(variant)
+    src_path = _resolve_blank_sheet_source(variant)
+
+    logger.info(
+        "Blank sheet PDF started | variant=%s | count=%d | page_numbers=%s",
+        variant, count, include_page_numbers,
+    )
+    t_batch = time.perf_counter()
+
+    dst_path.parent.mkdir(parents=True, exist_ok=True)
+    src = fitz.open(str(src_path))
+    try:
+        if src.page_count < 1:
+            raise ValueError(
+                f"Blank sheet source PDF for variant {variant!r} has no pages."
+            )
+        out = fitz.open()
+        try:
+            for _ in range(count):
+                out.insert_pdf(src, from_page=0, to_page=0)
+            if include_page_numbers:
+                for idx in range(count):
+                    _stamp_page_number_on_pdf_page(
+                        out.load_page(idx),
+                        page_number=idx + 1,
+                        total=count,
+                    )
+            out.save(str(dst_path), garbage=4, deflate=True)
+        finally:
+            out.close()
+    finally:
+        src.close()
+
+    elapsed = time.perf_counter() - t_batch
+    size_bytes = dst_path.stat().st_size if dst_path.exists() else 0
+    logger.info(
+        "Blank sheet PDF complete | variant=%s | count=%d | elapsed=%.1fs | size_mb=%.1f",
+        variant, count, elapsed, size_bytes / (1024 * 1024),
+    )
+    return {
+        "count": count,
+        "successes": count,
+        "errors": [],
+        "elapsed_s": round(elapsed, 2),
+        "size_bytes": size_bytes,
+        "variant": variant,
+    }
+
+
+def generate_blank_sheets_split_zip_to_file(
+    dst_path: Path,
+    *,
+    variant: str = DEFAULT_BLANK_SHEET_VARIANT,
+    count: int,
+    max_pdf_mb: int,
+    max_pdf_pages: int,
+    include_page_numbers: bool = False,
+) -> dict:
+    """Render N blank sheets and split into printer-safe ZIP segments.
+
+    Builds the combined PDF first (so any page-numbering stays continuous
+    across segments) and then reuses :func:`_split_pdf_into_segments`
+    plus the existing ZIP writer used by the batch split path. Returns
+    the same shape as :func:`generate_batch_split_pdf_to_zip`.
+    """
+    if max_pdf_mb < 1:
+        raise ValueError("max_pdf_mb must be >= 1.")
+    if max_pdf_pages < 1:
+        raise ValueError("max_pdf_pages must be >= 1.")
+
+    variant = normalize_blank_sheet_variant(variant)
+    meta_variant = BLANK_SHEET_VARIANTS[variant]
+    stem = meta_variant.get("default_stem", f"blank_{variant}")
+
+    logger.info(
+        "Blank sheet split ZIP started | variant=%s | count=%d | "
+        "max_mb=%d | max_pages=%d | page_numbers=%s",
+        variant, count, max_pdf_mb, max_pdf_pages, include_page_numbers,
+    )
+    t_batch = time.perf_counter()
+
+    with tempfile.NamedTemporaryFile(
+        prefix="blank_combined_", suffix=".pdf", delete=False
+    ) as combined_tmp:
+        combined_path = Path(combined_tmp.name)
+
+    segment_paths: list[Path] = []
+    try:
+        combined_meta = generate_blank_sheets_pdf_to_file(
+            combined_path,
+            variant=variant,
+            count=count,
+            include_page_numbers=include_page_numbers,
+        )
+        segments = _split_pdf_into_segments(
+            combined_path,
+            max_pdf_mb=max_pdf_mb,
+            max_pdf_pages=max_pdf_pages,
+        )
+        dst_path.parent.mkdir(parents=True, exist_ok=True)
+        segment_summaries: list[dict[str, Any]] = []
+        total = len(segments)
+        with zipfile.ZipFile(
+            dst_path, mode="w", compression=zipfile.ZIP_DEFLATED, compresslevel=1
+        ) as zf:
+            for idx, (seg_path, first_page, last_page, size_bytes) in enumerate(
+                segments, start=1
+            ):
+                entry_name = _format_part_name(stem, idx, total)
+                zf.writestr(entry_name, seg_path.read_bytes())
+                if seg_path != combined_path:
+                    segment_paths.append(seg_path)
+                segment_summaries.append(
+                    {
+                        "name": entry_name,
+                        "first_page": first_page,
+                        "last_page": last_page,
+                        "pages": last_page - first_page + 1,
+                        "size_bytes": size_bytes,
+                    }
+                )
+    finally:
+        try:
+            combined_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        for sp in segment_paths:
+            try:
+                sp.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    elapsed = time.perf_counter() - t_batch
+    size_bytes = dst_path.stat().st_size if dst_path.exists() else 0
+    logger.info(
+        "Blank sheet split ZIP complete | variant=%s | count=%d | "
+        "segments=%d | elapsed=%.1fs | zip_size_mb=%.1f",
+        variant, combined_meta["count"], len(segment_summaries),
+        elapsed, size_bytes / (1024 * 1024),
+    )
+    return {
+        "count": combined_meta["count"],
+        "successes": combined_meta["successes"],
+        "errors": combined_meta["errors"],
+        "elapsed_s": round(elapsed, 2),
+        "size_bytes": size_bytes,
+        "variant": variant,
+        "segments": segment_summaries,
     }
