@@ -1,7 +1,12 @@
+from dataclasses import dataclass, field
+
 import cv2
 import numpy as np
 
-from src.processors.CropOnMarkers import CropOnMarkers
+from src.processors.CropOnMarkers import (
+    CropOnMarkers,
+    WarpBubbleConfidence,
+)
 
 
 MARKER_SIZE = 24
@@ -151,3 +156,184 @@ def test_three_of_four_corner_extrapolation_recovers_missing_corner():
     expected = detected[missing_idx]
     assert abs(float(estimated[0]) - expected[0]) < 1.5
     assert abs(float(estimated[1]) - expected[1]) < 1.5
+
+
+# ---------------------------------------------------------------------------
+# Leave-one-out marker rejection
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _StubDims:
+    processing_width: int = 666
+    processing_height: int = 515
+
+
+@dataclass
+class _StubTuning:
+    dimensions: _StubDims = field(default_factory=_StubDims)
+
+
+def _make_aruco_processor_stub() -> CropOnMarkers:
+    """Construct a ``CropOnMarkers`` without running ``__init__``.
+
+    Avoids the production constructor's disk + OpenCV dependencies; the LOO
+    helper only needs ``tuning_config``, ``reference_marker_centers``,
+    ``reference_marker_half_size`` and ``template_context`` to be set.
+    """
+    processor = CropOnMarkers.__new__(CropOnMarkers)
+    processor.tuning_config = _StubTuning()
+    processor.reference_marker_centers = [
+        (13.5, 13.2),
+        (651.5, 13.2),
+        (13.5, 499.0),
+        (651.5, 499.0),
+    ]
+    processor.reference_marker_half_size = 10.0
+    processor.template_context = None
+    processor.last_warp_bubble_confidence = None
+    return processor
+
+
+def _reference_marker_corners_for_ids(processor, marker_ids):
+    """Return a {id: (4, 2) ndarray} of perfect marker sub-corners.
+
+    Builds a perfectly-aligned scan: the detected corners equal the reference
+    corners, so a homography fit on every subset has zero residual.
+    """
+    detected = {}
+    for marker_id in marker_ids:
+        detected[marker_id] = processor._reference_marker_corners(marker_id)
+    return detected
+
+
+def test_choose_best_warp_keeps_full_fit_when_all_markers_clean(monkeypatch):
+    processor = _make_aruco_processor_stub()
+    detected = _reference_marker_corners_for_ids(processor, [0, 1, 2, 3])
+    image = np.full((515, 666, 3), 220, dtype=np.uint8)
+    id_to_corner = {0: 0, 1: 1, 2: 2, 3: 3}
+
+    accept = WarpBubbleConfidence(
+        sample_count=100, median_contrast=0.20, coverage=0.95,
+        score=0.85, ok=True, reason="ok",
+    )
+
+    monkeypatch.setattr(
+        "src.processors.CropOnMarkers._score_warp_bubble_confidence",
+        lambda *_args, **_kwargs: accept,
+    )
+
+    warped, conf, subset = processor._choose_best_warp(
+        image=image,
+        detected_corners=detected,
+        id_to_corner=id_to_corner,
+        available_ids=[0, 1, 2, 3],
+        expected_aspect=666 / 515,
+        file_path="unit-test",
+    )
+
+    assert warped is not None
+    assert conf is not None and conf.ok
+    assert subset == [0, 1, 2, 3], (
+        "full fit was acceptable; LOO must not run"
+    )
+
+
+def test_choose_best_warp_drops_biased_marker_via_loo(monkeypatch):
+    """A biased detection on ID 1 must be dropped in favour of the
+    3-marker subset {0, 2, 3} when its bubble-alignment score is better."""
+    processor = _make_aruco_processor_stub()
+    detected = _reference_marker_corners_for_ids(processor, [0, 2, 3])
+    # Bias marker ID 1 by 25 px both x and y so any subset containing it
+    # produces a measurably worse warp than the LOO subset that drops it.
+    biased = processor._reference_marker_corners(1) + np.array(
+        [[25.0, 25.0]], dtype=np.float32
+    )
+    detected[1] = biased
+    image = np.full((515, 666, 3), 220, dtype=np.uint8)
+    id_to_corner = {0: 0, 1: 1, 2: 2, 3: 3}
+
+    accept = WarpBubbleConfidence(
+        sample_count=100, median_contrast=0.20, coverage=0.95,
+        score=0.85, ok=True, reason="ok",
+    )
+    reject = WarpBubbleConfidence(
+        sample_count=100, median_contrast=0.01, coverage=0.10,
+        score=0.10, ok=False, reason="median_contrast=0.01 coverage=0.10",
+    )
+
+    def score(_image, _template):
+        # The full fit (includes biased marker) returns reject; the LOO
+        # subset that drops ID 1 returns accept. Subsets that drop a
+        # different marker still include the biased ID 1 so they also
+        # return reject.
+        return getattr(score, "_next", reject)
+
+    call_subsets = []
+    original = (
+        "src.processors.CropOnMarkers"
+        "._score_warp_bubble_confidence"
+    )
+
+    def fake_score(warped_image, template):
+        # Find which subset produced this warp by inspecting which corner
+        # of the warped image is closest to (0, 0) — easier: compare the
+        # checksum to a recorded baseline. Cheaper proxy: round 1 of the
+        # call sequence is full, then 4 LOO calls in order [drop-0,
+        # drop-1, drop-2, drop-3].
+        call_subsets.append(int(np.sum(warped_image[::40, ::40, 0])))
+        nth = len(call_subsets)
+        # nth=1 → full (includes biased ID 1)  → reject
+        # nth=3 → drop-1 (LOO subset without biased marker) → accept
+        if nth == 3:
+            return accept
+        return reject
+
+    monkeypatch.setattr(original, fake_score)
+
+    warped, conf, subset = processor._choose_best_warp(
+        image=image,
+        detected_corners=detected,
+        id_to_corner=id_to_corner,
+        available_ids=[0, 1, 2, 3],
+        expected_aspect=666 / 515,
+        file_path="unit-test",
+    )
+
+    assert warped is not None
+    assert conf is not None and conf.ok
+    assert subset == [0, 2, 3], (
+        f"expected LOO subset that drops biased ID 1, got {subset!r}"
+    )
+
+
+def test_choose_best_warp_rejects_when_every_subset_fails_gate(monkeypatch):
+    """When no subset clears the bubble-alignment gate the chosen warp must
+    be ``None`` so the sheet is routed to ErrorFiles instead of mis-scored."""
+    processor = _make_aruco_processor_stub()
+    detected = _reference_marker_corners_for_ids(processor, [0, 1, 2, 3])
+    image = np.full((515, 666, 3), 220, dtype=np.uint8)
+    id_to_corner = {0: 0, 1: 1, 2: 2, 3: 3}
+
+    reject = WarpBubbleConfidence(
+        sample_count=100, median_contrast=0.01, coverage=0.10,
+        score=0.10, ok=False, reason="too low",
+    )
+
+    monkeypatch.setattr(
+        "src.processors.CropOnMarkers._score_warp_bubble_confidence",
+        lambda *_args, **_kwargs: reject,
+    )
+
+    warped, conf, subset = processor._choose_best_warp(
+        image=image,
+        detected_corners=detected,
+        id_to_corner=id_to_corner,
+        available_ids=[0, 1, 2, 3],
+        expected_aspect=666 / 515,
+        file_path="unit-test",
+    )
+
+    assert warped is None, "every subset failed the gate; warp must be rejected"
+    assert subset is None
+    assert conf is not None and not conf.ok

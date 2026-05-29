@@ -1,0 +1,115 @@
+{
+  "pageDimensions": [
+    666,
+    515
+  ],
+  "bubbleDimensions": [
+    10,
+    10
+  ],
+  "customLabels": {
+    "CandidateNumber": [
+      "cand1..10"
+    ]
+  },
+  "outputColumns": [
+    "CandidateNumber",
+    "q1..25"
+  ],
+  "fieldBlocks": {
+    "CandidateNumber": {
+      "origin": [
+        430,
+        103
+      ],
+      "bubblesGap": 10.0,
+      "labelsGap": 21.5,
+      "fieldLabels": [
+        "cand1..10"
+      ],
+      "fieldType": "QTYPE_INT"
+    },
+    "q01block": {
+      "origin": [
+        52.7,
+        259.3
+      ],
+      "bubblesGap": 20.0,
+      "labelsGap": 41.9,
+      "fieldLabels": [
+        "q1..5"
+      ],
+      "emptyValue": "NR",
+      "fieldType": "QTYPE_MCQ4"
+    },
+    "q06block": {
+      "origin": [
+        180.9,
+        259.3
+      ],
+      "bubblesGap": 20.0,
+      "labelsGap": 41.9,
+      "fieldLabels": [
+        "q6..10"
+      ],
+      "emptyValue": "NR",
+      "fieldType": "QTYPE_MCQ4"
+    },
+    "q11block": {
+      "origin": [
+        309.8,
+        259.3
+      ],
+      "bubblesGap": 19.8,
+      "labelsGap": 41.9,
+      "fieldLabels": [
+        "q11..15"
+      ],
+      "emptyValue": "NR",
+      "fieldType": "QTYPE_MCQ4"
+    },
+    "q16block": {
+      "origin": [
+        435.9,
+        259.3
+      ],
+      "bubblesGap": 20.0,
+      "labelsGap": 41.9,
+      "fieldLabels": [
+        "q16..20"
+      ],
+      "emptyValue": "NR",
+      "fieldType": "QTYPE_MCQ4"
+    },
+    "q21block": {
+      "origin": [
+        566.3,
+        259.3
+      ],
+      "bubblesGap": 20.0,
+      "labelsGap": 41.9,
+      "fieldLabels": [
+        "q21..25"
+      ],
+      "emptyValue": "NR",
+      "fieldType": "QTYPE_MCQ4"
+    }
+  },
+  "preProcessors": [
+    {
+      "name": "CropOnMarkers",
+      "options": {
+        "type": "aruco",
+        "arucoDictionary": "DICT_4X4_50",
+        "arucoCornerIds": [0, 1, 2, 3],
+        "preserveFullImage": true,
+        "referenceMarkerCenters": [
+          [13.5, 13.2],
+          [651.5, 13.2],
+          [13.5, 499.0],
+          [651.5, 499.0]
+        ]
+      }
+    }
+  ]
+}
