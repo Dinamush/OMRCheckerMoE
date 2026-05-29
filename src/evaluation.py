@@ -251,7 +251,9 @@ class EvaluationConfig:
                     name=image_path,
                     save_dir=None,
                 )
-                omr_response = get_concatenated_response(response_dict, template)
+                omr_response, _partial_read_detected = get_concatenated_response(
+                    response_dict, template
+                )
 
                 empty_val = template.global_empty_val
                 empty_answer_regex = (

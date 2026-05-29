@@ -33,16 +33,43 @@ OVERRIDE_MERGER = Merger(
 
 
 def get_concatenated_response(omr_response, template):
-    # Multi-column/multi-row questions which need to be concatenated
+    """Concatenate multi-strip custom labels into final output values.
+
+    Returns ``(concatenated_response, partial_read_detected)``.
+
+    ``partial_read_detected`` is ``True`` when any composite field (e.g.
+    ``CandidateNumber`` assembled from ``cand1..cand10``) ended up with SOME
+    strips empty while OTHER strips produced a value. A blind ``"".join``
+    silently drops the empty strips, producing a deceptively-short string
+    (the production bug where prefill ``9010292074`` was read as ``"78"``
+    because eight columns' ROIs landed in white space after a degraded
+    3-marker warp). That is never a legitimate student-fill pattern for an
+    integer-digit composite field, so the partial result is wrapped in
+    ``MR(...)`` and the caller routes the sheet to MultiMarkedFiles for
+    manual review instead of writing a silently-truncated value to Results.
+
+    An ALL-empty composite (the student never filled the field) is left as
+    the empty string — that is a legitimate "no response" pattern, not a
+    partial-read failure.
+    """
     concatenated_response = {}
+    partial_read_detected = False
+    strict_fields = getattr(template, "strict_composite_fields", set()) or set()
     for field_label, concatenate_keys in template.custom_labels.items():
-        custom_label = "".join([omr_response[k] for k in concatenate_keys])
-        concatenated_response[field_label] = custom_label
+        strip_values = [omr_response[k] for k in concatenate_keys]
+        raw = "".join(strip_values)
+        if field_label in strict_fields:
+            non_empty_count = sum(1 for v in strip_values if v != "")
+            if 0 < non_empty_count < len(strip_values):
+                partial_read_detected = True
+                concatenated_response[field_label] = f"MR({raw})"
+                continue
+        concatenated_response[field_label] = raw
 
     for field_label in template.non_custom_labels:
         concatenated_response[field_label] = omr_response[field_label]
 
-    return concatenated_response
+    return concatenated_response, partial_read_detected
 
 
 def open_config_with_defaults(config_path):

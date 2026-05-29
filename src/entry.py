@@ -509,7 +509,14 @@ def _process_single_omr_image(
         template, image=in_omr, name=file_id, save_dir=save_dir
     )
 
-    omr_response = get_concatenated_response(response_dict, template)
+    omr_response, partial_read_detected = get_concatenated_response(
+        response_dict, template
+    )
+    # A partial composite read (some strips empty, others filled) on a field
+    # like CandidateNumber is unsafe to accept silently — quarantine the
+    # sheet so the operator sees the MR(...) flag and can re-scan.
+    if partial_read_detected:
+        multi_marked = True
 
     if (
         evaluation_config is None

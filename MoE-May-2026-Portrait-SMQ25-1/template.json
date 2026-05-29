@@ -12,6 +12,7 @@
       "cand1..10"
     ]
   },
+  "strictCompositeFields": ["CandidateNumber"],
   "outputColumns": [
     "CandidateNumber",
     "q1..25"

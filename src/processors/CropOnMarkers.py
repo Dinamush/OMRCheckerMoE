@@ -360,6 +360,26 @@ class CropOnMarkers(ImagePreprocessor):
             params.maxMarkerPerimeterRate = 0.5
             self.aruco_detector = cv2.aruco.ArucoDetector(aruco_dict, params)
             # ----------------------------------------------------------------
+            # Fallback detector — wider adaptive threshold sweep + sub-pixel
+            # corner refinement. Used ONLY when the fast detector finds
+            # fewer than 4 markers, so the clean-scan fast path is
+            # unaffected. The wider window range recovers markers that are
+            # partially obscured by smudges/ink (verified on the production
+            # heavy-skew Xerox scan where the TL marker is covered by a
+            # dirt smudge and the fast detector misses it).
+            # ----------------------------------------------------------------
+            fb_params = cv2.aruco.DetectorParameters()
+            fb_params.adaptiveThreshWinSizeMin = 3
+            fb_params.adaptiveThreshWinSizeMax = 53
+            fb_params.adaptiveThreshWinSizeStep = 4
+            fb_params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+            fb_params.minMarkerPerimeterRate = 0.015
+            fb_params.maxMarkerPerimeterRate = 0.55
+            fb_params.polygonalApproxAccuracyRate = 0.05
+            self.aruco_detector_fallback = cv2.aruco.ArucoDetector(
+                aruco_dict, fb_params
+            )
+            # ----------------------------------------------------------------
             # Board-based recovery for partially occluded sheets.
             #
             # Construct a planar ``cv2.aruco.Board`` from the four reference
@@ -628,6 +648,44 @@ class CropOnMarkers(ImagePreprocessor):
         corners_raw, ids_raw, rejected = self.aruco_detector.detectMarkers(gray_padded)
 
         initial_count = 0 if ids_raw is None else len(ids_raw)
+
+        # ----------------------------------------------------------------
+        # Pass 1.5 — Wider-sweep retry for severely-occluded sheets (<3
+        # markers found).
+        #
+        # When the fast detector finds fewer than 3 markers, the cropper
+        # cannot solve a robust degraded warp (the 2-marker similarity
+        # transform handles tilt/scale but not perspective). In that case
+        # retry with a wider adaptive threshold range + sub-pixel
+        # refinement, which can recover markers that the fast pass skips.
+        #
+        # We deliberately DO NOT invoke this when initial_count == 3:
+        # the 3-marker degraded warp synthesises a virtual fourth corner
+        # by assuming a rectangular sheet, which is MORE accurate than
+        # using a half-obscured real marker (a smudge can shift the
+        # detected corner by several pixels and that error propagates
+        # through the 4-marker homography). Empirically verified on the
+        # production heavy-skew Xerox scan: 4-marker warp with a smudged
+        # TL marker reads candidate digits in the wrong rows; the
+        # 3-marker degraded warp reads them correctly.
+        # ----------------------------------------------------------------
+        if (
+            initial_count < 3
+            and getattr(self, "aruco_detector_fallback", None) is not None
+        ):
+            fb_corners, fb_ids, fb_rejected = (
+                self.aruco_detector_fallback.detectMarkers(gray_padded)
+            )
+            fb_count = 0 if fb_ids is None else len(fb_ids)
+            if fb_count > initial_count:
+                logger.info(
+                    file_path,
+                    f"\nArUco: fallback detector recovered "
+                    f"{fb_count - initial_count} additional marker(s) "
+                    f"({initial_count} -> {fb_count}).",
+                )
+                corners_raw, ids_raw, rejected = fb_corners, fb_ids, fb_rejected
+                initial_count = fb_count
 
         # ----------------------------------------------------------------
         # Pass 2 — Board-based refinement.
