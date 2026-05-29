@@ -66,10 +66,17 @@ CONFIG = {
 }
 
 
-def _fill_bubble(img: np.ndarray, column: int, digit: int, intensity: int) -> None:
-    """Paint a digit bubble at its template coordinates."""
+def _fill_bubble(
+    img: np.ndarray, column: int, digit: int, intensity: int, y_offset: int = 0
+) -> None:
+    """Paint a digit bubble at its template coordinates.
+
+    ``y_offset`` shifts the painted mark vertically relative to its nominal
+    ROI, simulating a warp that left the digit grid misregistered (the cause
+    of the production ``...74 -> ...MR(78)4`` bleed on skewed scans).
+    """
     x0 = round(ORIGIN_X + column * LABELS_GAP)
-    y0 = round(ORIGIN_Y + digit * BUBBLES_GAP)
+    y0 = round(ORIGIN_Y + digit * BUBBLES_GAP) + y_offset
     img[y0 : y0 + BUBBLE, x0 : x0 + BUBBLE] = intensity
 
 
@@ -156,3 +163,28 @@ def test_genuine_equal_double_mark_is_flagged(tmp_path: Path) -> None:
     # The remaining nine columns are still resolved as their single digit,
     # so the rest of the number is intact around the flagged column.
     assert candidate_value.endswith("012345678")
+
+
+def test_uniformly_skewed_grid_is_recentred(tmp_path: Path) -> None:
+    """A uniformly vertically-misregistered digit grid must still read exactly.
+
+    Reproduces the mechanism behind the production failure: a warp that left
+    the candidate grid shifted vertically, so each filled digit straddles the
+    zero-gap boundary into its neighbour's ROI. With a uniform offset, the
+    bounded, consistency-gated vertical re-centering detects the systematic
+    shift and recovers the exact number rather than quarantining it. (A full
+    end-to-end check on the real skewed scan lives in
+    test_skewed_candidate_recovery.py.)
+    """
+    candidate = "9010292074"  # the exact production candidate number
+    offset = 4  # a systematic sub-bubble shift, recoverable by re-centering
+    img = _blank_sheet()
+    for column, digit_char in enumerate(candidate):
+        _fill_bubble(img, column, int(digit_char), DARK, y_offset=offset)
+
+    row = _run_engine(tmp_path, img)
+
+    assert row["CandidateNumber"] == candidate, (
+        "uniform vertical skew corrupted the candidate number: "
+        f"got {row['CandidateNumber']!r}, expected {candidate!r}"
+    )

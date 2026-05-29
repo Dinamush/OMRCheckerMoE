@@ -1,4 +1,5 @@
 import os
+import statistics
 from collections import defaultdict
 from typing import Any
 
@@ -188,11 +189,18 @@ def select_question_response(
 
     marked_options: list of (option_value, mean_intensity) for bubbles that
     cleared the per-strip threshold. Lower intensity means darker.
+
+    A strip is single-select: exactly one bubble should be filled. We keep the
+    single darkest bubble, and only flag MR(...) when two or more bubbles are
+    so close in intensity (within multi_mark_equal_delta) that we cannot tell
+    them apart — a genuinely ambiguous double mark that must be surfaced for
+    manual review rather than guessed at.
     """
     if not marked_options:
         return empty_value, False
 
     marked_options = sorted(marked_options, key=lambda item: item[1])
+    best_option = marked_options[0][0]
     best_intensity = float(marked_options[0][1])
     delta = max(0.0, float(multi_mark_equal_delta)) * 255.0
     equally_dark = [
@@ -203,7 +211,7 @@ def select_question_response(
     if len(equally_dark) > 1:
         equally_dark = sorted(dict.fromkeys(equally_dark))
         return f"MR({''.join(equally_dark)})", True
-    return marked_options[0][0], False
+    return best_option, False
 
 
 class ImageInstanceOps:
@@ -413,41 +421,132 @@ class ImageInstanceOps:
             _ii = cv2.integral(img)
             _ii_h, _ii_w = _ii.shape[:2]  # (H+1, W+1)
 
+            # Guard-band inset (fraction of each bubble trimmed per side).
+            # Prevents a filled bubble from bleeding dark pixels into a
+            # neighbouring bubble's sampling rectangle when the scan is
+            # slightly skewed — the root cause of false second marks on
+            # zero-gap QTYPE_INT candidate-number columns. See
+            # threshold_params.BUBBLE_INSET_RATIO in src/defaults/config.py.
+            inset_ratio = float(
+                getattr(config.threshold_params, "BUBBLE_INSET_RATIO", 0.0)
+            )
+            inset_ratio = min(max(inset_ratio, 0.0), 0.45)
+            recenter_ratio = float(
+                getattr(config.threshold_params, "VERTICAL_RECENTER_MAX_RATIO", 0.0)
+            )
+            recenter_ratio = min(max(recenter_ratio, 0.0), 0.49)
+            min_recenter_contrast = float(
+                getattr(config.threshold_params, "MIN_JUMP", 25)
+            )
+
+            def _bubble_mean(x, y, inset_x, inset_y, bw, bh):
+                # Mean intensity of one bubble's (optionally inset) ROI via the
+                # summed-area table. Clamp into the integral image bounds:
+                # a negative auto-align shift could otherwise wrap around in
+                # NumPy and silently return a wrong intensity, and an
+                # out-of-range high value raised an IndexError mid-batch
+                # (audit finding CORE-3).
+                x1 = int(max(0, min(x + inset_x, _ii_w - 1)))
+                y1 = int(max(0, min(y + inset_y, _ii_h - 1)))
+                x2 = int(max(0, min(x + bw - inset_x, _ii_w - 1)))
+                y2 = int(max(0, min(y + bh - inset_y, _ii_h - 1)))
+                if x2 <= x1 or y2 <= y1:
+                    # Clamped to zero area; fall back to a safe "fully white"
+                    # reading so this question is later detected as no-mark
+                    # rather than silently scored.
+                    return 255.0
+                return float(
+                    (_ii[y2, x2] - _ii[y1, x2] - _ii[y2, x1] + _ii[y1, x1])
+                    / max(1, (x2 - x1) * (y2 - y1))
+                )
+
+            def _strip_means(bubbles, dy, inset_x, inset_y, bw, bh, shift):
+                return [
+                    _bubble_mean(pt.x + shift, pt.y + dy, inset_x, inset_y, bw, bh)
+                    for pt in bubbles
+                ]
+
             all_q_vals, all_q_strip_arrs, all_q_std_vals = [], [], []
             total_q_strip_no = 0
             for field_block in template.field_blocks:
                 box_w, box_h = field_block.bubble_dimensions
+                # Inset in pixels, computed per block from its bubble size.
+                # Rounded so the sampled rectangle stays at least 1px on each
+                # axis even for small bubbles.
+                inset_x = min(int(round(box_w * inset_ratio)), max(0, (box_w - 1) // 2))
+                inset_y = min(int(round(box_h * inset_ratio)), max(0, (box_h - 1) // 2))
+
+                # Bounded vertical re-centering applies only to strips whose
+                # bubbles are stacked vertically AND abut with no guard band
+                # (bubblesGap <= bubble height) — the QTYPE_INT candidate/roll
+                # columns prone to neighbour bleed under skew. The search is
+                # capped strictly below half the bubble pitch so it can only
+                # sharpen alignment toward the nearest printed bubble, never
+                # lock onto a neighbour.
+                block_direction = getattr(field_block, "direction", None)
+                block_bubbles_gap = float(
+                    getattr(field_block, "bubbles_gap", box_h) or box_h
+                )
+                max_dy = 0
+                if (
+                    recenter_ratio > 0.0
+                    and block_direction == "vertical"
+                    and block_bubbles_gap <= box_h + 1e-6
+                ):
+                    max_dy = min(
+                        int(round(box_h * recenter_ratio)),
+                        max(0, (int(round(block_bubbles_gap)) - 1) // 2),
+                    )
+
+                # Decide a SINGLE uniform vertical shift for the whole block.
+                #
+                # For each marked column we find the offset (within ±max_dy)
+                # that makes one bubble most cleanly the darkest. A genuine,
+                # systematic warp misregistration shifts every column the same
+                # way, so the per-column choices agree tightly. We trust the
+                # correction and apply the median shift uniformly ONLY in that
+                # case. If the per-column choices disagree (outlier columns
+                # flipping to the opposite extreme), the skew is non-uniform
+                # and unrecoverable: re-centering individual columns would
+                # manufacture false confidence and silently mis-read them, so
+                # we leave the grid at its nominal position. The affected
+                # columns then stay ambiguous (MR) and the sheet is safely
+                # quarantined for manual review instead of scored wrong.
+                block_dy = 0
+                if max_dy > 0:
+                    candidate_dys = []
+                    for field_block_bubbles in field_block.traverse_bubbles:
+                        base = _strip_means(
+                            field_block_bubbles, 0, inset_x, inset_y,
+                            box_w, box_h, field_block.shift,
+                        )
+                        if (max(base) - min(base)) < min_recenter_contrast:
+                            continue  # empty/very faint column — no mark to align
+                        best_score, best_dy = None, 0
+                        for cand_dy in range(-max_dy, max_dy + 1):
+                            vals = _strip_means(
+                                field_block_bubbles, cand_dy, inset_x,
+                                inset_y, box_w, box_h, field_block.shift,
+                            )
+                            ordered = sorted(vals)
+                            gap = ordered[1] - ordered[0]
+                            score = gap - 0.01 * abs(cand_dy)
+                            if best_score is None or score > best_score:
+                                best_score, best_dy = score, cand_dy
+                        candidate_dys.append(best_dy)
+                    if len(candidate_dys) >= 3:
+                        median_dy = int(round(statistics.median(candidate_dys)))
+                        if all(abs(d - median_dy) <= 1 for d in candidate_dys):
+                            block_dy = median_dy
+
+                field_block.strip_vertical_shifts = []
                 q_std_vals = []
                 for field_block_bubbles in field_block.traverse_bubbles:
-                    q_strip_vals = []
-                    for pt in field_block_bubbles:
-                        # shifted
-                        x, y = (pt.x + field_block.shift, pt.y)
-                        # Clamp into the integral image bounds. Previously a
-                        # negative auto-align shift could push x or y
-                        # negative, which in NumPy wraps around to the far
-                        # side of the integral image and silently returned a
-                        # completely wrong bubble intensity. Out-of-range
-                        # high values caused an IndexError mid-batch.
-                        # (audit finding CORE-3)
-                        x1 = int(max(0, min(x, _ii_w - 1)))
-                        y1 = int(max(0, min(y, _ii_h - 1)))
-                        x2 = int(max(0, min(x + box_w, _ii_w - 1)))
-                        y2 = int(max(0, min(y + box_h, _ii_h - 1)))
-                        if x2 <= x1 or y2 <= y1:
-                            # Clamped to zero area; fall back to a safe
-                            # "fully white" reading so this question is
-                            # later detected as no-mark rather than silently
-                            # scored.
-                            q_strip_vals.append(255.0)
-                            continue
-                        # Summed-area table: mean = (I[y2,x2]-I[y1,x2]-I[y2,x1]+I[y1,x1]) / area
-                        q_strip_vals.append(float(
-                            (_ii[y2, x2]
-                             - _ii[y1, x2]
-                             - _ii[y2, x1]
-                             + _ii[y1, x1]) / max(1, (x2 - x1) * (y2 - y1))
-                        ))
+                    field_block.strip_vertical_shifts.append(block_dy)
+                    q_strip_vals = _strip_means(
+                        field_block_bubbles, block_dy, inset_x, inset_y,
+                        box_w, box_h, field_block.shift,
+                    )
                     q_std_vals.append(round(np.std(q_strip_vals), 2))
                     all_q_strip_arrs.append(q_strip_vals)
                     # _, _, _ = get_global_threshold(q_strip_vals, "QStrip Plot",
@@ -492,9 +591,23 @@ class ImageInstanceOps:
                 shift = field_block.shift
                 s, d = field_block.origin, field_block.dimensions
                 key = field_block.name[:3]
+                strip_vertical_shifts = getattr(
+                    field_block, "strip_vertical_shifts", None
+                )
                 # cv2.rectangle(final_marked,(s[0]+shift,s[1]),(s[0]+shift+d[0],
                 #   s[1]+d[1]),CLR_BLACK,3)
-                for field_block_bubbles in field_block.traverse_bubbles:
+                for strip_index, field_block_bubbles in enumerate(
+                    field_block.traverse_bubbles
+                ):
+                    # Vertical re-centering offset chosen for this strip during
+                    # measurement (0 for non-INT / unshifted strips). Applied
+                    # to the overlay so the drawn boxes match the measured ROIs.
+                    strip_dy = (
+                        strip_vertical_shifts[strip_index]
+                        if strip_vertical_shifts is not None
+                        and strip_index < len(strip_vertical_shifts)
+                        else 0
+                    )
                     # All Black or All White case
                     no_outliers = all_q_std_vals[total_q_strip_no] < global_std_thresh
                     # print(total_q_strip_no, field_block_bubbles[0].field_label,
@@ -529,7 +642,7 @@ class ImageInstanceOps:
                         total_q_box_no += 1
                         x, y, field_value = (
                             bubble.x + field_block.shift,
-                            bubble.y,
+                            bubble.y + strip_dy,
                             bubble.field_value,
                         )
                         if bubble_is_marked:

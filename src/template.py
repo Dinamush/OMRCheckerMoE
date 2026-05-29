@@ -17,12 +17,86 @@ from src.utils.parsing import (
 )
 
 
+def _apply_oversample(json_object: dict, oversample: float) -> None:
+    """Scale every pixel-space quantity in a loaded template by ``oversample``.
+
+    The template's logical coordinate space (the values stored on disk) is
+    deliberately preserved so the webui, prefill pipeline, and
+    ``student_fill`` calibration keep working at the canonical resolution.
+    This in-memory scaling only affects what the OMR engine measures against:
+    the page is resized to ``pageDimensions * oversample`` and every bubble
+    rectangle is scaled to match, giving more pixels per bubble (a sharper
+    darkest-vs-runner-up gap and finer ArUco/warp alignment).
+    """
+    if oversample == 1.0:
+        return
+    if "pageDimensions" in json_object:
+        json_object["pageDimensions"] = [
+            int(round(v * oversample)) for v in json_object["pageDimensions"]
+        ]
+    if "bubbleDimensions" in json_object:
+        json_object["bubbleDimensions"] = [
+            max(2, int(round(v * oversample))) for v in json_object["bubbleDimensions"]
+        ]
+    for block in (json_object.get("fieldBlocks") or {}).values():
+        if "origin" in block:
+            block["origin"] = [v * oversample for v in block["origin"]]
+        if "bubblesGap" in block:
+            block["bubblesGap"] = block["bubblesGap"] * oversample
+        if "labelsGap" in block:
+            block["labelsGap"] = block["labelsGap"] * oversample
+        if "bubbleDimensions" in block:
+            block["bubbleDimensions"] = [
+                max(2, int(round(v * oversample))) for v in block["bubbleDimensions"]
+            ]
+    for pp in json_object.get("preProcessors", []) or []:
+        ops = pp.get("options") or {}
+        if "referenceMarkerCenters" in ops:
+            ops["referenceMarkerCenters"] = [
+                [c[0] * oversample, c[1] * oversample]
+                for c in ops["referenceMarkerCenters"]
+            ]
+        # Default half-size (10.0) is a 1x constant: at any other scale the
+        # homography sanity check rejects the warp because the marker-to-page
+        # ratio no longer matches, so set it explicitly when scaling.
+        ops["referenceMarkerHalfSize"] = (
+            float(ops.get("referenceMarkerHalfSize", 10.0)) * oversample
+        )
+        pp["options"] = ops
+
+
 class Template:
     def __init__(self, template_path, tuning_config):
         self.path = template_path
         self.image_instance_ops = ImageInstanceOps(tuning_config)
 
         json_object = open_template_with_defaults(template_path)
+
+        # Apply the engine-internal oversample BEFORE any field block /
+        # preprocessor is constructed, so every consumer (alignment, ArUco
+        # warp, measurement, overlay) reads coherent scaled coordinates.
+        oversample = float(
+            getattr(tuning_config.threshold_params, "OVERSAMPLE_SCALE", 1.0)
+        )
+        oversample = max(1.0, min(2.0, oversample))
+        if oversample > 1.0:
+            _apply_oversample(json_object, oversample)
+            # Match the preprocessor target canvas to the scaled template so
+            # the image arrives at the oversample resolution and the
+            # CropOnMarkers warp solves the homography at full precision.
+            # Idempotent: tuning_config can be shared across Template loads
+            # (e.g. multiple batches in one process), and we only want to
+            # scale the processing dims ONCE relative to the on-disk values.
+            if not getattr(tuning_config, "_oversample_applied", False):
+                tuning_config.dimensions.processing_width = int(round(
+                    tuning_config.dimensions.processing_width * oversample
+                ))
+                tuning_config.dimensions.processing_height = int(round(
+                    tuning_config.dimensions.processing_height * oversample
+                ))
+                tuning_config._oversample_applied = True
+        self.oversample_scale = oversample
+
         (
             custom_labels_object,
             field_blocks_object,
@@ -246,6 +320,14 @@ class FieldBlock:
         )
         self.origin = origin
         self.bubble_dimensions = bubble_dimensions
+        # Retained for the measurement stage: the stacking direction and the
+        # centre-to-centre gap let core.py decide whether consecutive bubble
+        # ROIs in a strip physically touch (zero guard band). Vertically
+        # touching strips — notably QTYPE_INT candidate/roll columns where
+        # bubblesGap == bubbleDimensions height — are the ones prone to a
+        # single mark bleeding into its neighbour's ROI on a skewed scan.
+        self.direction = direction
+        self.bubbles_gap = bubbles_gap
         self.calculate_block_dimensions(
             bubble_dimensions,
             bubble_values,

@@ -29,6 +29,21 @@ CONFIG_SCHEMA = {
                     "enum": ["white", "black"],
                     "type": "string",
                 },
+                "BUBBLE_INSET_RATIO": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 0.45,
+                },
+                "VERTICAL_RECENTER_MAX_RATIO": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 0.49,
+                },
+                "OVERSAMPLE_SCALE": {
+                    "type": "number",
+                    "minimum": 1.0,
+                    "maximum": 2.0,
+                },
             },
         },
         "alignment_params": {
