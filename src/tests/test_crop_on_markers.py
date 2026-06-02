@@ -307,9 +307,16 @@ def test_choose_best_warp_drops_biased_marker_via_loo(monkeypatch):
     )
 
 
-def test_choose_best_warp_rejects_when_every_subset_fails_gate(monkeypatch):
-    """When no subset clears the bubble-alignment gate the chosen warp must
-    be ``None`` so the sheet is routed to ErrorFiles instead of mis-scored."""
+def test_choose_best_warp_warns_but_accepts_suspicious_full_with_bad_conf(
+    monkeypatch,
+):
+    """When the full 4-marker fit is geometrically sane but bubble confidence
+    is low (``suspicious_full`` path), the warp must still be *accepted* with
+    a warning — not hard-rejected.  The confidence thresholds are calibrated
+    for detecting smudge-biased corners, not for general scan quality; pale
+    ink or photocopies trigger this path legitimately and must not route to
+    ErrorFiles.
+    """
     processor = _make_aruco_processor_stub()
     detected = _reference_marker_corners_for_ids(processor, [0, 1, 2, 3])
     image = np.full((515, 666, 3), 220, dtype=np.uint8)
@@ -334,6 +341,57 @@ def test_choose_best_warp_rejects_when_every_subset_fails_gate(monkeypatch):
         file_path="unit-test",
     )
 
-    assert warped is None, "every subset failed the gate; warp must be rejected"
+    # Full fit was geometrically sane → must be accepted despite low confidence.
+    assert warped is not None, (
+        "suspicious_full path must warn, not reject a geometrically-valid warp"
+    )
+    assert subset == [0, 1, 2, 3], "full subset must be returned unchanged"
+    assert conf is not None and not conf.ok, "low confidence must be propagated"
+
+
+def test_choose_best_warp_rejects_loo_subset_when_all_confs_bad(monkeypatch):
+    """When a LOO subset was chosen (full sanity failed, one subset produced a
+    warp) but the best candidate still fails the bubble-alignment gate, the
+    warp must be hard-rejected (``applied_loo=True`` triggers the strict check).
+    """
+    processor = _make_aruco_processor_stub()
+    image = np.full((515, 666, 3), 220, dtype=np.uint8)
+    id_to_corner = {0: 0, 1: 1, 2: 2, 3: 3}
+    warp_placeholder = image.copy()
+
+    reject = WarpBubbleConfidence(
+        sample_count=100, median_contrast=0.01, coverage=0.10,
+        score=0.10, ok=False, reason="too low",
+    )
+
+    call_n = {"n": 0}
+
+    def fake_attempt(self_inner, *, image, detected_corners, id_to_corner,
+                     subset_ids, expected_aspect):
+        call_n["n"] += 1
+        if len(subset_ids) == 4:
+            # Full-set attempt fails sanity so LOO is triggered.
+            return None, None, "sanity check failed (injected)"
+        # First LOO subset returns a warp with bad confidence.
+        return warp_placeholder, reject, None
+
+    monkeypatch.setattr(
+        "src.processors.CropOnMarkers.CropOnMarkers._attempt_warp_for_subset",
+        fake_attempt,
+    )
+
+    warped, conf, subset = processor._choose_best_warp(
+        image=image,
+        detected_corners={},  # unused — _attempt_warp_for_subset is patched
+        id_to_corner=id_to_corner,
+        available_ids=[0, 1, 2, 3],
+        expected_aspect=666 / 515,
+        file_path="unit-test",
+    )
+
+    # LOO subset was taken (applied_loo=True) but conf.ok=False → reject.
+    assert warped is None, (
+        "applied_loo path must hard-reject when best subset conf is not ok"
+    )
     assert subset is None
     assert conf is not None and not conf.ok

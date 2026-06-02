@@ -203,11 +203,13 @@ def _iter_template_bubble_boxes(
 def _score_warp_bubble_confidence(image, template) -> WarpBubbleConfidence | None:
     """Score whether expected bubble outlines are still aligned after a warp.
 
-    This is intentionally cheap and is only used on the degraded 2-marker
-    path. A correct warp places each template bubble outline on dark printed
-    ink, so the outline ring should be darker than nearby paper. Perspective
-    drift in the similarity fallback pushes that ring off the printed bubble
-    and collapses the contrast/coverage signal.
+    Called for every candidate warp produced by ``_attempt_warp_for_subset``
+    — full 4-marker, 3-marker leave-one-out, and 2-marker degraded similarity
+    paths alike. A correct warp places each template bubble outline on dark
+    printed ink, so the outline ring should be darker than nearby paper.
+    Perspective drift (biased marker, failed LOO, or similarity fallback)
+    pushes that ring off the printed bubble and collapses the
+    contrast/coverage signal.
     """
     if template is None:
         return None
@@ -678,13 +680,22 @@ class CropOnMarkers(ImagePreprocessor):
     ):
         """Pick the homography fit with the strongest bubble-alignment score.
 
-        Always tries the full fit on every detected marker first. If that fit
-        fails geometric sanity OR its bubble-confidence score is poor AND we
-        have 4 markers, also tries each 3-marker leave-one-out subset and
-        picks the highest-scoring candidate. This auto-rejects a single
-        biased marker (smudged, partially occluded by feeder ink, scuffed)
-        without needing per-marker confidence estimation. With 2 detected
-        markers, only the degraded similarity-transform path is tried.
+        Always tries the full fit on all detected markers first. If that fit
+        fails geometric sanity OR its bubble-confidence score is poor (when
+        template context is available — a missing template context is treated
+        as "unscored, not failed") AND we have ≥3 markers, leave-one-out
+        (LOO) subsets are also tried and the highest-scoring candidate is kept. For 4-marker full sets the LOO
+        explores all four 3-marker subsets; for 3-marker full sets LOO is
+        only attempted when the full warp failed geometry outright (not merely
+        for low bubble confidence, to avoid downgrading to 2-marker similarity
+        unnecessarily). With 2 detected markers only the degraded
+        similarity-transform path is tried.
+
+        If the full fit is geometrically sane but its bubble-alignment score
+        is low, and no LOO subset beats it, the result is accepted with a
+        warning rather than rejected (``suspicious_full`` path). The bubble
+        thresholds are calibrated for detecting smudge-biased corners, not
+        for general scan quality assessment.
 
         Returns ``(warped_image, confidence, chosen_subset_ids)`` or
         ``(None, last_confidence, None)`` if no candidate is acceptable.
@@ -708,21 +719,32 @@ class CropOnMarkers(ImagePreprocessor):
         )
 
         # Score of a confidence record (None → -inf so any real score wins).
+        # Fix #6: use float('-inf') to match the stated semantics and stay
+        # correct if the score range is ever extended below zero.
         def _score(conf):
-            return -1.0 if conf is None else float(conf.score)
+            return float('-inf') if conf is None else float(conf.score)
 
         best_warp = warped_full
         best_conf = conf_full
         best_subset = list(available_ids) if warped_full is not None else None
 
-        full_acceptable = (
-            warped_full is not None and conf_full is not None and conf_full.ok
+        # Fix #3: a missing template context (conf_full is None) means we
+        # cannot score, NOT that the warp is bad. Treat it as passing so a
+        # geometrically-sound full fit on a clean sheet does not trigger the
+        # LOO cascade just because template_context hasn't been wired up.
+        full_acceptable = warped_full is not None and (
+            conf_full is None or conf_full.ok
         )
 
         # Only burn the cost of leave-one-out when the full fit is not
         # already passing the bubble-confidence gate. With 4 markers we have
         # 4 LOO subsets to try; with 3 we already are the LOO of the full 4,
         # so further LOO would leave only 2 (handled below as a fallback).
+        # Fix #5: track the most recent failure reason across all attempts
+        # so the final error log reflects the last concrete failure, not
+        # only the full-set attempt.
+        last_reason = reason_full
+
         if not full_acceptable and len(available_ids) >= 3:
             subsets_to_try: list[list[int]] = []
             if len(available_ids) == 4:
@@ -750,8 +772,12 @@ class CropOnMarkers(ImagePreprocessor):
                     expected_aspect=expected_aspect,
                 )
                 if warped_sub is None:
+                    last_reason = _reason  # Fix #5: keep most recent failure
                     continue
-                if _score(conf_sub) > _score(best_conf):
+                # Fix #2: accept the first valid LOO warp unconditionally when
+                # best_warp is still None (full warp failed geometry); only
+                # use score comparison when a warp already exists.
+                if best_warp is None or _score(conf_sub) > _score(best_conf):
                     best_warp = warped_sub
                     best_conf = conf_sub
                     best_subset = sorted(subset)
@@ -767,7 +793,7 @@ class CropOnMarkers(ImagePreprocessor):
             logger.error(
                 file_path,
                 "\nArUco: every marker subset failed to produce a usable "
-                f"warp (last reason: {reason_full!r}).",
+                f"warp (last reason: {last_reason!r}).",  # Fix #5: uses last_reason
             )
             return None, best_conf, None
 
@@ -780,7 +806,15 @@ class CropOnMarkers(ImagePreprocessor):
             and not full_acceptable
             and best_subset == list(available_ids)
         )
-        if applied_loo or is_degraded_2 or suspicious_full:
+        # Fix #1: Hard-reject (return None) only on paths we have genuine
+        # reason to distrust — a LOO drop (biased marker) or a 2-marker
+        # degraded similarity transform. The ``suspicious_full`` case is a
+        # geometrically-sane 4-marker warp with low bubble contrast, which
+        # typically means pale ink or a photocopy rather than a misaligned
+        # warp. The confidence thresholds were calibrated for detecting
+        # smudge-biased corners, not for general scan quality assessment, so
+        # we warn but do not reject.
+        if applied_loo or is_degraded_2:
             if best_conf is None:
                 logger.warning(
                     file_path,
@@ -807,6 +841,28 @@ class CropOnMarkers(ImagePreprocessor):
                     f"median_contrast={best_conf.median_contrast:.3f}, "
                     f"coverage={best_conf.coverage:.2f}, "
                     f"samples={best_conf.sample_count}). Verify alignment.",
+                )
+        elif suspicious_full:
+            # Geometrically-sane full warp with low bubble confidence: warn
+            # only — do not reject. The contrast thresholds are calibrated
+            # for the degraded-warp detection use-case, not general quality.
+            if best_conf is None:
+                logger.warning(
+                    file_path,
+                    "\nArUco: could not score bubble alignment confidence "
+                    "(template geometry unavailable). Accepting warp on "
+                    "geometric criteria only. Verify alignment.",
+                )
+            elif not best_conf.ok:
+                logger.warning(
+                    file_path,
+                    "\nArUco: geometrically-sane full warp has low bubble-"
+                    f"alignment confidence (score={best_conf.score:.2f}, "
+                    f"median_contrast={best_conf.median_contrast:.3f}, "
+                    f"coverage={best_conf.coverage:.2f}, "
+                    f"samples={best_conf.sample_count}; "
+                    f"{best_conf.reason}). "
+                    "Accepting warp — verify sheet alignment.",
                 )
 
         return best_warp, best_conf, best_subset
@@ -1009,6 +1065,9 @@ class CropOnMarkers(ImagePreprocessor):
             )
             self.last_warp_bubble_confidence = chosen_confidence
             if warped is None:
+                # Fix #4: clear the field so consumers cannot mistake a
+                # rejected-warp confidence record for a successful-warp one.
+                self.last_warp_bubble_confidence = None
                 return None
             image = warped
             if chosen_subset is not None and len(chosen_subset) < len(available_ids):

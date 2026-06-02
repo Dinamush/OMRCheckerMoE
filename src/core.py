@@ -1040,7 +1040,24 @@ class ImageInstanceOps:
             if max1 < confident_jump:
                 if no_outliers:
                     # All Black or All White case
-                    thr1 = global_thr
+                    adj_gap = float(q_arr[1]) - float(q_arr[0])
+                    if float(q_arr[0]) > global_thr and adj_gap >= 2.0:
+                        # The global threshold falls below every value in this
+                        # strip — it was calibrated from a section whose bubbles
+                        # are darker (e.g. candidate-number columns) and would
+                        # classify all bubbles here as empty, producing a false
+                        # NR.  The adjacent gap between the two darkest bubbles
+                        # is at least 2 intensity units, which exceeds typical
+                        # single-pixel scan noise for a mean over a bubble ROI
+                        # (noise σ ≈ 0.1–0.5 per mean for clean scans).  This
+                        # signal is enough to make the midpoint a safer fallback:
+                        # a genuine fill makes the darkest bubble stand clearly
+                        # apart, while a truly-empty strip with near-uniform
+                        # values (adj_gap < 2) continues to use global_thr so
+                        # it still resolves to NR.
+                        thr1 = (float(q_arr[0]) + float(q_arr[1])) / 2.0
+                    else:
+                        thr1 = global_thr
                 else:
                     # TODO: Low confidence parameters here
                     pass
