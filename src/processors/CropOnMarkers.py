@@ -203,11 +203,13 @@ def _iter_template_bubble_boxes(
 def _score_warp_bubble_confidence(image, template) -> WarpBubbleConfidence | None:
     """Score whether expected bubble outlines are still aligned after a warp.
 
-    This is intentionally cheap and is only used on the degraded 2-marker
-    path. A correct warp places each template bubble outline on dark printed
-    ink, so the outline ring should be darker than nearby paper. Perspective
-    drift in the similarity fallback pushes that ring off the printed bubble
-    and collapses the contrast/coverage signal.
+    Called for every candidate warp produced by ``_attempt_warp_for_subset``
+    — full 4-marker, 3-marker leave-one-out, and 2-marker degraded similarity
+    paths alike. A correct warp places each template bubble outline on dark
+    printed ink, so the outline ring should be darker than nearby paper.
+    Perspective drift (biased marker, failed LOO, or similarity fallback)
+    pushes that ring off the printed bubble and collapses the
+    contrast/coverage signal.
     """
     if template is None:
         return None
@@ -348,14 +350,31 @@ class CropOnMarkers(ImagePreprocessor):
             self.aruco_corner_ids: list[int] = [int(i) for i in raw_ids]
             aruco_dict = cv2.aruco.getPredefinedDictionary(aruco_dict_id)
             params = cv2.aruco.DetectorParameters()
-            # Speed-tuned parameters: smaller adaptive-threshold window range
-            # means fewer passes over the image, and skipping sub-pixel corner
-            # refinement avoids a per-marker iterative solve (not needed for
-            # the homography accuracy we require).
+            # Detection parameters. ``adaptiveThreshWinSizeMax`` was previously
+            # capped at 15 as a speed micro-optimisation, but at the engine's
+            # 2x-oversampled processing canvas (e.g. 1332x1030 for the 666x515
+            # landscape preset) a 15px adaptive-threshold window is too narrow
+            # to separate the marker's black border from a smudge that bleeds
+            # ink into the quiet zone. Restoring the OpenCV default of 23
+            # rescues markers obscured by feeder-roller streaks or pen smears
+            # while still being noticeably cheaper than the default 3..23
+            # step-10 sweep because we keep ``step=4`` (more, but smaller,
+            # passes).
+            #
+            # ``CORNER_REFINE_CONTOUR`` fits a polygon to each detected
+            # marker's outline so corner positions snap to the true edge of
+            # the printed marker rather than to the smudge ring around it.
+            # This is what makes a single biased marker recoverable for the
+            # candidate-number grid (10 px abutting bubbles). The downstream
+            # leave-one-out fallback in ``_choose_best_warp`` then catches the
+            # cases where contour refinement makes things worse (e.g. when a
+            # marker is so degraded the polygon snaps to the wrong outline)
+            # by trying each 3-marker subset and picking the warp with the
+            # best bubble-alignment score.
             params.adaptiveThreshWinSizeMin = 3
-            params.adaptiveThreshWinSizeMax = 15   # default 23
-            params.adaptiveThreshWinSizeStep = 4   # default 10
-            params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_NONE
+            params.adaptiveThreshWinSizeMax = 23
+            params.adaptiveThreshWinSizeStep = 4
+            params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_CONTOUR
             params.minMarkerPerimeterRate = 0.02
             params.maxMarkerPerimeterRate = 0.5
             self.aruco_detector = cv2.aruco.ArucoDetector(aruco_dict, params)
@@ -596,6 +615,258 @@ class CropOnMarkers(ImagePreprocessor):
     def set_template_context(self, template) -> None:
         self.template_context = template
 
+    def _attempt_warp_for_subset(
+        self,
+        *,
+        image,
+        detected_corners,
+        id_to_corner,
+        subset_ids,
+        expected_aspect,
+    ):
+        """Compute homography → sanity-check → warp → score, for one ID subset.
+
+        Returns ``(warped_image, confidence, reject_reason)``. ``warped_image``
+        is ``None`` when the subset cannot produce a usable warp; in that case
+        ``reject_reason`` carries a short description for logging.
+        """
+        if len(subset_ids) < 2:
+            return None, None, f"subset {subset_ids} has <2 markers"
+
+        src_pts, dst_pts = [], []
+        for marker_id in subset_ids:
+            corner_idx = id_to_corner[marker_id]
+            src_pts.extend(detected_corners[marker_id])
+            dst_pts.extend(self._reference_marker_corners(corner_idx))
+        src_pts = np.array(src_pts, dtype=np.float32)
+        dst_pts = np.array(dst_pts, dtype=np.float32)
+
+        if len(subset_ids) >= 3:
+            homography = _find_homography_robust(src_pts, dst_pts)
+        else:
+            # 2-marker degraded recovery: restrict to a similarity transform
+            # (rotation + uniform scale + translation) so we cannot silently
+            # introduce perspective in the unobserved direction.
+            homography = _similarity_homography_from_pairs(src_pts, dst_pts)
+
+        if homography is None:
+            return None, None, "homography solver returned None"
+
+        ok, reason = _homography_is_sane(
+            homography, image.shape, expected_aspect
+        )
+        if not ok:
+            return None, None, f"sanity check failed ({reason})"
+
+        warped = gpu_warp_perspective(
+            image,
+            homography,
+            (image.shape[1], image.shape[0]),
+            flags=cv2.INTER_LINEAR,
+            border_mode=cv2.BORDER_REPLICATE,
+        )
+        confidence = _score_warp_bubble_confidence(warped, self.template_context)
+        return warped, confidence, None
+
+    def _choose_best_warp(
+        self,
+        *,
+        image,
+        detected_corners,
+        id_to_corner,
+        available_ids,
+        expected_aspect,
+        file_path,
+    ):
+        """Pick the homography fit with the strongest bubble-alignment score.
+
+        Always tries the full fit on all detected markers first. If that fit
+        fails geometric sanity OR its bubble-confidence score is poor (when
+        template context is available — a missing template context is treated
+        as "unscored, not failed") AND we have ≥3 markers, leave-one-out
+        (LOO) subsets are also tried and the highest-scoring candidate is kept. For 4-marker full sets the LOO
+        explores all four 3-marker subsets; for 3-marker full sets LOO is
+        only attempted when the full warp failed geometry outright (not merely
+        for low bubble confidence, to avoid downgrading to 2-marker similarity
+        unnecessarily). With 2 detected markers only the degraded
+        similarity-transform path is tried.
+
+        If the full fit is geometrically sane but its bubble-alignment score
+        is low, and no LOO subset beats it, the result is accepted with a
+        warning rather than rejected (``suspicious_full`` path). The bubble
+        thresholds are calibrated for detecting smudge-biased corners, not
+        for general scan quality assessment.
+
+        Returns ``(warped_image, confidence, chosen_subset_ids)`` or
+        ``(None, last_confidence, None)`` if no candidate is acceptable.
+        ``chosen_subset_ids`` is sorted ascending and equals ``available_ids``
+        if the full fit was kept.
+        """
+        if len(available_ids) < 2:
+            logger.error(
+                file_path,
+                "\nArUco: only "
+                f"{len(available_ids)}/4 markers usable for warp — aborting.",
+            )
+            return None, None, None
+
+        warped_full, conf_full, reason_full = self._attempt_warp_for_subset(
+            image=image,
+            detected_corners=detected_corners,
+            id_to_corner=id_to_corner,
+            subset_ids=available_ids,
+            expected_aspect=expected_aspect,
+        )
+
+        # Score of a confidence record (None → -inf so any real score wins).
+        # Fix #6: use float('-inf') to match the stated semantics and stay
+        # correct if the score range is ever extended below zero.
+        def _score(conf):
+            return float('-inf') if conf is None else float(conf.score)
+
+        best_warp = warped_full
+        best_conf = conf_full
+        best_subset = list(available_ids) if warped_full is not None else None
+
+        # Fix #3: a missing template context (conf_full is None) means we
+        # cannot score, NOT that the warp is bad. Treat it as passing so a
+        # geometrically-sound full fit on a clean sheet does not trigger the
+        # LOO cascade just because template_context hasn't been wired up.
+        full_acceptable = warped_full is not None and (
+            conf_full is None or conf_full.ok
+        )
+
+        # Only burn the cost of leave-one-out when the full fit is not
+        # already passing the bubble-confidence gate. With 4 markers we have
+        # 4 LOO subsets to try; with 3 we already are the LOO of the full 4,
+        # so further LOO would leave only 2 (handled below as a fallback).
+        # Fix #5: track the most recent failure reason across all attempts
+        # so the final error log reflects the last concrete failure, not
+        # only the full-set attempt.
+        last_reason = reason_full
+
+        if not full_acceptable and len(available_ids) >= 3:
+            subsets_to_try: list[list[int]] = []
+            if len(available_ids) == 4:
+                for drop_id in available_ids:
+                    subsets_to_try.append(
+                        [mid for mid in available_ids if mid != drop_id]
+                    )
+            elif len(available_ids) == 3:
+                # Trying 2-marker similarity fits as a last-ditch fallback
+                # only makes sense when the 3-marker fit is geometrically
+                # broken (sanity failed); otherwise we'd be downgrading from
+                # 3 noisy markers to 2 noisier ones for no reason.
+                if warped_full is None:
+                    for drop_id in available_ids:
+                        subsets_to_try.append(
+                            [mid for mid in available_ids if mid != drop_id]
+                        )
+
+            for subset in subsets_to_try:
+                warped_sub, conf_sub, _reason = self._attempt_warp_for_subset(
+                    image=image,
+                    detected_corners=detected_corners,
+                    id_to_corner=id_to_corner,
+                    subset_ids=subset,
+                    expected_aspect=expected_aspect,
+                )
+                if warped_sub is None:
+                    last_reason = _reason  # Fix #5: keep most recent failure
+                    continue
+                # Fix #2: accept the first valid LOO warp unconditionally when
+                # best_warp is still None (full warp failed geometry); only
+                # use score comparison when a warp already exists.
+                if best_warp is None or _score(conf_sub) > _score(best_conf):
+                    best_warp = warped_sub
+                    best_conf = conf_sub
+                    best_subset = sorted(subset)
+
+        # Final accept/reject. With 4 markers detected and a passing full fit
+        # we keep the previous loose policy (no bubble gate); the gate only
+        # kicks in when we already had a reason to be suspicious (failed
+        # sanity, low confidence on full fit, dropped to LOO subset, or
+        # degraded 2-marker path). This preserves performance and bench
+        # behaviour on the happy path while still catching warps that would
+        # otherwise mis-score sheets.
+        if best_warp is None:
+            logger.error(
+                file_path,
+                "\nArUco: every marker subset failed to produce a usable "
+                f"warp (last reason: {last_reason!r}).",  # Fix #5: uses last_reason
+            )
+            return None, best_conf, None
+
+        applied_loo = (
+            best_subset is not None and len(best_subset) < len(available_ids)
+        )
+        is_degraded_2 = len(available_ids) == 2
+        suspicious_full = (
+            len(available_ids) >= 3
+            and not full_acceptable
+            and best_subset == list(available_ids)
+        )
+        # Fix #1: Hard-reject (return None) only on paths we have genuine
+        # reason to distrust — a LOO drop (biased marker) or a 2-marker
+        # degraded similarity transform. The ``suspicious_full`` case is a
+        # geometrically-sane 4-marker warp with low bubble contrast, which
+        # typically means pale ink or a photocopy rather than a misaligned
+        # warp. The confidence thresholds were calibrated for detecting
+        # smudge-biased corners, not for general scan quality assessment, so
+        # we warn but do not reject.
+        if applied_loo or is_degraded_2:
+            if best_conf is None:
+                logger.warning(
+                    file_path,
+                    "\nArUco: could not score bubble alignment "
+                    "confidence on the chosen warp (template geometry "
+                    "unavailable). Verify alignment.",
+                )
+            elif not best_conf.ok:
+                logger.error(
+                    file_path,
+                    "\nArUco: rejected warp because bubble alignment "
+                    f"confidence is too low (score={best_conf.score:.2f}, "
+                    f"median_contrast={best_conf.median_contrast:.3f}, "
+                    f"coverage={best_conf.coverage:.2f}, "
+                    f"samples={best_conf.sample_count}; "
+                    f"{best_conf.reason}).",
+                )
+                return None, best_conf, None
+            else:
+                logger.warning(
+                    file_path,
+                    "\nArUco: chosen warp passed bubble-alignment confidence "
+                    f"gate (score={best_conf.score:.2f}, "
+                    f"median_contrast={best_conf.median_contrast:.3f}, "
+                    f"coverage={best_conf.coverage:.2f}, "
+                    f"samples={best_conf.sample_count}). Verify alignment.",
+                )
+        elif suspicious_full:
+            # Geometrically-sane full warp with low bubble confidence: warn
+            # only — do not reject. The contrast thresholds are calibrated
+            # for the degraded-warp detection use-case, not general quality.
+            if best_conf is None:
+                logger.warning(
+                    file_path,
+                    "\nArUco: could not score bubble alignment confidence "
+                    "(template geometry unavailable). Accepting warp on "
+                    "geometric criteria only. Verify alignment.",
+                )
+            elif not best_conf.ok:
+                logger.warning(
+                    file_path,
+                    "\nArUco: geometrically-sane full warp has low bubble-"
+                    f"alignment confidence (score={best_conf.score:.2f}, "
+                    f"median_contrast={best_conf.median_contrast:.3f}, "
+                    f"coverage={best_conf.coverage:.2f}, "
+                    f"samples={best_conf.sample_count}; "
+                    f"{best_conf.reason}). "
+                    "Accepting warp — verify sheet alignment.",
+                )
+
+        return best_warp, best_conf, best_subset
+
     def exclude_files(self):
         if self.marker_type == "aruco":
             return []
@@ -777,97 +1048,37 @@ class CropOnMarkers(ImagePreprocessor):
                     "\nArUco: preserveFullImage=true requires referenceMarkerCenters.",
                 )
                 return None
-            src_corner_points = []
-            dst_corner_points = []
-            for id_val, corner_idx in id_to_corner.items():
-                if id_val not in detected_corners:
-                    continue
-                src_corner_points.extend(detected_corners[id_val])
-                dst_corner_points.extend(self._reference_marker_corners(corner_idx))
-            src_pts = np.array(src_corner_points, dtype=np.float32)
-            dst_pts = np.array(dst_corner_points, dtype=np.float32)
-            degraded_similarity = detected_count == 2
-            if detected_count >= 3:
-                homography = _find_homography_robust(src_pts, dst_pts)
-            else:
-                # Degraded recovery: only 2 markers decoded. Restrict the
-                # transform to a similarity (rotation + uniform scale +
-                # translation) so we cannot silently introduce perspective
-                # in the unobserved direction. The downstream sanity check
-                # on aspect/area/convexity still gates the result.
-                homography = _similarity_homography_from_pairs(src_pts, dst_pts)
-                if homography is not None:
-                    logger.warning(
-                        file_path,
-                        "\nArUco: only 2/4 markers decoded — using degraded "
-                        "similarity-transform recovery (rotation + uniform "
-                        "scale + translation only). Verify alignment.",
-                    )
-            if homography is None:
-                logger.error(
-                    file_path,
-                    "\nArUco: could not compute homography from detected marker corners.",
-                )
-                return None
-            # Sanity check: with refineDetectedMarkers occasionally promoting a
-            # noisy candidate from ``rejectedCorners``, validate the resulting
-            # homography geometrically before using it. A failed sanity check
-            # most often means an extrapolated/recovered marker was wildly off,
-            # in which case we'd rather drop the sheet to ErrorFiles than emit
-            # mis-aligned (and silently wrong) OMR results.
             expected_aspect = (
                 config.dimensions.processing_width
                 / max(1, config.dimensions.processing_height)
             )
-            ok, reason = _homography_is_sane(
-                homography, image.shape, expected_aspect
+            available_ids = sorted(
+                mid for mid in id_to_corner if mid in detected_corners
             )
-            if not ok:
-                logger.error(
-                    file_path,
-                    f"\nArUco: rejected homography failed sanity check ({reason}).",
-                )
+            warped, chosen_confidence, chosen_subset = self._choose_best_warp(
+                image=image,
+                detected_corners=detected_corners,
+                id_to_corner=id_to_corner,
+                available_ids=available_ids,
+                expected_aspect=expected_aspect,
+                file_path=file_path,
+            )
+            self.last_warp_bubble_confidence = chosen_confidence
+            if warped is None:
+                # Fix #4: clear the field so consumers cannot mistake a
+                # rejected-warp confidence record for a successful-warp one.
+                self.last_warp_bubble_confidence = None
                 return None
-            image = gpu_warp_perspective(
-                image,
-                homography,
-                (image.shape[1], image.shape[0]),
-                flags=cv2.INTER_LINEAR,
-                border_mode=cv2.BORDER_REPLICATE,
-            )
-            if degraded_similarity:
-                confidence = _score_warp_bubble_confidence(
-                    image, self.template_context
+            image = warped
+            if chosen_subset is not None and len(chosen_subset) < len(available_ids):
+                dropped = sorted(set(available_ids) - set(chosen_subset))
+                logger.warning(
+                    file_path,
+                    "\nArUco: leave-one-out dropped biased marker(s) "
+                    f"{dropped} (likely smudged/scuffed) — fit on remaining "
+                    f"{len(chosen_subset)} markers "
+                    f"(IDs {chosen_subset}) had a better bubble-alignment score.",
                 )
-                self.last_warp_bubble_confidence = confidence
-                if confidence is None:
-                    logger.warning(
-                        file_path,
-                        "\nArUco: degraded 2-marker recovery could not run "
-                        "bubble confidence scoring because template geometry "
-                        "was unavailable. Verify alignment.",
-                    )
-                elif not confidence.ok:
-                    logger.error(
-                        file_path,
-                        "\nArUco: rejected degraded 2-marker recovery because "
-                        "bubble alignment confidence was too low "
-                        f"(score={confidence.score:.2f}, "
-                        f"median_contrast={confidence.median_contrast:.3f}, "
-                        f"coverage={confidence.coverage:.2f}, "
-                        f"samples={confidence.sample_count}; "
-                        f"{confidence.reason}).",
-                    )
-                    return None
-                else:
-                    logger.warning(
-                        file_path,
-                        "\nArUco: degraded 2-marker bubble alignment confidence "
-                        f"accepted (score={confidence.score:.2f}, "
-                        f"median_contrast={confidence.median_contrast:.3f}, "
-                        f"coverage={confidence.coverage:.2f}, "
-                        f"samples={confidence.sample_count}). Verify alignment.",
-                    )
         else:
             centres = [c for c in centres_by_index if c is not None]
             image = ImageUtils.four_point_transform(image, np.array(centres))
