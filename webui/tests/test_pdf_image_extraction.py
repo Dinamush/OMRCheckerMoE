@@ -246,3 +246,163 @@ def test_serial_fast_path_produces_valid_image_files(tmp_path: Path) -> None:
         assert img_path.exists(), f"Expected {ref.name} on disk"
         # Verify it's a valid JPEG.
         assert img_path.read_bytes()[:2] == b"\xff\xd8", f"{ref.name} is not a JPEG"
+
+
+# ---------------------------------------------------------------------------
+# Helpers for flipped-transform tests
+# ---------------------------------------------------------------------------
+
+def _make_topbright_botdark_png(width: int = 100, height: int = 100) -> bytes:
+    """Return a grayscale PNG where the top half is bright (200) and bottom is dark (50).
+
+    The asymmetric brightness makes it easy to detect vertical flips in tests.
+    """
+    import fitz as _fitz
+    pix = _fitz.Pixmap(_fitz.csGRAY, (0, 0, width, height), False)
+    pix.set_rect(_fitz.IRect(0, 0, width, height // 2), (200,))
+    pix.set_rect(_fitz.IRect(0, height // 2, width, height), (50,))
+    return pix.tobytes("png")
+
+
+def _build_pdf_with_flipped_image_transform(
+    img_bytes: bytes,
+    width: int = 100,
+    height: int = 100,
+) -> "tuple[Any, Any]":
+    """Return *(doc, page)* for a PDF whose image has a vertical-flip content-stream matrix.
+
+    This replicates the pattern produced by mobile scan apps: the raw JPEG/PNG
+    bytes are stored in one orientation and the content stream uses
+    ``W 0 0 -H 0 H cm`` (d < 0 in fitz coords) to flip them back so the page
+    renders correctly in PDF viewers.
+    """
+    import fitz
+    doc = fitz.open()
+    page = doc.new_page(width=width, height=height)
+    # Register the image in the xref table via the normal insert path.
+    page.insert_image(page.rect, stream=img_bytes)
+    # Get the resource name assigned to the image by PyMuPDF.
+    images = page.get_images(full=True)
+    img_name = images[0][7]
+    # Rewrite the content stream with a vertical-flip placement matrix.
+    # Normal: ``W 0 0 H 0 0 cm``  →  d = +H (positive)
+    # Flipped: ``W 0 0 -H 0 H cm`` →  d = -H (negative)
+    flipped = f"q\n{width} 0 0 -{height} 0 {height} cm\n/{img_name} Do\nQ\n"
+    content_xrefs = page.get_contents()
+    doc.update_stream(content_xrefs[0], flipped.encode())
+    page = doc.reload_page(page)
+    return doc, page
+
+
+# ---------------------------------------------------------------------------
+# Regression tests: scanner PDFs with flipped content-stream transforms
+# ---------------------------------------------------------------------------
+
+def test_fast_path_falls_back_for_flipped_content_stream_transform() -> None:
+    """Fast path must return None when the image has a vertical-flip placement transform.
+
+    Regression test for the scanner-PDF bug: some scan apps store the page
+    image with a ``d < 0`` content-stream matrix so the page renders correctly
+    in PDF viewers.  Before the fix, the fast path returned the raw (flipped)
+    bytes, causing the OMR engine to receive an upside-down image and fail to
+    locate ArUco markers.
+    """
+    pytest.importorskip("fitz")
+    W, H = 100, 100
+    png_bytes = _make_topbright_botdark_png(W, H)
+    doc, page = _build_pdf_with_flipped_image_transform(png_bytes, width=W, height=H)
+
+    # Sanity-check that the transform really does have d < 0.
+    info = page.get_image_info(xrefs=True)
+    assert info, "Expected image info on the test page"
+    t = info[0]["transform"]
+    assert t[3] < 0, f"Test setup failed: expected d < 0, got d={t[3]}"
+
+    from webui.services.batches import _try_extract_embedded_page_image
+    result = _try_extract_embedded_page_image(
+        doc, page, 1,
+        dpi=150, grayscale=True, ext=".jpg", jpeg_quality=90,
+    )
+    assert result is None, (
+        "Fast path must return None for a flipped-transform image so the caller "
+        "falls back to rasterisation (which correctly applies the flip)."
+    )
+    doc.close()
+
+
+def test_serial_render_matches_rasterised_output_for_flipped_transform_pdf(
+    tmp_path: Path,
+) -> None:
+    """_save_pdf_pages_serial must produce an image matching page.get_pixmap() for flipped PDFs.
+
+    Regression test: before the fix, the serial renderer used the fast path and
+    returned the raw (vertically flipped) bytes.  After the fix it falls back to
+    rasterisation, whose output must match the ground-truth get_pixmap() render.
+    """
+    pytest.importorskip("fitz")
+    import fitz as _fitz
+    import numpy as _np
+
+    try:
+        import cv2 as _cv2
+    except ImportError:
+        pytest.skip("cv2 not available")
+
+    W, H = 100, 100
+    png_bytes = _make_topbright_botdark_png(W, H)
+    doc, page = _build_pdf_with_flipped_image_transform(png_bytes, width=W, height=H)
+
+    # Ground truth: rasterised render of the page (correct orientation).
+    # The flip transform means: raw top-bright→rendered top-dark, raw bot-dark→rendered bot-bright.
+    ref_pix = page.get_pixmap(dpi=150, alpha=False, colorspace=_fitz.csGRAY)
+    ref_arr = _np.frombuffer(ref_pix.samples, dtype=_np.uint8).reshape(
+        ref_pix.height, ref_pix.width
+    )
+    ref_top_mean = float(ref_arr[: H // 4].mean())
+    ref_bot_mean = float(ref_arr[-H // 4 :].mean())
+
+    pdf_bytes = doc.tobytes()
+    doc.close()
+
+    staged = tmp_path / "scan_staged.pdf"
+    staged.write_bytes(pdf_bytes)
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+
+    from webui.services.batches import _save_pdf_pages_serial
+
+    stored, failed = _save_pdf_pages_serial(
+        inputs=inputs,
+        safe_filename="scan.pdf",
+        pdf_path=str(staged),
+        stem="scan",
+        page_count=1,
+        dpi=150,
+        grayscale=True,
+        ext=".jpg",
+        jpeg_quality=90,
+        batch_id=None,
+        settings=None,
+    )
+
+    assert failed == [], f"Page should not fail; failed={failed}"
+    assert len(stored) == 1
+
+    out_path = inputs / stored[0].name
+    out_arr = _cv2.imread(str(out_path), _cv2.IMREAD_GRAYSCALE)
+    assert out_arr is not None, "Output image must be readable"
+
+    out_top_mean = float(out_arr[: H // 4].mean())
+    out_bot_mean = float(out_arr[-H // 4 :].mean())
+
+    # The output brightness profile must match the rasterised ground truth,
+    # not the raw (flipped) bytes.  Allow a 10-point tolerance for JPEG artifacts.
+    _TOL = 10.0
+    assert abs(out_top_mean - ref_top_mean) < _TOL, (
+        f"Output top brightness ({out_top_mean:.1f}) does not match "
+        f"rasterised top brightness ({ref_top_mean:.1f}) — image may be flipped."
+    )
+    assert abs(out_bot_mean - ref_bot_mean) < _TOL, (
+        f"Output bottom brightness ({out_bot_mean:.1f}) does not match "
+        f"rasterised bottom brightness ({ref_bot_mean:.1f}) — image may be flipped."
+    )

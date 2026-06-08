@@ -854,6 +854,12 @@ def _try_extract_embedded_page_image(
         if len(images) != 1:
             return None
 
+        # ---- Guard: page-level rotation -------------------------------------
+        # The page's own /Rotate entry is applied by the rasteriser but is
+        # lost when returning raw bytes.  Fall back to raster.
+        if getattr(page, "rotation", 0) % 360 != 0:
+            return None
+
         img_item = images[0]
         xref = img_item[0]
 
@@ -879,6 +885,28 @@ def _try_extract_embedded_page_image(
 
         if clipped_area / page_area < 0.90:
             return None
+
+        # ---- Guard: image placement transform --------------------------------
+        # Some scan apps (e.g. mobile scanners) store the image in one
+        # orientation and correct it via the content-stream transform.  A
+        # vertical flip appears as d < 0 in fitz's y-down coordinate system.
+        # The rasteriser applies that transform; returning raw bytes skips it
+        # and produces a mirrored/upside-down image that breaks marker detection.
+        #
+        # In fitz's y-down system a "pure positive scale" placement has:
+        #   a > 0, d > 0, b ≈ 0, c ≈ 0
+        # Any deviation (flip, rotation, shear) → fall back to raster.
+        try:
+            _img_info_list = page.get_image_info(xrefs=True)
+            if _img_info_list:
+                _t = _img_info_list[0].get("transform")
+                if _t is not None and len(_t) >= 4:
+                    _a, _b, _c, _d = _t[0], _t[1], _t[2], _t[3]
+                    _EPS = 1e-3
+                    if _a <= 0 or _d <= 0 or abs(_b) > _EPS or abs(_c) > _EPS:
+                        return None
+        except Exception:  # noqa: BLE001
+            return None  # Cannot verify placement transform; fall back to raster
 
         # ---- Extract raw image data -----------------------------------------
         try:
