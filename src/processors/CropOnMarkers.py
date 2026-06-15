@@ -45,6 +45,15 @@ _DEGRADED_BUBBLE_MIN_SAMPLES = 16
 _DEGRADED_BUBBLE_CONTRAST_FLOOR = 0.03
 _DEGRADED_BUBBLE_MIN_MEDIAN_CONTRAST = 0.04
 _DEGRADED_BUBBLE_MIN_COVERAGE = 0.70
+# Two-marker degraded recovery is inherently noisier because one page axis is
+# unconstrained by observed marker geometry. Keep the strict ``ok`` gate above
+# as the default, but allow a narrowly-relaxed acceptance for scans that still
+# show a strong bubble-outline signal overall.
+_DEGRADED_BUBBLE_RELAXED_TWO_MARKER_MIN_MEDIAN_CONTRAST = 0.05
+_DEGRADED_BUBBLE_RELAXED_TWO_MARKER_MIN_COVERAGE = 0.60
+_DEGRADED_BUBBLE_RELAXED_TWO_MARKER_MIN_SCORE = 0.44
+_TOP_FIDUCIAL_SEARCH_RADIUS = 95
+_TOP_FIDUCIAL_PAD = 40
 
 
 @dataclass(frozen=True)
@@ -308,6 +317,22 @@ def _score_warp_bubble_confidence(image, template) -> WarpBubbleConfidence | Non
         score=score,
         ok=ok,
         reason=reason,
+    )
+
+
+def _passes_relaxed_two_marker_confidence_gate(confidence: WarpBubbleConfidence) -> bool:
+    """Return True when a two-marker warp is plausible despite strict-gate miss.
+
+    This applies only after geometric sanity checks succeeded and only to the
+    degraded two-marker path. It guards against false rejects on real scans
+    whose global shading lowers outline coverage slightly while preserving a
+    strong median contrast signal.
+    """
+    return (
+        confidence.median_contrast
+        >= _DEGRADED_BUBBLE_RELAXED_TWO_MARKER_MIN_MEDIAN_CONTRAST
+        and confidence.coverage >= _DEGRADED_BUBBLE_RELAXED_TWO_MARKER_MIN_COVERAGE
+        and confidence.score >= _DEGRADED_BUBBLE_RELAXED_TWO_MARKER_MIN_SCORE
     )
 
 
@@ -620,6 +645,8 @@ class CropOnMarkers(ImagePreprocessor):
         *,
         image,
         detected_corners,
+        detected_centers,
+        synthetic_marker_ids,
         id_to_corner,
         subset_ids,
         expected_aspect,
@@ -633,21 +660,52 @@ class CropOnMarkers(ImagePreprocessor):
         if len(subset_ids) < 2:
             return None, None, f"subset {subset_ids} has <2 markers"
 
-        src_pts, dst_pts = [], []
-        for marker_id in subset_ids:
-            corner_idx = id_to_corner[marker_id]
-            src_pts.extend(detected_corners[marker_id])
-            dst_pts.extend(self._reference_marker_corners(corner_idx))
-        src_pts = np.array(src_pts, dtype=np.float32)
-        dst_pts = np.array(dst_pts, dtype=np.float32)
-
-        if len(subset_ids) >= 3:
-            homography = _find_homography_robust(src_pts, dst_pts)
+        uses_synthetic = any(
+            marker_id in synthetic_marker_ids for marker_id in subset_ids
+        )
+        if uses_synthetic:
+            src_pts = np.array(
+                [detected_centers[marker_id] for marker_id in subset_ids],
+                dtype=np.float32,
+            )
+            dst_pts = np.array(
+                [
+                    self.reference_marker_centers[id_to_corner[marker_id]]
+                    for marker_id in subset_ids
+                ],
+                dtype=np.float32,
+            )
+            if len(subset_ids) >= 3:
+                affine, _ = cv2.estimateAffine2D(
+                    src_pts,
+                    dst_pts,
+                    method=cv2.RANSAC,
+                    ransacReprojThreshold=3.0,
+                )
+                if affine is None:
+                    affine, _ = cv2.estimateAffine2D(src_pts, dst_pts, method=0)
+                if affine is None:
+                    return None, None, "center-based affine solver returned None"
+                homography = np.eye(3, dtype=np.float64)
+                homography[:2, :] = affine
+            else:
+                homography = _similarity_homography_from_pairs(src_pts, dst_pts)
         else:
-            # 2-marker degraded recovery: restrict to a similarity transform
-            # (rotation + uniform scale + translation) so we cannot silently
-            # introduce perspective in the unobserved direction.
-            homography = _similarity_homography_from_pairs(src_pts, dst_pts)
+            src_pts, dst_pts = [], []
+            for marker_id in subset_ids:
+                corner_idx = id_to_corner[marker_id]
+                src_pts.extend(detected_corners[marker_id])
+                dst_pts.extend(self._reference_marker_corners(corner_idx))
+            src_pts = np.array(src_pts, dtype=np.float32)
+            dst_pts = np.array(dst_pts, dtype=np.float32)
+
+            if len(subset_ids) >= 3:
+                homography = _find_homography_robust(src_pts, dst_pts)
+            else:
+                # 2-marker degraded recovery: restrict to a similarity transform
+                # (rotation + uniform scale + translation) so we cannot silently
+                # introduce perspective in the unobserved direction.
+                homography = _similarity_homography_from_pairs(src_pts, dst_pts)
 
         if homography is None:
             return None, None, "homography solver returned None"
@@ -673,6 +731,8 @@ class CropOnMarkers(ImagePreprocessor):
         *,
         image,
         detected_corners,
+        detected_centers,
+        synthetic_marker_ids,
         id_to_corner,
         available_ids,
         expected_aspect,
@@ -713,6 +773,8 @@ class CropOnMarkers(ImagePreprocessor):
         warped_full, conf_full, reason_full = self._attempt_warp_for_subset(
             image=image,
             detected_corners=detected_corners,
+            detected_centers=detected_centers,
+            synthetic_marker_ids=synthetic_marker_ids,
             id_to_corner=id_to_corner,
             subset_ids=available_ids,
             expected_aspect=expected_aspect,
@@ -767,6 +829,8 @@ class CropOnMarkers(ImagePreprocessor):
                 warped_sub, conf_sub, _reason = self._attempt_warp_for_subset(
                     image=image,
                     detected_corners=detected_corners,
+                    detected_centers=detected_centers,
+                    synthetic_marker_ids=synthetic_marker_ids,
                     id_to_corner=id_to_corner,
                     subset_ids=subset,
                     expected_aspect=expected_aspect,
@@ -823,6 +887,18 @@ class CropOnMarkers(ImagePreprocessor):
                     "unavailable). Verify alignment.",
                 )
             elif not best_conf.ok:
+                if is_degraded_2 and _passes_relaxed_two_marker_confidence_gate(best_conf):
+                    logger.warning(
+                        file_path,
+                        "\nArUco: two-marker degraded warp missed the strict "
+                        "bubble-alignment gate but passed relaxed degraded "
+                        f"criteria (score={best_conf.score:.2f}, "
+                        f"median_contrast={best_conf.median_contrast:.3f}, "
+                        f"coverage={best_conf.coverage:.2f}, "
+                        f"samples={best_conf.sample_count}; "
+                        "strict thresholds are retained for >=3-marker paths).",
+                    )
+                    return best_warp, best_conf, best_subset
                 logger.error(
                     file_path,
                     "\nArUco: rejected warp because bubble alignment "
@@ -984,6 +1060,30 @@ class CropOnMarkers(ImagePreprocessor):
                     f"({_CORNER_NAMES[corner_idx]}) not detected.",
                 )
 
+        synthetic_marker_ids: set[int] = set()
+        if self.preserve_full_image and self.reference_marker_centers is not None:
+            for missing_corner_idx in list(missing_indices):
+                if missing_corner_idx not in (0, 1):
+                    continue
+                recovered_center = self._detect_top_corner_fiducial_center(
+                    gray,
+                    missing_corner_idx,
+                )
+                if recovered_center is None:
+                    continue
+                recovered_id = self.aruco_corner_ids[missing_corner_idx]
+                detected[recovered_id] = recovered_center
+                centres_by_index[missing_corner_idx] = recovered_center
+                synthetic_marker_ids.add(recovered_id)
+                missing_indices.remove(missing_corner_idx)
+                logger.warning(
+                    file_path,
+                    "\nArUco: recovered missing "
+                    f"{_CORNER_NAMES[missing_corner_idx]} marker using "
+                    f"top-fiducial fallback at "
+                    f"[{recovered_center[0]:.1f}, {recovered_center[1]:.1f}]",
+                )
+
         detected_count = 4 - len(missing_indices)
         if detected_count < 2:
             logger.error(
@@ -1053,11 +1153,13 @@ class CropOnMarkers(ImagePreprocessor):
                 / max(1, config.dimensions.processing_height)
             )
             available_ids = sorted(
-                mid for mid in id_to_corner if mid in detected_corners
+                mid for mid in id_to_corner if mid in detected
             )
             warped, chosen_confidence, chosen_subset = self._choose_best_warp(
                 image=image,
                 detected_corners=detected_corners,
+                detected_centers=detected,
+                synthetic_marker_ids=synthetic_marker_ids,
                 id_to_corner=id_to_corner,
                 available_ids=available_ids,
                 expected_aspect=expected_aspect,
@@ -1093,6 +1195,79 @@ class CropOnMarkers(ImagePreprocessor):
                 config=config,
             )
         return image
+
+    def _detect_top_corner_fiducial_center(self, gray, corner_idx: int):
+        """Detect a top-corner square fiducial when ArUco decoding is unavailable."""
+        if corner_idx not in (0, 1) or self.reference_marker_centers is None:
+            return None
+
+        h, w = gray.shape[:2]
+        expected_x, expected_y = self.reference_marker_centers[corner_idx]
+        pad = _TOP_FIDUCIAL_PAD
+        padded = cv2.copyMakeBorder(
+            gray, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=255
+        )
+        ex = float(expected_x + pad)
+        ey = float(expected_y + pad)
+
+        radius = int(
+            max(
+                _TOP_FIDUCIAL_SEARCH_RADIUS,
+                min(h, w) * 0.15,
+            )
+        )
+        x0 = max(0, int(ex - radius))
+        y0 = max(0, int(ey - radius))
+        x1 = min(padded.shape[1], int(ex + radius))
+        y1 = min(padded.shape[0], int(ey + radius))
+        if x1 - x0 < 12 or y1 - y0 < 12:
+            return None
+
+        roi = padded[y0:y1, x0:x1]
+        blurred = cv2.GaussianBlur(roi, (3, 3), 0)
+        thresholded = cv2.threshold(
+            blurred,
+            0,
+            255,
+            cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU,
+        )[1]
+        thresholded = cv2.morphologyEx(
+            thresholded,
+            cv2.MORPH_OPEN,
+            np.ones((2, 2), dtype=np.uint8),
+            iterations=1,
+        )
+        contours, _ = cv2.findContours(
+            thresholded,
+            cv2.RETR_LIST,
+            cv2.CHAIN_APPROX_SIMPLE,
+        )
+
+        best_center = None
+        best_score = float("inf")
+        for contour in contours:
+            area = float(cv2.contourArea(contour))
+            if area < 35.0 or area > 1800.0:
+                continue
+            x, y, bw, bh = cv2.boundingRect(contour)
+            if bw < 6 or bh < 6 or bw > 45 or bh > 45:
+                continue
+            aspect = float(bw / max(1, bh))
+            if aspect < 0.45 or aspect > 2.4:
+                continue
+            fill = float(area / max(1.0, bw * bh))
+            if fill < 0.16 or fill > 0.95:
+                continue
+
+            cx = x + bw / 2.0
+            cy = y + bh / 2.0
+            distance = float(np.hypot(cx - (ex - x0), cy - (ey - y0)))
+            score = distance + abs(1.0 - aspect) * 6.0 + abs(fill - 0.55) * 20.0
+            if score < best_score:
+                best_score = score
+                best_center = [float(cx + x0 - pad), float(cy + y0 - pad)]
+
+        return best_center
 
     def apply_filter(self, image, file_path):
         if self.marker_type == "aruco":

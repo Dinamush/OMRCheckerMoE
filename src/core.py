@@ -1,6 +1,6 @@
 import os
 import statistics
-from collections import defaultdict
+from collections import Counter, defaultdict
 from typing import Any
 
 import cv2
@@ -196,8 +196,28 @@ def select_question_response(
     them apart — a genuinely ambiguous double mark that must be surfaced for
     manual review rather than guessed at.
     """
+    response, is_multi, _ = resolve_marked_options(
+        marked_options=marked_options,
+        empty_value=empty_value,
+        multi_mark_equal_delta=multi_mark_equal_delta,
+    )
+    return response, is_multi
+
+
+def resolve_marked_options(
+    *,
+    marked_options: list[tuple[str, float]],
+    empty_value: str,
+    multi_mark_equal_delta: float,
+) -> tuple[str, bool, set[str]]:
+    """Return resolved response plus the option values that won selection.
+
+    The resolved option set is used by checked-overlay rendering so the
+    annotation mirrors the final OMR output (single winner, or true MR tie)
+    instead of showing every threshold-crossing ghost mark.
+    """
     if not marked_options:
-        return empty_value, False
+        return empty_value, False, set()
 
     marked_options = sorted(marked_options, key=lambda item: item[1])
     best_option = marked_options[0][0]
@@ -209,9 +229,38 @@ def select_question_response(
         if abs(float(intensity) - best_intensity) <= delta
     ]
     if len(equally_dark) > 1:
-        equally_dark = sorted(dict.fromkeys(equally_dark))
-        return f"MR({''.join(equally_dark)})", True
-    return best_option, False
+        selected = sorted(dict.fromkeys(equally_dark))
+        return f"MR({''.join(selected)})", True, set(selected)
+    return best_option, False, {best_option}
+
+
+def choose_uniform_vertical_shift(candidate_dys: list[int]) -> int:
+    """Pick a single block shift from per-strip shift votes.
+
+    Returns 0 when there is no trustworthy consensus.
+    """
+    if len(candidate_dys) < 3:
+        return 0
+
+    median_dy = int(round(statistics.median(candidate_dys)))
+    if all(abs(d - median_dy) <= 1 for d in candidate_dys):
+        return median_dy
+
+    total = len(candidate_dys)
+    pos = sum(1 for d in candidate_dys if d > 0)
+    neg = sum(1 for d in candidate_dys if d < 0)
+    dominant_sign_count = max(pos, neg)
+    if dominant_sign_count / total < 0.7:
+        return 0
+
+    sign = 1 if pos >= neg else -1
+    sign_dys = [d for d in candidate_dys if d * sign > 0]
+    if not sign_dys:
+        return 0
+    mode_dy, mode_count = Counter(sign_dys).most_common(1)[0]
+    if mode_count / total < 0.5:
+        return 0
+    return int(round(mode_dy))
 
 
 class ImageInstanceOps:
@@ -535,9 +584,7 @@ class ImageInstanceOps:
                                 best_score, best_dy = score, cand_dy
                         candidate_dys.append(best_dy)
                     if len(candidate_dys) >= 3:
-                        median_dy = int(round(statistics.median(candidate_dys)))
-                        if all(abs(d - median_dy) <= 1 for d in candidate_dys):
-                            block_dy = median_dy
+                        block_dy = choose_uniform_vertical_shift(candidate_dys)
 
                 field_block.strip_vertical_shifts = []
                 q_std_vals = []
@@ -645,28 +692,7 @@ class ImageInstanceOps:
                             bubble.y + strip_dy,
                             bubble.field_value,
                         )
-                        if bubble_is_marked:
-                            cv2.rectangle(
-                                final_marked,
-                                (int(x + box_w / 12), int(y + box_h / 12)),
-                                (
-                                    int(x + box_w - box_w / 12),
-                                    int(y + box_h - box_h / 12),
-                                ),
-                                CLR_DARK_GRAY,
-                                3,
-                            )
-
-                            cv2.putText(
-                                final_marked,
-                                str(field_value),
-                                (x, y),
-                                cv2.FONT_HERSHEY_SIMPLEX,
-                                TEXT_SIZE,
-                                (20, 20, 10),
-                                int(1 + 3.5 * TEXT_SIZE),
-                            )
-                        else:
+                        if not bubble_is_marked:
                             cv2.rectangle(
                                 final_marked,
                                 (int(x + box_w / 10), int(y + box_h / 10)),
@@ -707,13 +733,41 @@ class ImageInstanceOps:
                         for _, field_value, intensity, is_marked in bubble_measurements
                         if is_marked
                     ]
-                    response, is_multi = select_question_response(
+                    response, is_multi, selected_values = resolve_marked_options(
                         marked_options=marked_options,
                         empty_value=field_block.empty_val,
                         multi_mark_equal_delta=multi_mark_equal_delta,
                     )
                     omr_response[field_label] = response
                     multi_marked = multi_marked or is_multi
+
+                    # Annotate only the response-resolved bubbles so checked
+                    # images do not display non-winning ghost marks as if they
+                    # were part of the final read value.
+                    for bubble in field_block_bubbles:
+                        x = bubble.x + field_block.shift
+                        y = bubble.y + strip_dy
+                        if bubble.field_value not in selected_values:
+                            continue
+                        cv2.rectangle(
+                            final_marked,
+                            (int(x + box_w / 12), int(y + box_h / 12)),
+                            (
+                                int(x + box_w - box_w / 12),
+                                int(y + box_h - box_h / 12),
+                            ),
+                            CLR_DARK_GRAY,
+                            3,
+                        )
+                        cv2.putText(
+                            final_marked,
+                            str(bubble.field_value),
+                            (int(x), int(y)),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            TEXT_SIZE,
+                            (20, 20, 10),
+                            int(1 + 3.5 * TEXT_SIZE),
+                        )
 
                     if config.outputs.show_image_level >= 5:
                         if key in all_c_box_vals:

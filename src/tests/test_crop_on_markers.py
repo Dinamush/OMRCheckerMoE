@@ -207,6 +207,15 @@ def _reference_marker_corners_for_ids(processor, marker_ids):
     return detected
 
 
+def _reference_marker_centers_for_ids(processor, marker_ids):
+    centers = {}
+    for marker_id in marker_ids:
+        centers[marker_id] = np.mean(
+            processor._reference_marker_corners(marker_id), axis=0
+        ).tolist()
+    return centers
+
+
 def test_choose_best_warp_keeps_full_fit_when_all_markers_clean(monkeypatch):
     processor = _make_aruco_processor_stub()
     detected = _reference_marker_corners_for_ids(processor, [0, 1, 2, 3])
@@ -226,6 +235,8 @@ def test_choose_best_warp_keeps_full_fit_when_all_markers_clean(monkeypatch):
     warped, conf, subset = processor._choose_best_warp(
         image=image,
         detected_corners=detected,
+        detected_centers=_reference_marker_centers_for_ids(processor, [0, 1, 2, 3]),
+        synthetic_marker_ids=set(),
         id_to_corner=id_to_corner,
         available_ids=[0, 1, 2, 3],
         expected_aspect=666 / 515,
@@ -294,6 +305,8 @@ def test_choose_best_warp_drops_biased_marker_via_loo(monkeypatch):
     warped, conf, subset = processor._choose_best_warp(
         image=image,
         detected_corners=detected,
+        detected_centers=_reference_marker_centers_for_ids(processor, [0, 1, 2, 3]),
+        synthetic_marker_ids=set(),
         id_to_corner=id_to_corner,
         available_ids=[0, 1, 2, 3],
         expected_aspect=666 / 515,
@@ -335,6 +348,8 @@ def test_choose_best_warp_warns_but_accepts_suspicious_full_with_bad_conf(
     warped, conf, subset = processor._choose_best_warp(
         image=image,
         detected_corners=detected,
+        detected_centers=_reference_marker_centers_for_ids(processor, [0, 1, 2, 3]),
+        synthetic_marker_ids=set(),
         id_to_corner=id_to_corner,
         available_ids=[0, 1, 2, 3],
         expected_aspect=666 / 515,
@@ -366,8 +381,17 @@ def test_choose_best_warp_rejects_loo_subset_when_all_confs_bad(monkeypatch):
 
     call_n = {"n": 0}
 
-    def fake_attempt(self_inner, *, image, detected_corners, id_to_corner,
-                     subset_ids, expected_aspect):
+    def fake_attempt(
+        self_inner,
+        *,
+        image,
+        detected_corners,
+        detected_centers,
+        synthetic_marker_ids,
+        id_to_corner,
+        subset_ids,
+        expected_aspect,
+    ):
         call_n["n"] += 1
         if len(subset_ids) == 4:
             # Full-set attempt fails sanity so LOO is triggered.
@@ -383,6 +407,8 @@ def test_choose_best_warp_rejects_loo_subset_when_all_confs_bad(monkeypatch):
     warped, conf, subset = processor._choose_best_warp(
         image=image,
         detected_corners={},  # unused — _attempt_warp_for_subset is patched
+        detected_centers={},
+        synthetic_marker_ids=set(),
         id_to_corner=id_to_corner,
         available_ids=[0, 1, 2, 3],
         expected_aspect=666 / 515,
@@ -393,5 +419,113 @@ def test_choose_best_warp_rejects_loo_subset_when_all_confs_bad(monkeypatch):
     assert warped is None, (
         "applied_loo path must hard-reject when best subset conf is not ok"
     )
+    assert subset is None
+    assert conf is not None and not conf.ok
+
+
+def test_choose_best_warp_accepts_two_marker_when_relaxed_gate_passes(monkeypatch):
+    """A two-marker degraded warp can be accepted when strict gate narrowly misses.
+
+    Real scans can have valid geometry but slightly reduced bubble-outline
+    coverage due to non-uniform shading. For the degraded two-marker path,
+    the relaxed gate accepts only when contrast + coverage + score are all
+    still strong enough.
+    """
+    processor = _make_aruco_processor_stub()
+    image = np.full((515, 666, 3), 220, dtype=np.uint8)
+    id_to_corner = {2: 2, 3: 3}
+    warp_placeholder = image.copy()
+
+    near_miss = WarpBubbleConfidence(
+        sample_count=200,
+        median_contrast=0.054,
+        coverage=0.62,
+        score=0.45,
+        ok=False,
+        reason="median_contrast=0.054 coverage=0.62",
+    )
+
+    def fake_attempt(
+        self_inner,
+        *,
+        image,
+        detected_corners,
+        detected_centers,
+        synthetic_marker_ids,
+        id_to_corner,
+        subset_ids,
+        expected_aspect,
+    ):
+        assert subset_ids == [2, 3]
+        return warp_placeholder, near_miss, None
+
+    monkeypatch.setattr(
+        "src.processors.CropOnMarkers.CropOnMarkers._attempt_warp_for_subset",
+        fake_attempt,
+    )
+
+    warped, conf, subset = processor._choose_best_warp(
+        image=image,
+        detected_corners={},
+        detected_centers={},
+        synthetic_marker_ids=set(),
+        id_to_corner=id_to_corner,
+        available_ids=[2, 3],
+        expected_aspect=666 / 515,
+        file_path="unit-test",
+    )
+
+    assert warped is not None, "two-marker near-miss should be accepted"
+    assert subset == [2, 3]
+    assert conf is not None and not conf.ok
+
+
+def test_choose_best_warp_rejects_two_marker_when_relaxed_gate_fails(monkeypatch):
+    """Two-marker degraded warp must still reject when relaxed floor is not met."""
+    processor = _make_aruco_processor_stub()
+    image = np.full((515, 666, 3), 220, dtype=np.uint8)
+    id_to_corner = {2: 2, 3: 3}
+    warp_placeholder = image.copy()
+
+    bad_conf = WarpBubbleConfidence(
+        sample_count=200,
+        median_contrast=0.049,
+        coverage=0.62,
+        score=0.43,
+        ok=False,
+        reason="median_contrast=0.049 coverage=0.62",
+    )
+
+    def fake_attempt(
+        self_inner,
+        *,
+        image,
+        detected_corners,
+        detected_centers,
+        synthetic_marker_ids,
+        id_to_corner,
+        subset_ids,
+        expected_aspect,
+    ):
+        assert subset_ids == [2, 3]
+        return warp_placeholder, bad_conf, None
+
+    monkeypatch.setattr(
+        "src.processors.CropOnMarkers.CropOnMarkers._attempt_warp_for_subset",
+        fake_attempt,
+    )
+
+    warped, conf, subset = processor._choose_best_warp(
+        image=image,
+        detected_corners={},
+        detected_centers={},
+        synthetic_marker_ids=set(),
+        id_to_corner=id_to_corner,
+        available_ids=[2, 3],
+        expected_aspect=666 / 515,
+        file_path="unit-test",
+    )
+
+    assert warped is None, "two-marker path must still reject weak confidence"
     assert subset is None
     assert conf is not None and not conf.ok

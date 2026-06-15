@@ -32,11 +32,62 @@ OVERRIDE_MERGER = Merger(
 )
 
 
+def _is_phantom_candidate_number(value: str, field_label: str) -> bool:
+    """
+    Detect phantom/noise candidate number readings.
+    
+    Phantom readings typically show:
+    - All identical digits (e.g., "8888888888", "0000000000")
+    - Simple repeating patterns (e.g., "8989898989")
+    
+    These patterns indicate noise artifacts rather than actual bubble marks,
+    particularly for empty or mostly-black/white images with low contrast.
+    
+    Args:
+        value: The concatenated candidate number string (e.g., "8888888888")
+        field_label: The field label (e.g., "CandidateNumber")
+        
+    Returns:
+        True if the value looks like phantom noise, False otherwise
+    """
+    # Only check fields that are candidate numbers
+    if "cand" not in field_label.lower():
+        return False
+    
+    # Don't reject empty or very short values (they may be legitimately blank)
+    if len(value) < 4:
+        return False
+    
+    # Check for all identical digits (very strong phantom indicator)
+    # e.g., "8888888888" or "0000000000"
+    if len(set(value)) == 1:
+        return True
+    
+    # Check for simple 2-digit repeating pattern (e.g., "8989898989")
+    # This is also suspicious for candidate numbers
+    if len(set(value)) == 2 and len(value) >= 4:
+        # Check if it's a simple alternating pattern
+        chars = list(value)
+        is_alternating = all(
+            chars[i] == chars[i % 2] for i in range(len(chars))
+        )
+        if is_alternating:
+            return True
+    
+    return False
+
+
 def get_concatenated_response(omr_response, template):
     # Multi-column/multi-row questions which need to be concatenated
     concatenated_response = {}
     for field_label, concatenate_keys in template.custom_labels.items():
         custom_label = "".join([omr_response[k] for k in concatenate_keys])
+        
+        # Detect and reject phantom/noise candidate numbers
+        if _is_phantom_candidate_number(custom_label, field_label):
+            # Replace phantom reading with empty string to indicate invalid detection
+            custom_label = ""
+        
         concatenated_response[field_label] = custom_label
 
     for field_label in template.non_custom_labels:

@@ -1,6 +1,10 @@
 import pytest
 
-from src.core import select_question_response
+from src.core import (
+    choose_uniform_vertical_shift,
+    resolve_marked_options,
+    select_question_response,
+)
 
 
 @pytest.mark.parametrize(
@@ -29,4 +33,42 @@ def test_select_question_response(marked, empty, delta, expected, is_multi):
     )
     assert response == expected
     assert multi is is_multi
+
+
+def test_resolve_marked_options_excludes_non_winning_ghost_mark() -> None:
+    """Checked overlays should annotate only the final winning option."""
+    response, is_multi, selected = resolve_marked_options(
+        marked_options=[("5", 10.0), ("4", 35.0)],
+        empty_value="",
+        multi_mark_equal_delta=0.06,
+    )
+    assert response == "5"
+    assert is_multi is False
+    assert selected == {"5"}
+
+
+def test_resolve_marked_options_marks_only_true_mr_tie() -> None:
+    """For genuine ties, overlay selection must contain all tied options."""
+    response, is_multi, selected = resolve_marked_options(
+        marked_options=[("7", 10.0), ("8", 12.0), ("5", 40.0)],
+        empty_value="",
+        multi_mark_equal_delta=0.06,
+    )
+    assert response == "MR(78)"
+    assert is_multi is True
+    assert selected == {"7", "8"}
+
+
+def test_choose_uniform_vertical_shift_strict_consensus() -> None:
+    assert choose_uniform_vertical_shift([2, 2, 3, 2, 1]) == 2
+
+
+def test_choose_uniform_vertical_shift_majority_with_outliers() -> None:
+    # Reproduces degraded-corner behavior where most strips agree on a
+    # positive shift but a few outlier strips vote negative.
+    assert choose_uniform_vertical_shift([8, 5, 8, 5, 8, 8, -8, 6, -7, 8]) == 8
+
+
+def test_choose_uniform_vertical_shift_no_clear_majority() -> None:
+    assert choose_uniform_vertical_shift([3, -3, 2, -2, 1, -1]) == 0
 

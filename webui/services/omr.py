@@ -716,6 +716,8 @@ def _process_one_image(payload: dict[str, Any]) -> dict[str, Any]:
 
         worker_outputs_root = _batch_workers_root(outputs_dir, settings)
         worker_outputs_dir = worker_outputs_root / f"{index:04d}_{image_path.stem}"
+        if worker_outputs_dir.exists():
+            shutil.rmtree(worker_outputs_dir, ignore_errors=True)
         worker_outputs_dir.mkdir(parents=True, exist_ok=True)
 
         if use_inmemory:
