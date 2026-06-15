@@ -257,6 +257,12 @@ def choose_uniform_vertical_shift(candidate_dys: list[int]) -> int:
     sign_dys = [d for d in candidate_dys if d * sign > 0]
     if not sign_dys:
         return 0
+
+    dominant_median = int(round(statistics.median(sign_dys)))
+    clustered = [d for d in sign_dys if abs(d - dominant_median) <= 2]
+    if len(clustered) / total >= 0.7:
+        return dominant_median
+
     mode_dy, mode_count = Counter(sign_dys).most_common(1)[0]
     if mode_count / total < 0.5:
         return 0

@@ -69,6 +69,14 @@ def test_choose_uniform_vertical_shift_majority_with_outliers() -> None:
     assert choose_uniform_vertical_shift([8, 5, 8, 5, 8, 8, -8, 6, -7, 8]) == 8
 
 
+def test_choose_uniform_vertical_shift_same_sign_cluster_without_mode_majority() -> None:
+    # Folded-edge / partial-marker scans can widen the per-strip vote spread
+    # while still keeping almost every strip aligned to the same upward shift.
+    # No single dy wins an absolute majority here, but the dominant-sign median
+    # still captures the systematic correction.
+    assert choose_uniform_vertical_shift([8, 3, 7, 4, 4, 8, 7, 4, 5, 5]) == 5
+
+
 def test_choose_uniform_vertical_shift_no_clear_majority() -> None:
     assert choose_uniform_vertical_shift([3, -3, 2, -2, 1, -1]) == 0
 

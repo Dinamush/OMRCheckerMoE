@@ -1,0 +1,289 @@
+{
+  "version": 1,
+  "case_type_docs": {
+    "marker_occlusion_one_corner": {
+      "what_went_wrong": "A single obscured corner marker caused degraded warping and shifted candidate bubbles between rows.",
+      "regression_risk": "Small changes in marker detection, warping, or thresholding can reintroduce cross-row bleed and MR artifacts.",
+      "test_oracle": "Candidate number must read exactly with no MR marker."
+    },
+    "degraded_three_marker_skew": {
+      "what_went_wrong": "Three-marker homography left a systematic vertical offset that made zero-gap INT columns bleed into neighbors.",
+      "regression_risk": "Consensus/recentering tweaks can silently fall back to dy=0 and restore wrong digits.",
+      "test_oracle": "Known production candidate number must read exactly with no MR marker."
+    },
+    "historical_candidate_misread_fixed": {
+      "what_went_wrong": "Historical pages were misread after degraded marker recovery, including wrong candidate digits and unstable edge answers.",
+      "regression_risk": "CropOnMarkers fallback and recenter logic changes can shift columns back into ambiguous states.",
+      "test_oracle": "Pinned candidate number and selected answer columns remain stable on replay."
+    },
+    "marker_fail_closed_confidence_gate": {
+      "what_went_wrong": "Extremely degraded geometry could be forced through, risking silent wrong reads.",
+      "regression_risk": "Relaxing confidence gates without safeguards can turn hard-fail sheets into incorrect scored outputs.",
+      "test_oracle": "Case is routed to ErrorFiles and does not produce a scored result row."
+    },
+    "folded_edge_partial_marker": {
+      "what_went_wrong": "Folded-edge scan caused widespread same-sign shift votes that were previously rejected as no-consensus.",
+      "regression_risk": "Any tightening of dominant-sign clustering can reintroduce MR(89)-style candidate ambiguity.",
+      "test_oracle": "Pinned folded-edge candidate number reads exact and contains no MR marker."
+    },
+    "hard_batch_known_good": {
+      "what_went_wrong": "Hard-batch pages are sensitive to subtle changes in preprocessing and marker recovery paths.",
+      "regression_risk": "Performance or heuristic refactors can drift outputs without obvious failures in synthetic tests.",
+      "test_oracle": "Known-good candidate baselines remain unchanged across replay."
+    }
+  },
+  "cases": [
+    {
+      "id": "fixture_obscured_topleft_marker_v2",
+      "enabled": true,
+      "optional": false,
+      "category": "marker_occlusion_one_corner",
+      "source_fix": "obscured_topleft_marker_recovery",
+      "description": "Top-left marker obscured; candidate grid must still read exactly.",
+      "regression_story": {
+        "what_went_wrong": "Smudged top-left marker biased recovery and candidate digits could be sampled between rows.",
+        "why_this_case_exists": "Locks one-corner-occlusion recovery behavior with a real fixture.",
+        "guardrail": "No MR ambiguity and exact candidate digits."
+      },
+      "template": "src/tests/test_samples/obscured_topleft_marker_v2/template.json",
+      "config": "src/tests/test_samples/obscured_topleft_marker_v2/config.json",
+      "image": "src/tests/test_samples/obscured_topleft_marker_v2/obscured_topleft_scan.jpg",
+      "expected": {
+        "CandidateNumber": "0123456789",
+        "must_not_contain": [
+          "MR("
+        ]
+      }
+    },
+    {
+      "id": "fixture_skewed_3marker_candidate_recovery",
+      "enabled": true,
+      "optional": false,
+      "category": "degraded_three_marker_skew",
+      "source_fix": "vertical_recenter_consensus",
+      "description": "Three-marker degraded warp from production batch should recover candidate number.",
+      "regression_story": {
+        "what_went_wrong": "Systematic warp offset in zero-gap INT columns produced cross-digit bleed and MR output.",
+        "why_this_case_exists": "Pins the production 3-marker skew recovery fix.",
+        "guardrail": "Exact candidate output with no MR marker."
+      },
+      "template": "src/tests/test_samples/skewed_candidate_3marker/template.json",
+      "config": "src/tests/test_samples/skewed_candidate_3marker/config.json",
+      "image": "src/tests/test_samples/skewed_candidate_3marker/skewed_3marker_scan.jpg",
+      "expected": {
+        "CandidateNumber": "9010292074",
+        "must_not_contain": [
+          "MR("
+        ]
+      }
+    },
+    {
+      "id": "batch_14c2665cdad3_image_9",
+      "enabled": true,
+      "optional": true,
+      "category": "historical_candidate_misread_fixed",
+      "source_fix": "vertical_recenter_consensus_majority_fallback",
+      "description": "Historical misread case now expected to read exact candidate number.",
+      "regression_story": {
+        "what_went_wrong": "Historical degraded marker page misread candidate digits before recenter fallback fixes.",
+        "why_this_case_exists": "Ensures majority-sign recenter behavior remains effective.",
+        "guardrail": "Exact candidate and pinned q25 answer."
+      },
+      "template": "webui/storage/batches/14c2665cdad3/template.json",
+      "config": "webui/storage/batches/14c2665cdad3/config.json",
+      "image": "webui/storage/batches/14c2665cdad3/inputs/image_9_.png",
+      "expected": {
+        "CandidateNumber": "9030214061",
+        "q25": "NR",
+        "must_not_contain": [
+          "MR("
+        ]
+      }
+    },
+    {
+      "id": "batch_14c2665cdad3_image_3",
+      "enabled": true,
+      "optional": true,
+      "category": "historical_candidate_misread_fixed",
+      "source_fix": "degraded_top_marker_recovery",
+      "description": "Top-row marker recovery path should keep this historical page stable.",
+      "regression_story": {
+        "what_went_wrong": "Top marker recovery path historically drifted under CropOnMarkers heuristics.",
+        "why_this_case_exists": "Guards output stability on a real degraded-top-marker page.",
+        "guardrail": "Exact candidate and pinned edge answer."
+      },
+      "template": "webui/storage/batches/14c2665cdad3/template.json",
+      "config": "webui/storage/batches/14c2665cdad3/config.json",
+      "image": "webui/storage/batches/14c2665cdad3/inputs/image_3_.png",
+      "expected": {
+        "CandidateNumber": "9030164032",
+        "q25": "D",
+        "must_not_contain": [
+          "MR("
+        ]
+      }
+    },
+    {
+      "id": "batch_14c2665cdad3_image_2_empty_candidate",
+      "enabled": true,
+      "optional": true,
+      "category": "historical_candidate_misread_fixed",
+      "source_fix": "degraded_top_marker_recovery",
+      "description": "Page with unfilled candidate field remains fail-safe and stable.",
+      "regression_story": {
+        "what_went_wrong": "Unfilled candidate regions can become false positives under threshold or warp drift.",
+        "why_this_case_exists": "Prevents accidental candidate hallucination while preserving answer extraction.",
+        "guardrail": "Candidate remains empty and pinned q25 answer stays stable."
+      },
+      "template": "webui/storage/batches/14c2665cdad3/template.json",
+      "config": "webui/storage/batches/14c2665cdad3/config.json",
+      "image": "webui/storage/batches/14c2665cdad3/inputs/image_2__1_.png",
+      "expected": {
+        "CandidateNumber": "",
+        "q25": "D"
+      }
+    },
+    {
+      "id": "batch_14c2665cdad3_image_8_fail_closed",
+      "enabled": true,
+      "optional": true,
+      "category": "marker_fail_closed_confidence_gate",
+      "source_fix": "bubble_confidence_gate",
+      "description": "Extremely degraded marker geometry must be rejected and routed to ErrorFiles.",
+      "regression_story": {
+        "what_went_wrong": "Very low-confidence warp could previously leak into scoring path.",
+        "why_this_case_exists": "Pins fail-closed routing via confidence gate.",
+        "guardrail": "No scored row and explicit ErrorFiles entry for file id."
+      },
+      "template": "webui/storage/batches/14c2665cdad3/template.json",
+      "config": "webui/storage/batches/14c2665cdad3/config.json",
+      "image": "webui/storage/batches/14c2665cdad3/inputs/image_8_.png",
+      "expect_error": true,
+      "error_file_id": "image_8_.png"
+    },
+    {
+      "id": "batch_ee920d512e20_folded_edge",
+      "enabled": true,
+      "optional": true,
+      "category": "folded_edge_partial_marker",
+      "source_fix": "vertical_recenter_dominant_sign_cluster",
+      "description": "Folded-edge scan that used to read MR(89) should read exact candidate number.",
+      "regression_story": {
+        "what_went_wrong": "Folded-edge deformation widened same-sign shift votes and prior consensus logic rejected correction.",
+        "why_this_case_exists": "Guards dominant-sign clustering fallback behavior.",
+        "guardrail": "Exact candidate and no MR marker."
+      },
+      "template": "webui/storage/batches/ee920d512e20/template.json",
+      "config": "webui/storage/batches/ee920d512e20/config.json",
+      "image": "webui/storage/batches/ee920d512e20/inputs/image_10_.png",
+      "expected": {
+        "CandidateNumber": "9060184022",
+        "must_not_contain": [
+          "MR("
+        ]
+      }
+    },
+    {
+      "id": "batch_94d0d5e4402a_image_3",
+      "enabled": true,
+      "optional": true,
+      "category": "hard_batch_known_good",
+      "source_fix": "two_marker_relaxed_confidence_gate_followup",
+      "description": "Known-good hard-batch page used as stability baseline.",
+      "regression_story": {
+        "what_went_wrong": "Hard-page outputs can drift after low-level preprocessing changes even when unit tests pass.",
+        "why_this_case_exists": "Provides real-page stability baseline from hard-batch suite.",
+        "guardrail": "Pinned candidate baseline must remain unchanged."
+      },
+      "template": "webui/storage/batches/94d0d5e4402a/template.json",
+      "config": "webui/storage/batches/94d0d5e4402a/config.json",
+      "image": "webui/storage/batches/94d0d5e4402a/inputs/image_3_.png",
+      "expected": {
+        "CandidateNumber": "9030164032"
+      }
+    },
+    {
+      "id": "batch_94d0d5e4402a_image_4",
+      "enabled": true,
+      "optional": true,
+      "category": "hard_batch_known_good",
+      "source_fix": "two_marker_relaxed_confidence_gate_followup",
+      "description": "Known-good hard-batch page used as stability baseline.",
+      "regression_story": {
+        "what_went_wrong": "Hard-page outputs can drift after low-level preprocessing changes even when unit tests pass.",
+        "why_this_case_exists": "Provides real-page stability baseline from hard-batch suite.",
+        "guardrail": "Pinned candidate baseline must remain unchanged."
+      },
+      "template": "webui/storage/batches/94d0d5e4402a/template.json",
+      "config": "webui/storage/batches/94d0d5e4402a/config.json",
+      "image": "webui/storage/batches/94d0d5e4402a/inputs/image_4_.png",
+      "expected": {
+        "CandidateNumber": "9030424001"
+      }
+    },
+    {
+      "id": "batch_94d0d5e4402a_image_6",
+      "enabled": true,
+      "optional": true,
+      "category": "hard_batch_known_good",
+      "source_fix": "two_marker_relaxed_confidence_gate_followup",
+      "description": "Known-good hard-batch page used as stability baseline.",
+      "regression_story": {
+        "what_went_wrong": "Hard-page outputs can drift after low-level preprocessing changes even when unit tests pass.",
+        "why_this_case_exists": "Provides real-page stability baseline from hard-batch suite.",
+        "guardrail": "Pinned candidate baseline must remain unchanged."
+      },
+      "template": "webui/storage/batches/94d0d5e4402a/template.json",
+      "config": "webui/storage/batches/94d0d5e4402a/config.json",
+      "image": "webui/storage/batches/94d0d5e4402a/inputs/image_6_.png",
+      "expected": {
+        "CandidateNumber": "9030394001"
+      }
+    },
+    {
+      "id": "batch_94d0d5e4402a_image_7",
+      "enabled": true,
+      "optional": true,
+      "category": "hard_batch_known_good",
+      "source_fix": "two_marker_relaxed_confidence_gate_followup",
+      "description": "Known-good hard-batch page used as stability baseline.",
+      "regression_story": {
+        "what_went_wrong": "Hard-page outputs can drift after low-level preprocessing changes even when unit tests pass.",
+        "why_this_case_exists": "Provides real-page stability baseline from hard-batch suite.",
+        "guardrail": "Pinned candidate baseline must remain unchanged."
+      },
+      "template": "webui/storage/batches/94d0d5e4402a/template.json",
+      "config": "webui/storage/batches/94d0d5e4402a/config.json",
+      "image": "webui/storage/batches/94d0d5e4402a/inputs/image_7_.png",
+      "expected": {
+        "CandidateNumber": "9050174023"
+      }
+    }
+  ],
+  "backlog": [
+    {
+      "id": "scratch_single_marker_occlusion",
+      "category": "scratches_and_occlusion",
+      "status": "pending_artifact_curation",
+      "why": "Need a committed scan showing one-corner marker occlusion with scratch noise."
+    },
+    {
+      "id": "two_marker_occluded_with_scratches",
+      "category": "scratches_and_occlusion",
+      "status": "pending_artifact_curation",
+      "why": "Need committed artifact where two markers are missing and page has scratch noise."
+    },
+    {
+      "id": "pdf_180_upside_down_real_sheet",
+      "category": "orientation_and_pdf",
+      "status": "covered_by_webui_tests",
+      "why": "Guarded by webui/tests/test_pdf_orientation_guardrails.py; candidate-level real-sheet artifact not yet curated."
+    },
+    {
+      "id": "zero_marker_fail_closed_real_scan",
+      "category": "marker_failure_modes",
+      "status": "pending_artifact_curation",
+      "why": "Need committed sample with 0-1 decoded markers to lock fail-closed behavior."
+    }
+  ]
+}
