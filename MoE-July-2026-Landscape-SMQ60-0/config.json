@@ -1,0 +1,14 @@
+{
+  "dimensions": {
+    "display_height": 510,
+    "display_width": 840,
+    "processing_height": 510,
+    "processing_width": 840
+  },
+  "threshold_params": {
+    "OVERSAMPLE_SCALE": 2.0
+  },
+  "outputs": {
+    "show_image_level": 0
+  }
+}

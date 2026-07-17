@@ -1,0 +1,150 @@
+{
+  "pageDimensions": [
+    840,
+    510
+  ],
+  "bubbleDimensions": [
+    18,
+    18
+  ],
+  "customLabels": {
+    "CandidateNumber": [
+      "cand1..10"
+    ]
+  },
+  "outputColumns": [
+    "CandidateNumber",
+    "q1..60"
+  ],
+  "fieldBlocks": {
+    "CandidateNumber": {
+      "origin": [
+        634.0,
+        78.0
+      ],
+      "bubbleDimensions": [
+        12.0,
+        12.0
+      ],
+      "bubblesGap": 13.5,
+      "labelsGap": 16.0,
+      "fieldLabels": [
+        "cand1..10"
+      ],
+      "fieldType": "QTYPE_INT"
+    },
+    "q01block": {
+      "origin": [
+        66.0,
+        231.5
+      ],
+      "bubblesGap": 20.0,
+      "labelsGap": 23.06,
+      "fieldLabels": [
+        "q1..10"
+      ],
+      "emptyValue": "NR",
+      "fieldType": "QTYPE_MCQ4"
+    },
+    "q11block": {
+      "origin": [
+        195.2,
+        231.5
+      ],
+      "bubblesGap": 20.0,
+      "labelsGap": 23.06,
+      "fieldLabels": [
+        "q11..20"
+      ],
+      "emptyValue": "NR",
+      "fieldType": "QTYPE_MCQ4"
+    },
+    "q21block": {
+      "origin": [
+        324.4,
+        231.5
+      ],
+      "bubblesGap": 20.0,
+      "labelsGap": 23.06,
+      "fieldLabels": [
+        "q21..30"
+      ],
+      "emptyValue": "NR",
+      "fieldType": "QTYPE_MCQ4"
+    },
+    "q31block": {
+      "origin": [
+        453.6,
+        231.5
+      ],
+      "bubblesGap": 20.0,
+      "labelsGap": 23.06,
+      "fieldLabels": [
+        "q31..40"
+      ],
+      "emptyValue": "NR",
+      "fieldType": "QTYPE_MCQ4"
+    },
+    "q41block": {
+      "origin": [
+        582.8,
+        231.5
+      ],
+      "bubblesGap": 20.0,
+      "labelsGap": 23.06,
+      "fieldLabels": [
+        "q41..50"
+      ],
+      "emptyValue": "NR",
+      "fieldType": "QTYPE_MCQ4"
+    },
+    "q51block": {
+      "origin": [
+        712.0,
+        231.5
+      ],
+      "bubblesGap": 20.0,
+      "labelsGap": 23.06,
+      "fieldLabels": [
+        "q51..60"
+      ],
+      "emptyValue": "NR",
+      "fieldType": "QTYPE_MCQ4"
+    }
+  },
+  "preProcessors": [
+    {
+      "name": "CropOnMarkers",
+      "options": {
+        "type": "aruco",
+        "arucoDictionary": "DICT_4X4_50",
+        "arucoCornerIds": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "preserveFullImage": true,
+        "referenceMarkerCenters": [
+          [
+            30.0,
+            30.0
+          ],
+          [
+            810.0,
+            30.0
+          ],
+          [
+            30.0,
+            480.0
+          ],
+          [
+            810.0,
+            480.0
+          ]
+        ],
+        "referenceMarkerHalfSize": 14.0
+      }
+    }
+  ]
+}

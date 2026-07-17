@@ -12,13 +12,15 @@ folder names from before May 2026.
 | `MoE-April-2026-Portrait-NNQ25-0` | Retired portrait NN layout (archive) | `old_custom25_answer_sheet_v1` |
 | `MoE-May-2026-Variants-SMQ25-0` | Portrait variants / sweep tooling (`v1_legacy`) | `portrait_25q` |
 | `MoE-May-2026-Portrait-SMQ25-1` | Optimised portrait layout (`v2_optimized`) | `portrait_25q_v2` |
+| `MoE-July-2026-Landscape-SMQ60-0` | Legal landscape **60Q** (draft — not in WebUI yet) | — |
+| `MoE-July-2026-Portrait-SMQ60-0` | Legal portrait **60Q** (draft — not in WebUI yet) | — |
 | `prefill_package/` | Prefill renderer (Python package) | `prefill_only_package` |
 
-**Naming pattern:** `MoE-<Month>-<Year>-<Orientation>-<Initials>Q25-<Revision>`
+**Naming pattern:** `MoE-<Month>-<Year>-<Orientation>-<Initials>Q<Count>-<Revision>`
 
 - **NN** — Nkasi Nedd (manager / original landscape author)
 - **SM** — Samir Mohammed sheet maintainer initials for the May 2026 portrait programme
-- **Q25** — 25-question multiple-choice layout
+- **Q25 / Q60** — question count on the multiple-choice layout
 - **0 / 1** — revision index within that programme
 
 ## Logical preset: portrait variant router
@@ -56,6 +58,13 @@ only the logical name appears. Legacy alias `portrait_25q` still resolves.
 ### `MoE-May-2026-Portrait-SMQ25-1`
 
 - Sweep-winning optimised portrait preset (`template.json`, `config.json`)
+
+### `MoE-July-2026-Landscape-SMQ60-0` / `MoE-July-2026-Portrait-SMQ60-0`
+
+- US Legal 60-question sheets (6 columns × 10), ArUco centres inset ~0.5″
+- `template.json` + `config.json` ready for future scan wiring
+- Printables under `reference/`; regenerate via `scripts/sheets/generate_legal_smq60.py`
+- **Not registered** in `sheet_registry` / WebUI until MoE confirms
 
 ### `prefill_package/`
 
