@@ -231,8 +231,11 @@ def compute_geometry(layout: OrientationLayout) -> dict:
             "side_pad": side_pad,
         }
         identity_line_end = cand_table["x0"] - 8
-        header_bottom = header_top + max(
-            110.0, (cand_table["y1"] - header_top) + 8
+        # Identity fields need room for four spaced write-in lines.
+        identity_bottom = header_top + 150
+        header_bottom = max(
+            identity_bottom,
+            header_top + max(110.0, (cand_table["y1"] - header_top) + 8),
         )
         ans_top = header_bottom + 5
         ans_bottom = bottom - 2
@@ -295,8 +298,10 @@ def compute_geometry(layout: OrientationLayout) -> dict:
             "side_pad": side_pad,
         }
         identity_line_end = cand_table["x0"] - 8
-        header_bottom = header_top + max(
-            100.0, (cand_table["y1"] - header_top) + 8
+        identity_bottom = header_top + 150
+        header_bottom = max(
+            identity_bottom,
+            header_top + max(100.0, (cand_table["y1"] - header_top) + 8),
         )
         ans_top = header_bottom + 6
         ans_bottom = bottom - 2
@@ -477,11 +482,12 @@ def draw_header(
     sx0, _ = to_print(layout, cand_x0, geo["header_top"])
     draw.line([(sx0, y0 + 8), (sx0, y1 - 8)], fill=BOX_STROKE, width=2)
 
+    # Spaced write-in lines (~38 OMR-px apart) for comfortable handwriting.
     field_y = [
-        geo["header_top"] + 20,
-        geo["header_top"] + 44,
-        geo["header_top"] + 68,
-        geo["header_top"] + 98,
+        geo["header_top"] + 24,
+        geo["header_top"] + 62,
+        geo["header_top"] + 100,
+        geo["header_top"] + 138,
     ]
     labels = ["Student Name:", "School Name:", "Exam Name:", "Student Signature:"]
     line_x0 = m + (78 if layout.name == "portrait" else 95)
