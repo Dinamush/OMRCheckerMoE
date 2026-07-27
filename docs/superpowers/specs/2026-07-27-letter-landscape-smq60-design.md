@@ -7,7 +7,7 @@
 
 - New **US Letter landscape** (11″ × 8.5″) 60Q sheet, separate from Legal July SMQ60.
 - Keep `MoE-July-2026-Landscape-SMQ60-0` (Legal) unchanged.
-- Identity: Student Name, **Centre Name**, **Subject Name**, Exam Name, Student Signature.
+- Identity: Student Name, **Centre Name**, Exam Name, **Subject Name**, Student Signature.
 - Shorter write-in lines; slightly larger candidate-number table.
 - Ship blank + sample with candidate number **0009027001**.
 - Not registered in WebUI until MoE confirms.
@@ -36,8 +36,8 @@ Generator: `scripts/sheets/generate_letter_smq60.py`
 
 1. Student Name  
 2. Centre Name  
-3. Subject Name  
-4. Exam Name  
+3. Exam Name  
+4. Subject Name  
 5. Student Signature  
 
 Write-in lines end **0.5″** before the candidate panel (not flush).

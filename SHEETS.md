@@ -70,7 +70,7 @@ only the logical name appears. Legacy alias `portrait_25q` still resolves.
 ### `MoE-July-2026-Letter-Landscape-SMQ60-0`
 
 - US Letter landscape (11″ × 8.5″) 60-question sheet (6×10)
-- Identity: Student / Centre / Subject / Exam / Signature
+- Identity: Student / Centre / Exam / Subject / Signature
 - Sample with candidate `0009027001` under `reference/`
 - Regenerate via `scripts/sheets/generate_letter_smq60.py`
 - **Not registered** in `sheet_registry` / WebUI until MoE confirms

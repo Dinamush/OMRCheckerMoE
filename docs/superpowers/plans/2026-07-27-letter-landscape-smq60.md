@@ -12,7 +12,7 @@
 
 - Letter landscape only: 11″ × 8.5″ @ 300 DPI (3300×2550 print, 660×510 OMR)
 - Do not modify Legal July SMQ60 folders
-- Identity labels: Student Name, Centre Name, Subject Name, Exam Name, Student Signature
+- Identity labels: Student Name, Centre Name, Exam Name, Subject Name, Student Signature
 - Write-in lines ~72% of available span
 - Candidate table ~8–10% larger than Legal landscape cand wells
 - ArUco: DICT_4X4_50, IDs [0,1,2,3], April-sized markers, ~0.5″ inset
