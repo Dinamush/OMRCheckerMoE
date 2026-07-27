@@ -14,6 +14,7 @@ folder names from before May 2026.
 | `MoE-May-2026-Portrait-SMQ25-1` | Optimised portrait layout (`v2_optimized`) | `portrait_25q_v2` |
 | `MoE-July-2026-Landscape-SMQ60-0` | Legal landscape **60Q** (draft — not in WebUI yet) | — |
 | `MoE-July-2026-Portrait-SMQ60-0` | Legal portrait **60Q** (draft — not in WebUI yet) | — |
+| `MoE-July-2026-Letter-Landscape-SMQ60-0` | Letter landscape **60Q** (draft — not in WebUI yet) | — |
 | `prefill_package/` | Prefill renderer (Python package) | `prefill_only_package` |
 
 **Naming pattern:** `MoE-<Month>-<Year>-<Orientation>-<Initials>Q<Count>-<Revision>`
@@ -64,6 +65,14 @@ only the logical name appears. Legacy alias `portrait_25q` still resolves.
 - US Legal 60-question sheets (6 columns × 10), ArUco centres inset ~0.5″
 - `template.json` + `config.json` ready for future scan wiring
 - Printables under `reference/`; regenerate via `scripts/sheets/generate_legal_smq60.py`
+- **Not registered** in `sheet_registry` / WebUI until MoE confirms
+
+### `MoE-July-2026-Letter-Landscape-SMQ60-0`
+
+- US Letter landscape (11″ × 8.5″) 60-question sheet (6×10)
+- Identity: Student / Centre / Subject / Exam / Signature
+- Sample with candidate `0009027001` under `reference/`
+- Regenerate via `scripts/sheets/generate_letter_smq60.py`
 - **Not registered** in `sheet_registry` / WebUI until MoE confirms
 
 ### `prefill_package/`

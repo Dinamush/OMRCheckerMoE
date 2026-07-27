@@ -1,21 +1,17 @@
-"""Generate MoE Legal 60Q answer sheets (landscape + portrait).
+"""Generate MoE Letter-landscape 60Q answer sheet (SMQ60).
 
-Produces blank PNG/PDF, template.json, and config.json under:
+Produces blank PNG/PDF, bubbled sample, template.json, and config.json under:
 
-* ``MoE-July-2026-Landscape-SMQ60-0/``
-* ``MoE-July-2026-Portrait-SMQ60-0/``
+* ``MoE-July-2026-Letter-Landscape-SMQ60-0/``
 
-OMR coordinates match what is drawn so the templates are scan-ready once
-registered. Not wired into the WebUI yet.
+Legal July SMQ60 sheets are unchanged (see ``generate_legal_smq60.py``).
 
 Run from repo root::
 
-    python scripts/sheets/generate_legal_smq60.py
-    python scripts/sheets/generate_legal_smq60.py --orientation landscape
+    python scripts/sheets/generate_letter_smq60.py
 """
 from __future__ import annotations
 
-import argparse
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,47 +23,47 @@ from PIL import Image, ImageDraw, ImageFont
 REPO = Path(__file__).resolve().parents[2]
 
 PRINT_DPI = 300
-# Legal inches → print pixels @ 300 DPI
-LEGAL_SHORT_IN, LEGAL_LONG_IN = 8.5, 14.0
-PRINT_SHORT = int(LEGAL_SHORT_IN * PRINT_DPI)  # 2550
-PRINT_LONG = int(LEGAL_LONG_IN * PRINT_DPI)  # 4200
+LETTER_SHORT_IN, LETTER_LONG_IN = 8.5, 11.0
+PRINT_SHORT = int(LETTER_SHORT_IN * PRINT_DPI)  # 2550
+PRINT_LONG = int(LETTER_LONG_IN * PRINT_DPI)  # 3300
 
-# OMR canvas: ~60 px/inch so 0.5" = 30 OMR-px (matches design inset).
 OMR_PX_PER_IN = 60.0
-OMR_SHORT = int(round(LEGAL_SHORT_IN * OMR_PX_PER_IN))  # 510
-OMR_LONG = int(round(LEGAL_LONG_IN * OMR_PX_PER_IN))  # 840
+OMR_SHORT = int(round(LETTER_SHORT_IN * OMR_PX_PER_IN))  # 510
+OMR_LONG = int(round(LETTER_LONG_IN * OMR_PX_PER_IN))  # 660
 
 ARUCO_DICT = cv2.aruco.DICT_4X4_50
 ARUCO_IDS = [0, 1, 2, 3]
-ARUCO_INSET_OMR = 30.0  # 0.5" marker centres (robustness)
+ARUCO_INSET_OMR = 30.0
 # Match April 2026 legacy print size: 108 px @ 300 DPI ≈ 0.36".
-# OMR scale is PRINT_DPI / OMR_PX_PER_IN = 5 → 108 / 5 = 21.6 OMR-px.
 ARUCO_SIZE_OMR = 108.0 / (PRINT_DPI / OMR_PX_PER_IN)
 
-# Bubble diameters (OMR-px). Landscape gets the larger wells; portrait is
-# constrained by the short Legal edge width. Keep enough row pitch
-# (labelsGap ≳ diam + 2) so blank scans do not false-trigger.
-BUBBLE_DIAM_LANDSCAPE = 18
-# Portrait short-edge width: leave enough inter-column room for "60." labels
-# so they do not paint into the previous column's D bubble (false D on blank).
-BUBBLE_DIAM_PORTRAIT = 13
-# Candidate wells are 1.5× smaller than answer wells (answer / 1.5).
-CAND_TO_ANSWER_SCALE = 1.5
+# Letter is 3" narrower than Legal — slightly smaller answer wells.
+BUBBLE_DIAM = 16.0
+# Legal landscape cand ≈ 12; bump ~8% → 13.
+CAND_BUBBLE_DIAM = 13.0
 BUBBLE_STROKE_PRINT = 3
-# Extra content inset beyond the marker outer edge (was 12 — tightened).
 CONTENT_PAST_MARKER_OMR = 2.0
+# Write-in lines end 0.5" short of the candidate-number box.
+IDENTITY_LINE_GAP_OMR = 0.5 * OMR_PX_PER_IN
+SAMPLE_CANDIDATE = "0009027001"
 
 TITLE = "Ministry of Education - Multiple Choice Answer Sheet"
 INSTRUCTIONS = (
     "Write your name clearly. Fill one bubble for each answer. Use a dark pencil."
 )
+IDENTITY_LABELS = [
+    "Student Name:",
+    "Centre Name:",
+    "Subject Name:",
+    "Exam Name:",
+    "Student Signature:",
+]
 
 LABEL_FILL = "black"
-# Mid-grey in-bubble glyphs: readable on print, still below OMR mark threshold
-# when spacing is sound (verified on blank Legal SMQ60 scans).
 LABEL_GLYPH = "#787878"
 SUBTLE = "#333333"
 BOX_STROKE = "#111111"
+MARK_FILL = "black"
 
 
 @dataclass(frozen=True)
@@ -80,21 +76,13 @@ class OrientationLayout:
     print_h: int
 
 
-LANDSCAPE = OrientationLayout(
+LAYOUT = OrientationLayout(
     name="landscape",
-    folder="MoE-July-2026-Landscape-SMQ60-0",
+    folder="MoE-July-2026-Letter-Landscape-SMQ60-0",
     omr_w=OMR_LONG,
     omr_h=OMR_SHORT,
     print_w=PRINT_LONG,
     print_h=PRINT_SHORT,
-)
-PORTRAIT = OrientationLayout(
-    name="portrait",
-    folder="MoE-July-2026-Portrait-SMQ60-0",
-    omr_w=OMR_SHORT,
-    omr_h=OMR_LONG,
-    print_w=PRINT_SHORT,
-    print_h=PRINT_LONG,
 )
 
 
@@ -138,32 +126,15 @@ def to_print(
     return x_omr * sx, y_omr * sy
 
 
-def bubble_diam_for(layout: OrientationLayout) -> float:
-    return float(
-        BUBBLE_DIAM_LANDSCAPE
-        if layout.name == "landscape"
-        else BUBBLE_DIAM_PORTRAIT
-    )
-
-
-def cand_bubble_diam_for(layout: OrientationLayout) -> float:
-    """Candidate bubbles are ``CAND_TO_ANSWER_SCALE``× smaller than answers."""
-    return bubble_diam_for(layout) / CAND_TO_ANSWER_SCALE
-
-
 def bubble_bbox_from_origin(
-    layout: OrientationLayout, x0: float, y0: float, diam: float | None = None
+    layout: OrientationLayout, x0: float, y0: float, diam: float
 ) -> tuple[float, float, float, float]:
-    """Print-space ellipse bbox for a bubble whose OMR top-left is (x0, y0)."""
-    if diam is None:
-        diam = bubble_diam_for(layout)
     sx, sy = scale_xy(layout)
     x0p, y0p = x0 * sx, y0 * sy
     return x0p, y0p, x0p + diam * sx, y0p + diam * sy
 
 
 def pt_to_px(pt: float) -> int:
-    """Convert typographic points to print pixels at PRINT_DPI."""
     return max(8, int(round(pt * PRINT_DPI / 72.0)))
 
 
@@ -176,7 +147,6 @@ def fit_font(
     min_pt: float = 8.0,
     bold: bool = False,
 ) -> ImageFont.ImageFont:
-    """Shrink a font until ``text`` fits within ``max_width_px``."""
     pt = start_pt
     while pt >= min_pt:
         font = load_font(pt_to_px(pt), bold=bold)
@@ -186,160 +156,107 @@ def fit_font(
     return load_font(pt_to_px(min_pt), bold=bold)
 
 
-def content_margin(layout: OrientationLayout) -> float:
-    """Left/right/bottom content inset past marker outer edge."""
+def content_margin() -> float:
     return ARUCO_INSET_OMR + ARUCO_SIZE_OMR / 2 + CONTENT_PAST_MARKER_OMR
 
 
 def compute_geometry(layout: OrientationLayout) -> dict:
-    """Derive all OMR coordinates for drawing + template export."""
-    diam = bubble_diam_for(layout)
-    cand_diam = cand_bubble_diam_for(layout)
-    m = content_margin(layout)
+    diam = BUBBLE_DIAM
+    cand_diam = CAND_BUBBLE_DIAM
+    m = content_margin()
     right = layout.omr_w - m
     bottom = layout.omr_h - m
-    # Keep bubbles clear of the answer-box stroke (avoids blank false-D).
     box_inner_pad = 4.0
     usable_w = (right - m) - 2 * box_inner_pad
     n_cols, n_rows = 6, 10
 
-    # Title centred on the top marker mid-line (between left/right ArUco).
-    # Instructions sit just under the title still inside the marker band.
     title_y = ARUCO_INSET_OMR
     instr_y = ARUCO_INSET_OMR + 10
     marker_bottom = ARUCO_INSET_OMR + ARUCO_SIZE_OMR / 2
     header_top = marker_bottom + CONTENT_PAST_MARKER_OMR
 
-    if layout.name == "landscape":
-        # Compact header; larger bubbles; spread answer columns.
-        cand_labels_gap = cand_diam + 4.0
-        cand_bubbles_gap = cand_diam + 1.5
-        cand_w = cand_labels_gap * 9 + cand_diam
-        cand_h = cand_bubbles_gap * 9 + cand_diam
-        write_in_h = max(12.0, cand_diam + 2)
-        side_pad = max(2.0, (cand_labels_gap - cand_diam) / 2)
-        caption_h = 12.0
-        cand_origin = (
-            right - cand_w - side_pad - 2,
-            header_top + caption_h + write_in_h + 6,
+    cand_labels_gap = cand_diam + 4.0
+    cand_bubbles_gap = cand_diam + 1.5
+    cand_w = cand_labels_gap * 9 + cand_diam
+    cand_h = cand_bubbles_gap * 9 + cand_diam
+    write_in_h = max(12.0, cand_diam + 2)
+    side_pad = max(2.0, (cand_labels_gap - cand_diam) / 2)
+    caption_h = 12.0
+    cand_origin = (
+        right - cand_w - side_pad - 2,
+        header_top + caption_h + write_in_h + 6,
+    )
+    cand_table = {
+        "x0": cand_origin[0] - side_pad,
+        "y0": cand_origin[1] - write_in_h,
+        "x1": cand_origin[0] + cand_w + side_pad,
+        "y1": cand_origin[1] + cand_h + side_pad,
+        "write_in_h": write_in_h,
+        "side_pad": side_pad,
+    }
+
+    line_x0 = m + 95
+    identity_line_end = cand_table["x0"] - IDENTITY_LINE_GAP_OMR
+    if identity_line_end <= line_x0 + 20:
+        raise ValueError(
+            f"identity write-in lines too short "
+            f"(line_x0={line_x0:.1f}, end={identity_line_end:.1f})"
         )
-        cand_table = {
-            "x0": cand_origin[0] - side_pad,
-            "y0": cand_origin[1] - write_in_h,
-            "x1": cand_origin[0] + cand_w + side_pad,
-            "y1": cand_origin[1] + cand_h + side_pad,
-            "write_in_h": write_in_h,
-            "side_pad": side_pad,
-        }
-        identity_line_end = cand_table["x0"] - 8
-        # Identity fields need room for four spaced write-in lines.
-        identity_bottom = header_top + 150
-        header_bottom = max(
-            identity_bottom,
-            header_top + max(110.0, (cand_table["y1"] - header_top) + 8),
-        )
-        ans_top = header_bottom + 5
-        ans_bottom = bottom - 2
-        # Room for right-aligned "60." between prev D and this column's A.
-        q_label_pad = 16.0
-        # Keep A–D compact; spend leftover width on inter-column gutters
-        # so the six columns fill the answer rectangle evenly.
-        ans_bubbles_gap = diam + 2.0
+
+    # Five identity lines; keep handwriting room while fitting the cand table.
+    field_ys = [
+        header_top + 20,
+        header_top + 50,
+        header_top + 80,
+        header_top + 110,
+        header_top + 140,
+    ]
+    identity_bottom = field_ys[-1] + 14
+    header_bottom = max(
+        identity_bottom,
+        header_top + max(120.0, (cand_table["y1"] - header_top) + 8),
+    )
+
+    ans_top = header_bottom + 5
+    ans_bottom = bottom - 2
+    q_label_pad = 14.0
+    ans_bubbles_gap = diam + 2.0
+    option_span = 3 * ans_bubbles_gap + diam
+    col_body = q_label_pad + option_span
+    min_gutter = 4.0
+    total_col_bodies = n_cols * col_body
+    if total_col_bodies + (n_cols - 1) * min_gutter > usable_w:
+        overflow = total_col_bodies + (n_cols - 1) * min_gutter - usable_w
+        ans_bubbles_gap = max(diam + 1.0, ans_bubbles_gap - overflow / (3 * n_cols))
         option_span = 3 * ans_bubbles_gap + diam
         col_body = q_label_pad + option_span
-        min_gutter = 4.0  # must clear two-digit question labels
         total_col_bodies = n_cols * col_body
-        if total_col_bodies + (n_cols - 1) * min_gutter > usable_w:
-            overflow = total_col_bodies + (n_cols - 1) * min_gutter - usable_w
-            ans_bubbles_gap = max(
-                diam + 1.0, ans_bubbles_gap - overflow / (3 * n_cols)
-            )
-            option_span = 3 * ans_bubbles_gap + diam
-            col_body = q_label_pad + option_span
-            total_col_bodies = n_cols * col_body
-        leftover = usable_w - total_col_bodies
-        gutter = leftover / (n_cols - 1) if n_cols > 1 else min_gutter
-        if gutter < min_gutter:
-            raise ValueError(
-                f"landscape: inter-column gutter too tight "
-                f"(gutter={gutter:.2f}, min={min_gutter})"
-            )
-        total_needed = total_col_bodies + (n_cols - 1) * gutter
-        group_start = m + box_inner_pad
-        block_origins_x = [
-            group_start + q_label_pad + i * (col_body + gutter) for i in range(n_cols)
-        ]
-        row_inset = 5.0
-        row_span = ans_bottom - ans_top - 2 * row_inset - diam
-        ans_labels_gap = row_span / (n_rows - 1)
-        if ans_labels_gap < diam + 2.0:
-            raise ValueError(
-                f"landscape: row pitch too tight "
-                f"(labelsGap={ans_labels_gap:.2f}, diam={diam})"
-            )
-        ans_origin_y = ans_top + row_inset
-    else:
-        cand_labels_gap = cand_diam + 2.5
-        cand_bubbles_gap = cand_diam + 1.0
-        cand_w = cand_labels_gap * 9 + cand_diam
-        cand_h = cand_bubbles_gap * 9 + cand_diam
-        write_in_h = max(10.0, cand_diam + 1.5)
-        side_pad = max(1.5, (cand_labels_gap - cand_diam) / 2)
-        caption_h = 11.0
-        cand_origin = (
-            right - cand_w - side_pad - 2,
-            header_top + caption_h + write_in_h + 5,
+    leftover = usable_w - total_col_bodies
+    gutter = leftover / (n_cols - 1) if n_cols > 1 else min_gutter
+    if gutter < min_gutter:
+        raise ValueError(
+            f"letter landscape: inter-column gutter too tight "
+            f"(gutter={gutter:.2f}, min={min_gutter}, usable={usable_w:.1f})"
         )
-        cand_table = {
-            "x0": cand_origin[0] - side_pad,
-            "y0": cand_origin[1] - write_in_h,
-            "x1": cand_origin[0] + cand_w + side_pad,
-            "y1": cand_origin[1] + cand_h + side_pad,
-            "write_in_h": write_in_h,
-            "side_pad": side_pad,
-        }
-        identity_line_end = cand_table["x0"] - 8
-        identity_bottom = header_top + 150
-        header_bottom = max(
-            identity_bottom,
-            header_top + max(100.0, (cand_table["y1"] - header_top) + 8),
+    group_start = m + box_inner_pad
+    block_origins_x = [
+        group_start + q_label_pad + i * (col_body + gutter) for i in range(n_cols)
+    ]
+    row_inset = 5.0
+    row_span = ans_bottom - ans_top - 2 * row_inset - diam
+    ans_labels_gap = row_span / (n_rows - 1)
+    if ans_labels_gap < diam + 2.0:
+        raise ValueError(
+            f"letter landscape: row pitch too tight "
+            f"(labelsGap={ans_labels_gap:.2f}, diam={diam})"
         )
-        ans_top = header_bottom + 6
-        ans_bottom = bottom - 2
-        # q_label_pad + gutter must fit two-digit labels ("60.") without
-        # overlapping the previous column's D bubble.
-        q_label_pad = 11.5
-        gutter = 2.8
-        # Solve A–D pitch so 6 columns + label clearance fit exactly.
-        # col_body = q_label_pad + 3*gap + diam
-        ans_bubbles_gap = (
-            usable_w - (n_cols - 1) * gutter - n_cols * (q_label_pad + diam)
-        ) / (3 * n_cols)
-        if ans_bubbles_gap < diam + 0.75:
-            raise ValueError(
-                f"portrait: A–D pitch too tight "
-                f"(gap={ans_bubbles_gap:.2f}, diam={diam}, usable={usable_w:.1f})"
-            )
-        option_span = 3 * ans_bubbles_gap + diam
-        col_body = q_label_pad + option_span
-        total_needed = n_cols * col_body + (n_cols - 1) * gutter
-        group_start = m + box_inner_pad + max(0.0, (usable_w - total_needed) / 2)
-        block_origins_x = [
-            group_start + q_label_pad + i * (col_body + gutter) for i in range(n_cols)
-        ]
-        # Clear the rounded answer-box stroke on the first/last rows
-        # (otherwise corner questions blank-scan as false D).
-        row_inset = 8.0
-        row_span = ans_bottom - ans_top - 2 * row_inset - diam
-        ans_labels_gap = row_span / (n_rows - 1)
-        ans_origin_y = ans_top + row_inset
+    ans_origin_y = ans_top + row_inset
 
     last_opt_right = block_origins_x[-1] + 3 * ans_bubbles_gap + diam
     if last_opt_right > right - box_inner_pad + 0.01:
         raise ValueError(
-            f"{layout.name}: answer columns overflow page "
-            f"(last_opt_right={last_opt_right:.1f} > right={right:.1f}; "
-            f"diam={diam}, gap={ans_bubbles_gap:.2f})"
+            f"letter landscape: answer columns overflow page "
+            f"(last_opt_right={last_opt_right:.1f} > right={right:.1f})"
         )
 
     q_blocks = []
@@ -372,7 +289,9 @@ def compute_geometry(layout: OrientationLayout) -> dict:
         "cand_bubbles_gap": cand_bubbles_gap,
         "cand_w": cand_w,
         "cand_h": cand_h,
+        "line_x0": line_x0,
         "identity_line_end": identity_line_end,
+        "identity_field_ys": field_ys,
         "ans_top": ans_top,
         "ans_bubbles_gap": ans_bubbles_gap,
         "ans_labels_gap": ans_labels_gap,
@@ -397,7 +316,6 @@ def draw_rounded_rect(
 def stamp_aruco(img: Image.Image, layout: OrientationLayout, centres) -> Image.Image:
     sx, _ = scale_xy(layout)
     marker_px = max(24, int(round(ARUCO_SIZE_OMR * sx)))
-    # Prefer odd/even consistency for generateImageMarker
     if marker_px % 2:
         marker_px += 1
     arr = np.array(img.convert("RGB"))[:, :, ::-1].copy()
@@ -416,28 +334,17 @@ def draw_header(
     draw: ImageDraw.ImageDraw, layout: OrientationLayout, geo: dict
 ) -> None:
     m = geo["margin"]
-    # Title/instructions sit between the top markers — use that band width.
     title_left_px, _ = to_print(layout, geo["title_max_x0"], 0)
     title_right_px, _ = to_print(layout, geo["title_max_x1"], 0)
     max_title_w = title_right_px - title_left_px
 
     title_font = fit_font(
-        draw,
-        TITLE,
-        max_width_px=max_title_w,
-        start_pt=14 if layout.name == "portrait" else 15,
-        min_pt=9,
-        bold=True,
+        draw, TITLE, max_width_px=max_title_w, start_pt=14, min_pt=9, bold=True
     )
     instr_font = fit_font(
-        draw,
-        INSTRUCTIONS,
-        max_width_px=max_title_w,
-        start_pt=8 if layout.name == "portrait" else 8.5,
-        min_pt=7,
-        bold=False,
+        draw, INSTRUCTIONS, max_width_px=max_title_w, start_pt=8.5, min_pt=7
     )
-    label_font = load_font(pt_to_px(10 if layout.name == "portrait" else 11), bold=True)
+    label_font = load_font(pt_to_px(10.5), bold=True)
 
     _, ty = to_print(layout, 0, geo["title_y"])
     draw.text(
@@ -464,30 +371,26 @@ def draw_header(
     sx0, _ = to_print(layout, cand_x0, geo["header_top"])
     draw.line([(sx0, y0 + 8), (sx0, y1 - 8)], fill=BOX_STROKE, width=2)
 
-    # Spaced write-in lines (~38 OMR-px apart) for comfortable handwriting.
-    field_y = [
-        geo["header_top"] + 24,
-        geo["header_top"] + 62,
-        geo["header_top"] + 100,
-        geo["header_top"] + 138,
-    ]
-    labels = ["Student Name:", "School Name:", "Exam Name:", "Student Signature:"]
-    line_x0 = m + (78 if layout.name == "portrait" else 95)
+    line_x0 = geo["line_x0"]
     line_x1 = geo["identity_line_end"]
-    for label, y in zip(labels, field_y):
+    for label, y in zip(IDENTITY_LABELS, geo["identity_field_ys"]):
         lx, ly = to_print(layout, m + 8, y)
         draw.text((lx, ly), label, fill=LABEL_FILL, font=label_font, anchor="lm")
-        x_a, y_a = to_print(layout, line_x0, y + (4 if "Signature" in label else 7))
-        x_b, _ = to_print(layout, line_x1, y)
+        baseline = y + (4 if "Signature" in label else 7)
+        x_a, y_a = to_print(layout, line_x0, baseline)
+        x_b, _ = to_print(layout, line_x1, baseline)
         draw.line([(x_a, y_a), (x_b, y_a)], fill=LABEL_FILL, width=2)
 
     draw_candidate_table(draw, layout, geo)
 
 
 def draw_candidate_table(
-    draw: ImageDraw.ImageDraw, layout: OrientationLayout, geo: dict
+    draw: ImageDraw.ImageDraw,
+    layout: OrientationLayout,
+    geo: dict,
+    *,
+    filled_digits: str | None = None,
 ) -> None:
-    """Legacy-style candidate grid: write-in row + column lines + digit bubbles."""
     cand_diam = geo["cand_bubble_diam"]
     table = geo["cand_table"]
     cx0, cy0 = geo["cand_origin"]
@@ -496,10 +399,10 @@ def draw_candidate_table(
     write_in_h = table["write_in_h"]
     stroke = max(2, int(round(2 * scale_xy(layout)[0] / 2.5)))
 
-    cap_font = load_font(pt_to_px(10 if layout.name == "portrait" else 11), bold=True)
-    digit_font = load_font(pt_to_px(6 if layout.name == "portrait" else 6.5))
+    cap_font = load_font(pt_to_px(11), bold=True)
+    digit_font = load_font(pt_to_px(6.5))
+    write_font = load_font(pt_to_px(12), bold=True)
 
-    # Caption sits just above the table, left-aligned like the April sheet.
     cap_x, cap_y = to_print(layout, table["x0"], table["y0"] - 4)
     draw.text(
         (cap_x, cap_y),
@@ -517,25 +420,41 @@ def draw_candidate_table(
     draw.rectangle((tx0, ty0, tx1, ty1), outline=BOX_STROKE, width=stroke)
     draw.line([(tx0, wy), (tx1, wy)], fill=BOX_STROKE, width=stroke)
 
-    # Vertical column dividers (9 interior lines).
     for col in range(1, 10):
         vx = table["x0"] + col * pitch
         px, _ = to_print(layout, vx, 0)
         draw.line([(px, ty0), (px, ty1)], fill=BOX_STROKE, width=stroke)
+
+    digits = None
+    if filled_digits is not None:
+        if len(filled_digits) != 10 or not filled_digits.isdigit():
+            raise ValueError(f"expected 10-digit candidate, got {filled_digits!r}")
+        digits = [int(ch) for ch in filled_digits]
+        for col, digit in enumerate(digits):
+            cell_cx = cx0 + col * pitch + cand_diam / 2
+            cell_cy = table["y0"] + write_in_h / 2
+            px, py = to_print(layout, cell_cx, cell_cy)
+            draw.text(
+                (px, py), str(digit), fill=MARK_FILL, font=write_font, anchor="mm"
+            )
 
     for col in range(10):
         for digit in range(10):
             x0b = cx0 + col * pitch
             y0b = cy0 + digit * v_gap
             bbox = bubble_bbox_from_origin(layout, x0b, y0b, cand_diam)
-            draw.ellipse(bbox, outline=LABEL_FILL, width=BUBBLE_STROKE_PRINT)
-            draw.text(
-                ((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2),
-                str(digit),
-                fill=LABEL_GLYPH,
-                font=digit_font,
-                anchor="mm",
-            )
+            marked = digits is not None and digits[col] == digit
+            if marked:
+                draw.ellipse(bbox, fill=MARK_FILL, outline=MARK_FILL)
+            else:
+                draw.ellipse(bbox, outline=LABEL_FILL, width=BUBBLE_STROKE_PRINT)
+                draw.text(
+                    ((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2),
+                    str(digit),
+                    fill=LABEL_GLYPH,
+                    font=digit_font,
+                    anchor="mm",
+                )
 
 
 def draw_answers(
@@ -547,14 +466,13 @@ def draw_answers(
     x1, y1 = to_print(layout, layout.omr_w - m, layout.omr_h - m)
     draw_rounded_rect(draw, (x0, y0, x1, y1), radius=18 * scale_xy(layout)[0], width=3)
 
-    qnum_font = load_font(pt_to_px(9 if layout.name == "portrait" else 10), bold=True)
-    letter_font = load_font(pt_to_px(6.5 if layout.name == "portrait" else 7.5))
+    qnum_font = load_font(pt_to_px(10), bold=True)
+    letter_font = load_font(pt_to_px(7))
 
     for block in geo["q_blocks"]:
         ox, oy = block["origin"]
         for row, qnum in enumerate(range(block["first_q"], block["last_q"] + 1)):
             y = oy + row * block["labelsGap"]
-            # Question number left of first bubble
             qx, qy = to_print(layout, ox - 4, y + diam / 2)
             draw.text(
                 (qx, qy),
@@ -578,7 +496,6 @@ def draw_answers(
 
 def build_template(layout: OrientationLayout, geo: dict) -> dict:
     diam = int(round(geo["bubble_diam"]))
-    # Keep one decimal so portrait 13/1.5 stays exact (8.7), not rounded to 9.
     cand_diam = round(float(geo["cand_bubble_diam"]), 1)
     centres = geo["aruco_centres"]
     field_blocks = {
@@ -641,11 +558,19 @@ def build_config(layout: OrientationLayout) -> dict:
     }
 
 
-def render_blank(layout: OrientationLayout, geo: dict) -> Image.Image:
+def render_sheet(
+    layout: OrientationLayout,
+    geo: dict,
+    *,
+    filled_candidate: str | None = None,
+) -> Image.Image:
     img = Image.new("RGB", (layout.print_w, layout.print_h), "white")
     draw = ImageDraw.Draw(img)
+    # Header draws empty candidate table; redraw with fills after answers if needed.
     draw_header(draw, layout, geo)
     draw_answers(draw, layout, geo)
+    if filled_candidate is not None:
+        draw_candidate_table(draw, layout, geo, filled_digits=filled_candidate)
     img = stamp_aruco(img, layout, geo["aruco_centres"])
     return img
 
@@ -653,14 +578,11 @@ def render_blank(layout: OrientationLayout, geo: dict) -> Image.Image:
 def write_alignment_preview(
     layout: OrientationLayout, geo: dict, blank: Image.Image, out_path: Path
 ) -> None:
-    """Overlay template bubble boxes on a downscaled blank for visual QA."""
     diam = geo["bubble_diam"]
     cand_diam = geo["cand_bubble_diam"]
     preview = blank.copy()
-    # Scale preview to OMR size for 1:1 box overlay, then upscale for viewing
     omr_img = preview.resize((layout.omr_w, layout.omr_h), Image.Resampling.LANCZOS)
     draw = ImageDraw.Draw(omr_img)
-    # Candidate
     ox, oy = geo["cand_origin"]
     for col in range(10):
         for row in range(10):
@@ -680,27 +602,32 @@ def write_alignment_preview(
                     outline="#0066ff",
                     width=1,
                 )
-    # Upscale for readability
     view = omr_img.resize(
         (layout.omr_w * 2, layout.omr_h * 2), Image.Resampling.NEAREST
     )
     view.save(out_path, format="PNG", optimize=True)
 
 
-def generate_one(layout: OrientationLayout) -> Path:
+def generate() -> Path:
+    layout = LAYOUT
     out_dir = REPO / layout.folder
     ref_dir = out_dir / "reference"
     ref_dir.mkdir(parents=True, exist_ok=True)
 
     geo = compute_geometry(layout)
-    blank = render_blank(layout, geo)
+    blank = render_sheet(layout, geo)
+    sample = render_sheet(layout, geo, filled_candidate=SAMPLE_CANDIDATE)
 
     png_path = ref_dir / f"blank_{layout.name}_smq60.png"
     pdf_path = ref_dir / f"blank_{layout.name}_smq60.pdf"
+    sample_png = ref_dir / f"sample_{SAMPLE_CANDIDATE}.png"
+    sample_pdf = ref_dir / f"sample_{SAMPLE_CANDIDATE}.pdf"
     preview_path = ref_dir / f"alignment_preview_{layout.name}.png"
 
     blank.save(png_path, format="PNG", optimize=True)
     blank.save(pdf_path, format="PDF", resolution=float(PRINT_DPI))
+    sample.save(sample_png, format="PNG", optimize=True)
+    sample.save(sample_pdf, format="PDF", resolution=float(PRINT_DPI))
     write_alignment_preview(layout, geo, blank, preview_path)
 
     template = build_template(layout, geo)
@@ -712,8 +639,7 @@ def generate_one(layout: OrientationLayout) -> Path:
         json.dumps(config, indent=2) + "\n", encoding="utf-8"
     )
 
-    # Thin per-folder regenerate helper
-    helper = f'''"""Regenerate the {layout.name} Legal 60Q blank + template.
+    helper = f'''"""Regenerate the Letter-landscape 60Q blank + sample + template.
 
 Run from repo root::
 
@@ -725,19 +651,16 @@ import runpy
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-SCRIPT = REPO / "scripts" / "sheets" / "generate_legal_smq60.py"
+SCRIPT = REPO / "scripts" / "sheets" / "generate_letter_smq60.py"
 
 if __name__ == "__main__":
-    # Re-exec shared generator for this orientation only.
-    import sys
-    sys.argv = [str(SCRIPT), "--orientation", "{layout.name}"]
     runpy.run_path(str(SCRIPT), run_name="__main__")
 '''
     (out_dir / "generate_blank.py").write_text(helper, encoding="utf-8")
 
     readme = f"""# {layout.folder}
 
-US Legal **{layout.name}** MoE answer sheet — **60** MCQ questions (6×10).
+US Letter **landscape** (11″ × 8.5″) MoE answer sheet — **60** MCQ questions (6×10).
 
 ## Contents
 
@@ -745,41 +668,32 @@ US Legal **{layout.name}** MoE answer sheet — **60** MCQ questions (6×10).
 |---|---|
 | `template.json` | OMR field map (ArUco CropOnMarkers) |
 | `config.json` | Processing dimensions |
-| `reference/blank_{layout.name}_smq60.png` | Printable blank |
-| `reference/blank_{layout.name}_smq60.pdf` | Printable PDF @ 300 DPI |
-| `reference/alignment_preview_{layout.name}.png` | Template-bubble overlay QA |
+| `reference/blank_landscape_smq60.png` | Printable blank |
+| `reference/blank_landscape_smq60.pdf` | Printable PDF @ 300 DPI |
+| `reference/sample_{SAMPLE_CANDIDATE}.png` | Sample with candidate bubbled |
+| `reference/alignment_preview_landscape.png` | Template-bubble overlay QA |
 | `generate_blank.py` | Regenerate from shared script |
 
 ## Notes
 
 - Not registered in WebUI / `sheet_registry` yet (pending MoE approval).
+- Identity: Student / Centre / Subject / Exam / Signature.
 - Marker centres inset ~0.5″ from page edges.
-- Shared generator: `scripts/sheets/generate_legal_smq60.py`
+- Shared generator: `scripts/sheets/generate_letter_smq60.py`
+- Legal July landscape remains in `MoE-July-2026-Landscape-SMQ60-0/`.
 """
     (out_dir / "README.md").write_text(readme, encoding="utf-8")
 
     print(f"[{layout.name}] wrote {out_dir}")
     print(f"  PNG  {png_path}  ({blank.size[0]}x{blank.size[1]})")
     print(f"  PDF  {pdf_path}")
+    print(f"  SMP  {sample_png}")
     print(f"  QA   {preview_path}")
     return out_dir
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--orientation",
-        choices=("landscape", "portrait", "both"),
-        default="both",
-    )
-    args = parser.parse_args()
-    targets = []
-    if args.orientation in ("landscape", "both"):
-        targets.append(LANDSCAPE)
-    if args.orientation in ("portrait", "both"):
-        targets.append(PORTRAIT)
-    for layout in targets:
-        generate_one(layout)
+    generate()
     return 0
 
 
