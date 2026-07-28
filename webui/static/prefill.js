@@ -194,6 +194,7 @@ singleForm.addEventListener('submit', async e => {
     const studentName = singleForm.querySelector('[name=student_name]').value.trim();
     const schoolName  = singleForm.querySelector('[name=school_name]').value.trim();
     const examName    = singleForm.querySelector('[name=exam_name]').value.trim();
+    const subjectName = (singleForm.querySelector('[name=subject_name]') || {}).value || '';
     const candidateNo = singleForm.querySelector('[name=candidate_number]').value.trim();
     const outputFmt   = singleForm.querySelector('[name=output_format]:checked').value;
     const realismPreset = singleForm.querySelector('[name=realism_preset]').value;
@@ -204,7 +205,7 @@ singleForm.addEventListener('submit', async e => {
     const answersJson = (answersJsonEl && answersJsonEl.value.trim()) || '';
 
     if (!studentName || !schoolName || !examName || !candidateNo) {
-        showError(singleError, 'All fields are required.');
+        showError(singleError, 'Student, centre, exam, and candidate number are required.');
         return;
     }
     if (!/^\d{10}$/.test(candidateNo)) {
@@ -227,6 +228,7 @@ singleForm.addEventListener('submit', async e => {
     fd.append('student_name', studentName);
     fd.append('school_name', schoolName);
     fd.append('exam_name', examName);
+    fd.append('subject_name', String(subjectName).trim());
     fd.append('candidate_number', candidateNo);
     fd.append('output_format', outputFmt);
     fd.append('realism_preset', realismPreset);

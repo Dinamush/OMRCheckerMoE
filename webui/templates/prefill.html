@@ -4,7 +4,7 @@
 {% block content %}
 <div class="panel-head">
     <h1>Prefill Answer Sheets</h1>
-    <p class="muted small">Generate pre-filled answer sheets with student name, school, exam, and candidate number bubbled in.</p>
+    <p class="muted small">Generate pre-filled Letter landscape 60Q answer sheets with student name, centre, exam, subject, and candidate number bubbled in.</p>
 </div>
 
 <div class="prefill-tabs">
@@ -24,12 +24,16 @@
                     <input id="s-student-name" name="student_name" type="text" required placeholder="e.g. Johnathan Ragnauth Brigmohan" />
                 </div>
                 <div class="form-group">
-                    <label for="s-school-name">School Name</label>
+                    <label for="s-school-name">Centre Name</label>
                     <input id="s-school-name" name="school_name" type="text" required placeholder="e.g. The New Sapodilla Primary" />
                 </div>
                 <div class="form-group">
                     <label for="s-exam-name">Exam Name</label>
                     <input id="s-exam-name" name="exam_name" type="text" required placeholder="e.g. National Grade Four Reading Assessment" />
+                </div>
+                <div class="form-group">
+                    <label for="s-subject-name">Subject Name <span class="muted small">(optional)</span></label>
+                    <input id="s-subject-name" name="subject_name" type="text" placeholder="e.g. Mathematics" />
                 </div>
                 <div class="form-group">
                     <label for="s-candidate-number">Candidate Number <span class="muted small">(exactly 10 digits)</span></label>
@@ -60,7 +64,7 @@
                 </div>
 
                 <details id="single-student-fill" class="student-fill-section" style="margin-block-start:0.5rem;">
-                    <summary><strong>Fill answer bubbles</strong> <span class="muted small">(simulate a student marking q1–q25)</span></summary>
+                    <summary><strong>Fill answer bubbles</strong> <span class="muted small">(simulate a student marking q1–q60)</span></summary>
                     <div class="stack" style="margin-block-start:0.75rem;">
                         <div class="form-group">
                             <label for="single-marking-profile">Marking profile</label>
@@ -93,11 +97,11 @@
                             </select>
                         </div>
                         <div class="form-group">
-                            <label for="single-answers">Answer key for q1–q25</label>
+                            <label for="single-answers">Answer key for q1–q60</label>
                             <input id="single-answers" name="answers" type="text"
-                                   placeholder="e.g. ABCDA-BCDAB CDABC DABCD ABCDA   (A–D, '-' or 'X' to skip)"
+                                   placeholder="e.g. all_a, alternating, or 60 letters A–D (use '-' / 'X' to skip)"
                                    autocomplete="off" />
-                            <p class="muted small">25 letters in order (A–D). Use <code>-</code> or <code>X</code> to skip a question. Multi-marks like <code>AB</code> are supported via the JSON form below.</p>
+                            <p class="muted small">Shortcuts (<code>all_a</code>, <code>alternating</code>, <code>random</code>…) fill all 60 questions. Or enter up to 60 letters in order (A–D). Use <code>-</code> or <code>X</code> to skip. Multi-marks like <code>AB</code> via the JSON form below.</p>
                         </div>
                         <details>
                             <summary class="muted small">Advanced: per-question JSON answer map</summary>
@@ -143,8 +147,12 @@
         <!-- Manual table -->
         <div id="subtab-manual" class="subtab-pane">
             <p class="muted small" style="margin-block:0.5rem 1rem;">
-                Required columns: <span class="mono">student_name</span>, <span class="mono">school_name</span>,
-                <span class="mono">exam_name</span>, <span class="mono">candidate_number</span>.
+                Required columns: <span class="mono">student_name</span>,
+                <span class="mono">school_name</span> (Centre Name — also accepts
+                <span class="mono">center_name</span> / <span class="mono">centre_name</span>),
+                <span class="mono">candidate_number</span>.
+                Optional: <span class="mono">exam_name</span>, <span class="mono">subject_name</span>,
+                <span class="mono">region</span> (used when grouping by region).
                 The <span class="mono">output_file</span> column is optional (PNG filename in ZIP mode).
             </p>
             <div class="table-scroll" style="margin-block-end:0.75rem;">
@@ -173,7 +181,9 @@
         <!-- Upload CSV -->
         <div id="subtab-upload" class="subtab-pane" style="display:none;">
             <p class="muted small" style="margin-block:0.5rem 0.75rem;">
-                Upload a CSV file with headers: <span class="mono">student_name, school_name, exam_name, candidate_number[, output_file]</span>
+                Upload a CSV with headers: <span class="mono">student_name, school_name, candidate_number</span>
+                (the Centre column may be <span class="mono">center_name</span> / <span class="mono">centre_name</span>).
+                Optional: <span class="mono">exam_name, subject_name, region, output_file</span>.
             </p>
             <div class="form-group" style="margin-block-end:0.75rem;">
                 <label for="csv-upload">CSV file</label>
@@ -225,7 +235,7 @@
         </div>
 
         <details class="student-fill-section" style="margin-block-start:0.5rem;">
-            <summary><strong>Fill answer bubbles</strong> <span class="muted small">(simulate a student marking q1–q25)</span></summary>
+                    <summary><strong>Fill answer bubbles</strong> <span class="muted small">(simulate a student marking q1–q60)</span></summary>
             <div class="stack" style="margin-block-start:0.75rem;">
                 <div class="form-group">
                     <label for="batch-marking-profile">Marking profile (applies to every row)</label>
@@ -250,7 +260,7 @@
                     <p class="muted small">
                         Used for every row that doesn't supply its own <code>answers</code> column.
                         Accepts the same shortcuts as Single Sheet (<code>random</code>, <code>random_with_skips</code>,
-                        <code>alternating</code>, <code>all_a</code>…<code>all_d</code>, or a 25-letter string).
+                        <code>alternating</code>, <code>all_a</code>…<code>all_d</code>, or a 60-letter string).
                         Add an <code>answers</code> column to your CSV for per-row overrides.
                     </p>
                 </div>

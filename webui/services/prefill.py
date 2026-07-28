@@ -36,8 +36,20 @@ from webui.services.student_fill import (
     normalize_marking_profile,
     parse_answers,
 )
+from webui.services import prefill_letter_smq60 as letter_layout
+from webui.sheet_registry import (
+    LANDSCAPE_DIR,
+    LANDSCAPE_NNQ25_0,
+    LEGACY_LANDSCAPE,
+    LETTER_LANDSCAPE_SMQ60_0,
+    LETTER_LANDSCAPE_SMQ60_DIR,
+    normalize_preset_name,
+)
 
-# Built-in blank template shipped with the package.
+# Active single/batch prefill layout (Letter SMQ60 is the product default).
+PREFILL_SHEET_LAYOUT = "letter_smq60"
+PREFILL_NUM_QUESTIONS = letter_layout.NUM_QUESTIONS
+
 # When running as a PyInstaller frozen bundle sys._MEIPASS is the _internal/
 # directory where data files are extracted; fall back to the source-tree path.
 if getattr(sys, "frozen", False):
@@ -45,6 +57,7 @@ if getattr(sys, "frozen", False):
 else:
     _PKG_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_TEMPLATE = _PKG_ROOT / "prefill_package" / "blank_template_reference.png"
+LETTER_TEMPLATE = letter_layout.LETTER_BLANK_PNG
 
 # Registry of "print blank sheet" variants. Each entry maps a stable key
 # (used by the ``/api/v1/prefill/blank`` form and persisted in tests) to a
@@ -56,14 +69,19 @@ DEFAULT_TEMPLATE = _PKG_ROOT / "prefill_package" / "blank_template_reference.png
 #
 # When adding a new variant make sure its source PDF is bundled by
 # ``OMRChecker.spec`` (otherwise the desktop build will 404 at runtime).
-from webui.sheet_registry import (
-    LANDSCAPE_DIR,
-    LANDSCAPE_NNQ25_0,
-    LEGACY_LANDSCAPE,
-    normalize_preset_name,
-)
 
 BLANK_SHEET_VARIANTS: dict[str, dict[str, Any]] = {
+    LETTER_LANDSCAPE_SMQ60_0: {
+        "label": (
+            "July 2026 Letter landscape (SMQ60) — 60Q US Letter with ArUco markers"
+        ),
+        "source_pdf": (
+            LETTER_LANDSCAPE_SMQ60_DIR
+            / "reference"
+            / "blank_landscape_smq60.pdf"
+        ),
+        "default_stem": f"blank_{LETTER_LANDSCAPE_SMQ60_0}",
+    },
     LANDSCAPE_NNQ25_0: {
         "label": (
             "April 2026 landscape (NNQ25) — production sheet with ArUco markers"
@@ -75,7 +93,7 @@ BLANK_SHEET_VARIANTS: dict[str, dict[str, Any]] = {
     },
 }
 
-DEFAULT_BLANK_SHEET_VARIANT = LANDSCAPE_NNQ25_0
+DEFAULT_BLANK_SHEET_VARIANT = LETTER_LANDSCAPE_SMQ60_0
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +111,73 @@ def _clean_field(value: Any, *, max_len: int = _MAX_FIELD_LEN) -> str:
     if len(text) > max_len:
         text = text[:max_len].rstrip() + "…"
     return text
+
+
+# Canonical CSV column names the payload builders and grouping logic expect,
+# plus the permissive header aliases operators export from their student
+# registries. The Centre field in particular is exported under several
+# spellings ("center_name", "centre_name", "centre", …); map them all onto
+# the canonical ``school_name`` so downstream code stays simple. Matching is
+# case-insensitive and whitespace-trimmed.
+_CSV_COLUMN_ALIASES: dict[str, str] = {
+    "student_name": "student_name",
+    "student": "student_name",
+    "name": "student_name",
+    "candidate_number": "candidate_number",
+    "candidate_no": "candidate_number",
+    "candidate": "candidate_number",
+    "school_name": "school_name",
+    "school": "school_name",
+    "centre_name": "school_name",
+    "center_name": "school_name",
+    "centre": "school_name",
+    "center": "school_name",
+    "exam_name": "exam_name",
+    "exam": "exam_name",
+    "subject_name": "subject_name",
+    "subject": "subject_name",
+    "region": "region",
+    "region_name": "region",
+    "answers": "answers",
+    "answers_json": "answers_json",
+    "marking_profile": "marking_profile",
+    "output_file": "output_file",
+}
+
+
+def normalize_row_keys(row: dict[str, Any]) -> dict[str, Any]:
+    """Map permissive CSV header aliases onto canonical payload keys.
+
+    Header matching is case-insensitive and whitespace-trimmed, so a CSV with
+    a ``center_name`` (or ``Centre Name``) column is treated the same as one
+    using the canonical ``school_name``. Unknown columns are preserved
+    verbatim so internal fields (e.g. ``_source_row_number``) survive. When
+    two aliases map to the same canonical key, the first non-empty value wins.
+    """
+    out: dict[str, Any] = {}
+    for key, value in row.items():
+        if key is None:
+            continue
+        lookup = re.sub(r"[\s\-]+", "_", str(key).strip().lower())
+        canonical = _CSV_COLUMN_ALIASES.get(lookup)
+        if canonical is None:
+            out.setdefault(str(key), value)
+            continue
+        existing = out.get(canonical)
+        if canonical not in out or (
+            not _clean_field(existing) and _clean_field(value)
+        ):
+            out[canonical] = value
+    return out
+
+
+# Columns every prefill CSV row must resolve to (after alias normalisation).
+# ``exam_name``/``subject_name``/``region`` are optional: sheets simply leave
+# the corresponding write-in line blank when they are absent.
+REQUIRED_CSV_COLUMNS: frozenset[str] = frozenset(
+    {"student_name", "school_name", "candidate_number"}
+)
+
 
 
 def _import_prefill():
@@ -161,6 +246,7 @@ def _build_payload(stamped_bytes: bytes, row: dict[str, Any]) -> dict[str, Any]:
         "student_name": _clean_field(row.get("student_name")),
         "school_name": _clean_field(row.get("school_name")),
         "exam_name": _clean_field(row.get("exam_name")),
+        "subject_name": _clean_field(row.get("subject_name")),
         "candidate_number": candidate_number,
     }
 
@@ -197,14 +283,18 @@ def _build_fast_payload(
     # would silently produce a fresh pattern every call.
     answer_seed = _stable_seed("prefill-answers", candidate_number, str(row_answers_raw))
     parsed_answers = (
-        parse_answers(row_answers_raw, seed=answer_seed)
-        if row_answers_raw is not None else {}
+        parse_answers(
+            row_answers_raw, num_questions=PREFILL_NUM_QUESTIONS, seed=answer_seed
+        )
+        if row_answers_raw is not None
+        else {}
     )
 
     return {
         "student_name": _clean_field(row.get("student_name")),
         "school_name": _clean_field(row.get("school_name")),
         "exam_name": _clean_field(row.get("exam_name")),
+        "subject_name": _clean_field(row.get("subject_name")),
         "candidate_number": candidate_number,
         "output_format": output_format,
         "realism_preset": normalize_realism_preset(realism_preset),
@@ -271,12 +361,41 @@ def _get_stamped_img():
     """Return the stamped PIL Image, building and caching it on first call."""
     global _STAMPED_IMG_CACHE, _STAMPED_ARR_CACHE
     if _STAMPED_IMG_CACHE is None:
-        m = _import_prefill_module()
         t = time.perf_counter()
-        _STAMPED_IMG_CACHE = m.load_stamped_template(DEFAULT_TEMPLATE)
+        if PREFILL_SHEET_LAYOUT == "letter_smq60":
+            # Letter blank already includes ArUco markers.
+            _STAMPED_IMG_CACHE = letter_layout.load_letter_blank()
+        else:
+            m = _import_prefill_module()
+            _STAMPED_IMG_CACHE = m.load_stamped_template(DEFAULT_TEMPLATE)
         _STAMPED_ARR_CACHE = np.array(_STAMPED_IMG_CACHE)
         logger.info("Stamped template cached | %.1fms", (time.perf_counter() - t) * 1000)
     return _STAMPED_IMG_CACHE, _STAMPED_ARR_CACHE
+
+
+def _draw_identity_and_candidate(
+    img,
+    *,
+    student_name: str,
+    school_name: str,
+    exam_name: str,
+    candidate_number: str,
+    subject_name: str = "",
+):
+    """Draw student identity + candidate bubbles for the active sheet layout."""
+    if PREFILL_SHEET_LAYOUT == "letter_smq60":
+        return letter_layout.draw_letter_sheet_content(
+            img,
+            student_name=student_name,
+            centre_name=school_name,
+            exam_name=exam_name,
+            subject_name=subject_name,
+            candidate_number=candidate_number,
+        )
+    m = _import_prefill_module()
+    return m._draw_sheet_content(
+        img, student_name, school_name, exam_name, candidate_number
+    )
 
 
 def _stamp_template_once() -> bytes:
@@ -305,6 +424,14 @@ def _simulate_scan_if_needed(
         return image
 
     w, h = image.size
+    if PREFILL_SHEET_LAYOUT == "letter_smq60":
+        cand_geom = letter_layout.candidate_bubble_geometry(w, h, candidate_number)
+        marker_geom = letter_layout.aruco_marker_boxes(w, h)
+        candidate_region = letter_layout.candidate_region_box(w, h)
+    else:
+        cand_geom = prefill_module.candidate_bubble_geometry(w, h, candidate_number)
+        marker_geom = prefill_module.aruco_marker_boxes(w, h)
+        candidate_region = prefill_module.candidate_region_box(w, h)
     bubbles = [
         BubbleGeometry(
             column=int(item["column"]),
@@ -314,7 +441,7 @@ def _simulate_scan_if_needed(
             radius=int(item["radius"]),
             filled=bool(item.get("filled", False)),
         )
-        for item in prefill_module.candidate_bubble_geometry(w, h, candidate_number)
+        for item in cand_geom
     ]
     markers = [
         MarkerBox(
@@ -324,12 +451,11 @@ def _simulate_scan_if_needed(
             x1=int(item["x1"]),
             y1=int(item["y1"]),
         )
-        for item in prefill_module.aruco_marker_boxes(w, h)
+        for item in marker_geom
     ]
     # Treat the candidate-number block as "printed and never written
     # over" — keep it pristine even when the rest of the page is heavily
     # degraded by moderate/adversarial scan effects.
-    candidate_region = prefill_module.candidate_region_box(w, h)
     return apply_scan_simulation(
         image,
         preset=preset,
@@ -362,6 +488,8 @@ def _maybe_fill_student_marks(
         answers=answers,
         marking_profile=profile,
         candidate_number=candidate_number,
+        sheet_layout=PREFILL_SHEET_LAYOUT,
+        num_questions=PREFILL_NUM_QUESTIONS,
     )
 
 
@@ -376,12 +504,13 @@ def _thread_render(payload: dict) -> bytes:
     stamped_img, _ = _get_stamped_img()
     assert stamped_img is not None
     img = stamped_img.copy()
-    img = m._draw_sheet_content(
+    img = _draw_identity_and_candidate(
         img,
-        payload['student_name'],
-        payload['school_name'],
-        payload['exam_name'],
-        payload['candidate_number'],
+        student_name=payload['student_name'],
+        school_name=payload['school_name'],
+        exam_name=payload['exam_name'],
+        candidate_number=payload['candidate_number'],
+        subject_name=payload.get('subject_name', ''),
     )
     page_number = payload.get('page_number')
     if page_number is not None:
@@ -507,12 +636,13 @@ def _iter_pngs_fast(payloads: list[dict], *, preserve_order: bool = True):
             assert stamped_img is not None
             img = stamped_img.copy()
             m2 = _import_prefill_module()
-            img = m2._draw_sheet_content(
+            img = _draw_identity_and_candidate(
                 img,
-                payloads[idx]['student_name'],
-                payloads[idx]['school_name'],
-                payloads[idx]['exam_name'],
-                payloads[idx]['candidate_number'],
+                student_name=payloads[idx]['student_name'],
+                school_name=payloads[idx]['school_name'],
+                exam_name=payloads[idx]['exam_name'],
+                candidate_number=payloads[idx]['candidate_number'],
+                subject_name=payloads[idx].get('subject_name', ''),
             )
             fallback_page = payloads[idx].get('page_number')
             if fallback_page is not None:
@@ -552,6 +682,7 @@ def generate_single_png(
     realism_preset: str = "none",
     marking_profile: str = "none",
     answers: Any = None,
+    subject_name: str = "",
 ) -> bytes:
     candidate_number = _clean_field(candidate_number, max_len=64)
     _validate_candidate_number(candidate_number)
@@ -559,17 +690,22 @@ def generate_single_png(
     marking_profile = normalize_marking_profile(marking_profile or "none")
     answer_seed = _stable_seed("prefill-answers", candidate_number, str(answers))
     parsed_answers = (
-        parse_answers(answers, seed=answer_seed) if answers is not None else {}
+        parse_answers(
+            answers, num_questions=PREFILL_NUM_QUESTIONS, seed=answer_seed
+        )
+        if answers is not None
+        else {}
     )
     m = _import_prefill_module()
     stamped_img, _ = _get_stamped_img()
     assert stamped_img is not None
-    image = m._draw_sheet_content(
+    image = _draw_identity_and_candidate(
         stamped_img.copy(),
-        _clean_field(student_name),
-        _clean_field(school_name),
-        _clean_field(exam_name),
-        candidate_number,
+        student_name=_clean_field(student_name),
+        school_name=_clean_field(school_name),
+        exam_name=_clean_field(exam_name),
+        candidate_number=candidate_number,
+        subject_name=_clean_field(subject_name),
     )
     image = _maybe_fill_student_marks(
         image,
@@ -596,6 +732,7 @@ def generate_single_pdf(
     realism_preset: str = "none",
     marking_profile: str = "none",
     answers: Any = None,
+    subject_name: str = "",
 ) -> bytes:
     import fitz
     import struct
@@ -609,6 +746,7 @@ def generate_single_pdf(
         realism_preset=realism_preset,
         marking_profile=marking_profile,
         answers=answers,
+        subject_name=subject_name,
     )
     w, h = struct.unpack('>II', png_bytes[16:24])
     doc = fitz.open()

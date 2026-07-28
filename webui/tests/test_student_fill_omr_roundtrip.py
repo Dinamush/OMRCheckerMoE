@@ -28,22 +28,28 @@ from pathlib import Path
 import pytest
 
 from webui.services import prefill as prefill_service
-from webui.services.student_fill import NUM_QUESTIONS, parse_answers
+from webui.services.prefill import PREFILL_NUM_QUESTIONS as NUM_QUESTIONS
+from webui.services.student_fill import parse_answers
 
 # ---------------------------------------------------------------------------
 # Repo / fixture paths
 # ---------------------------------------------------------------------------
+# Prefill defaults to the July 2026 Letter landscape SMQ60 (60Q) sheet, so the
+# roundtrip harness must scan against that template — not the legacy 25Q one.
 REPO_ROOT = Path(__file__).resolve().parents[2]
-CUSTOM_DIR = REPO_ROOT / "MoE-April-2026-Landscape-NNQ25-0"
+CUSTOM_DIR = REPO_ROOT / "MoE-July-2026-Letter-Landscape-SMQ60-0"
 SAMPLE_TEMPLATE = CUSTOM_DIR / "template.json"
 
 _CONFIG_PAYLOAD = {
     "dimensions": {
-        "processing_height": 515,
-        "processing_width": 666,
-        "display_height": 515,
-        "display_width": 666,
+        "processing_height": 510,
+        "processing_width": 660,
+        "display_height": 510,
+        "display_width": 660,
     },
+    # The Letter SMQ60 sheet ships with OVERSAMPLE_SCALE=2.0 in its config.json;
+    # the ArUco warp-confidence gate needs it to clear the alignment threshold.
+    "threshold_params": {"OVERSAMPLE_SCALE": 2.0},
     "outputs": {"show_image_level": 0},
 }
 
@@ -156,7 +162,7 @@ def _assert_answers_match(
     ``min_correct`` overrides the default all-or-nothing check and instead
     requires at least that many questions to match (useful for faint profiles).
     """
-    parsed = parse_answers(answers_spec)
+    parsed = parse_answers(answers_spec, num_questions=NUM_QUESTIONS)
     skip = skip_questions or set()
     mismatches: list[str] = []
     correct = 0
@@ -222,7 +228,7 @@ def test_omr_roundtrip_with_skips(tmp_path: Path) -> None:
     answers_spec = "ABCD-ABCD-ABCD-ABCD-ABCDA"
     png = _generate_filled_png(answers=answers_spec, marking_profile="pen_ballpoint")
     row = _run_omr_on_png(png, tmp_path)
-    parsed = parse_answers(answers_spec)
+    parsed = parse_answers(answers_spec, num_questions=NUM_QUESTIONS)
     skip_qs = {q for q in range(1, NUM_QUESTIONS + 1) if q not in parsed}
     for q in range(1, NUM_QUESTIONS + 1):
         if q in skip_qs:

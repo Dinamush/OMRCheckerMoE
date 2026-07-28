@@ -1485,6 +1485,7 @@ async def prefill_single(
     realism_preset: str = Form("none"),
     marking_profile: str = Form("none"),
     answers: str | None = Form(None),
+    subject_name: str = Form(""),
 ) -> StreamingResponse:
     """Generate a single pre-filled answer sheet and stream it as a download.
 
@@ -1531,7 +1532,7 @@ async def prefill_single(
             data = await asyncio.to_thread(
                 prefill_service.generate_single_pdf,
                 student_name, school_name, exam_name, candidate_number, realism_preset,
-                marking_profile_norm, answers,
+                marking_profile_norm, answers, subject_name,
             )
             media_type = "application/pdf"
             filename = f"prefilled_sheet{preset_suffix}{profile_suffix}.pdf"
@@ -1539,7 +1540,7 @@ async def prefill_single(
             data = await asyncio.to_thread(
                 prefill_service.generate_single_png,
                 student_name, school_name, exam_name, candidate_number, realism_preset,
-                marking_profile_norm, answers,
+                marking_profile_norm, answers, subject_name,
             )
             media_type = "image/png"
             filename = f"prefilled_sheet{preset_suffix}{profile_suffix}.png"
@@ -1704,14 +1705,32 @@ async def prefill_batch(
     if not rows:
         raise HTTPException(status_code=422, detail="CSV contains no data rows.")
 
-    # 4) Required column check happens once on the first row.
-    required_cols = {"student_name", "school_name", "exam_name", "candidate_number"}
+    # 3b) Normalise header aliases (e.g. center_name/centre_name -> school_name)
+    # so operator exports with varied column spellings work unchanged.
+    rows = [prefill_service.normalize_row_keys(row) for row in rows]
+
+    # 4) Required column check happens once on the first row. ``exam_name`` and
+    # ``subject_name`` are optional (their write-in lines are left blank when
+    # absent); the Centre field may arrive as center_name/centre_name and is
+    # normalised to ``school_name`` above.
+    required_cols = set(prefill_service.REQUIRED_CSV_COLUMNS)
     missing_cols = required_cols - set(rows[0].keys())
     if missing_cols:
+        friendly = sorted(missing_cols)
+        hint = ""
+        if "school_name" in missing_cols:
+            hint = (
+                " (the Centre column may be named "
+                "'school_name', 'center_name', or 'centre_name')"
+            )
         raise HTTPException(
             status_code=422,
-            detail=f"CSV is missing required columns: {', '.join(sorted(missing_cols))}",
+            detail=(
+                "CSV is missing required columns: "
+                f"{', '.join(friendly)}{hint}"
+            ),
         )
+
 
     # 4b) When grouping by region the CSV must carry a ``region`` column.
     # We do not enforce non-empty values (rows with empty region fall into
@@ -2003,8 +2022,8 @@ async def prefill_blank(
     Designed for the common "I need 500 unfilled sheets to hand out at
     the venue" workflow that has nothing to do with candidate prefill.
     Sources the page from a 1-page asset bundled with the application
-    (currently the legacy landscape MoE-April-2026-Landscape-NNQ25-0 sheet
-    with ArUco markers) and clones it N times into a single PDF. When
+    (default: July 2026 Letter landscape SMQ60; April 2026 NNQ25 also
+    available) and clones it N times into a single PDF. When
     ``split_pdfs=true`` the combined PDF is post-split into
     printer-safe ZIP segments using the same size/page caps as the
     batch endpoint, with page numbering continuous across segments.

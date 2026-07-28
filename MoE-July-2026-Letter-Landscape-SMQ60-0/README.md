@@ -16,7 +16,7 @@ US Letter **landscape** (11″ × 8.5″) MoE answer sheet — **60** MCQ questi
 
 ## Notes
 
-- Not registered in WebUI / `sheet_registry` yet (pending MoE approval).
+- Registered as the WebUI **default** blank-sheet variant and default preset.
 - Identity: Student / Centre / Exam / Subject / Signature.
 - Marker centres inset ~0.5″ from page edges.
 - Shared generator: `scripts/sheets/generate_letter_smq60.py`

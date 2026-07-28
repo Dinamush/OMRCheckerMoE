@@ -382,7 +382,7 @@ class Settings(BaseSettings):
     )
 
     default_preset: str | None = Field(
-        default="MoE-April-2026-Landscape-NNQ25-0",
+        default="MoE-July-2026-Letter-Landscape-SMQ60-0",
         description=(
             "Preset applied automatically when a new batch is created. "
             "Set to null or empty string to disable auto-apply."

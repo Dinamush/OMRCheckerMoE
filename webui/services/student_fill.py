@@ -248,17 +248,24 @@ def normalize_marking_profile(value: str | None) -> str:
 # ---------------------------------------------------------------------------
 # Geometry.
 # ---------------------------------------------------------------------------
-def answer_bubble_geometry(w: int, h: int) -> list[dict[str, Any]]:
-    """Return pixel-space geometry for the 100 answer bubbles on a sheet
-    of size ``(w, h)``.
+def answer_bubble_geometry(
+    w: int,
+    h: int,
+    *,
+    sheet_layout: str = "april_nnq25",
+) -> list[dict[str, Any]]:
+    """Return pixel-space geometry for answer bubbles on a sheet of size ``(w, h)``.
 
-    The output is a flat list of dicts ordered (q ascending, opt ascending):
-    ``{q: 1..25, option: 0..3, cx, cy, radius}``.
-
-    ``cx``/``cy`` are integer pixel centres in the (w, h) canvas; ``radius``
-    is half the smaller scaled bubble dimension. All values are clamped to
-    the image bounds so caller can pass them straight to ``cv2.ellipse``.
+    ``sheet_layout``:
+      * ``april_nnq25`` — legacy 25Q landscape (default; tests rely on this)
+      * ``letter_smq60`` — July 2026 Letter landscape 60Q
     """
+    if sheet_layout == "letter_smq60":
+        from webui.services.prefill_letter_smq60 import (
+            answer_bubble_geometry as letter_geometry,
+        )
+        return letter_geometry(w, h)
+
     if w <= 0 or h <= 0:
         raise ValueError(f"Canvas dimensions must be positive (got {w}x{h}).")
 
@@ -497,6 +504,10 @@ def _draw_one_ellipse(
     Uses the alpha-blended approach from ``scan_simulation._draw_imperfect_bubbles``:
     build an anti-aliased mask, draw a noisy grayscale fill plane, and
     blend. Mask is feathered with a 3×3 Gaussian so the edges look pencil-like.
+
+    Work is done in a tight ROI around the bubble so Letter (3300×2550) sheets
+    stay interactive when filling all 60 answers — a full-frame mask/blend per
+    bubble previously took ~0.5s × 60 ≈ 30s and made Prefill appear broken.
     """
     cx, cy, radius = bubble["cx"], bubble["cy"], bubble["radius"]
     h_img, w_img = arr.shape[:2]
@@ -522,10 +533,21 @@ def _draw_one_ellipse(
     else:
         start, end = 0.0, 360.0
 
-    mask = np.zeros((h_img, w_img), dtype=np.uint8)
+    # Local ROI with pad for shift, ellipse extent, and Gaussian blur bleed.
+    pad = max(axes) + abs(shift) + 6
+    x0 = max(0, cx - pad)
+    y0 = max(0, cy - pad)
+    x1 = min(w_img, cx + pad + 1)
+    y1 = min(h_img, cy + pad + 1)
+    if x1 <= x0 or y1 <= y0:
+        return
+
+    roi = arr[y0:y1, x0:x1]
+    rh, rw = roi.shape[:2]
+    mask = np.zeros((rh, rw), dtype=np.uint8)
     cv2.ellipse(
         mask,
-        (cx + dx, cy + dy),
+        (cx + dx - x0, cy + dy - y0),
         axes,
         angle,
         start,
@@ -534,12 +556,12 @@ def _draw_one_ellipse(
         -1,
         lineType=cv2.LINE_AA,
     )
-    noise = rng.normal(0, profile.noise_sigma, (h_img, w_img)).astype(np.int16)
-    fill_plane = _clip_uint8(np.full((h_img, w_img), gray, dtype=np.int16) + noise)
+    noise = rng.normal(0, profile.noise_sigma, (rh, rw)).astype(np.int16)
+    fill_plane = _clip_uint8(np.full((rh, rw), gray, dtype=np.int16) + noise)
     alpha = (cv2.GaussianBlur(mask, (3, 3), 0.5).astype(np.float32) / 255.0)[..., None]
     fill_rgb = np.dstack([fill_plane] * arr.shape[2])
-    blended = arr.astype(np.float32) * (1.0 - alpha) + fill_rgb.astype(np.float32) * alpha
-    arr[:] = _clip_uint8(blended)
+    blended = roi.astype(np.float32) * (1.0 - alpha) + fill_rgb.astype(np.float32) * alpha
+    arr[y0:y1, x0:x1] = _clip_uint8(blended)
 
 
 def _draw_one_check(
@@ -680,6 +702,8 @@ def draw_student_marks(
     marking_profile: str | MarkingProfile = DEFAULT_MARKING_PROFILE,
     candidate_number: str | None = None,
     seed: int | None = None,
+    sheet_layout: str = "april_nnq25",
+    num_questions: int | None = None,
 ) -> Image.Image:
     """Return a new ``PIL.Image`` with answer bubbles marked.
 
@@ -701,10 +725,14 @@ def draw_student_marks(
     if profile.style == "none":
         return image  # No-op; original returned unchanged.
 
+    q_limit = num_questions
+    if q_limit is None:
+        q_limit = 60 if sheet_layout == "letter_smq60" else NUM_QUESTIONS
+
     if not isinstance(answers, dict) or not all(
         isinstance(k, int) and isinstance(v, list) for k, v in answers.items()
     ):
-        answers = parse_answers(answers, seed=seed)
+        answers = parse_answers(answers, num_questions=q_limit, seed=seed)
 
     if not answers:
         return image
@@ -712,13 +740,15 @@ def draw_student_marks(
     rng = _rng_for(answers, profile, candidate_number, seed)
 
     arr = np.array(image.convert("RGB"), dtype=np.uint8)
-    geometry = answer_bubble_geometry(image.size[0], image.size[1])
+    geometry = answer_bubble_geometry(
+        image.size[0], image.size[1], sheet_layout=sheet_layout
+    )
     bubble_idx = _build_bubble_index(geometry)
 
     # Build the actual draw list with multi-marks expanded.
     draw_list: list[dict[str, Any]] = []
     for q, opts in sorted(answers.items()):
-        if not (1 <= q <= NUM_QUESTIONS):
+        if not (1 <= q <= q_limit):
             continue
         # Multi-mark expansion: with probability multi_mark_prob, add one
         # extra random option (different from the chosen one) to simulate

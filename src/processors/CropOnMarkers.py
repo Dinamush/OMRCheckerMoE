@@ -899,6 +899,30 @@ class CropOnMarkers(ImagePreprocessor):
                         "strict thresholds are retained for >=3-marker paths).",
                     )
                     return best_warp, best_conf, best_subset
+                if applied_loo and warped_full is not None and not synthetic_marker_ids:
+                    # A geometrically-sane full (4-marker) warp built from
+                    # markers that were ALL genuinely decoded (none recovered
+                    # via the top-fiducial fallback) existed, but we explored
+                    # leave-one-out because its outline coverage was low. When
+                    # no LOO subset clears the gate either, do NOT hard-reject:
+                    # dropping a marker only helps when one corner is genuinely
+                    # biased (in which case that LOO subset PASSES the gate and
+                    # is accepted above). A sane, fully-decoded 4-marker fit
+                    # with low coverage is the ``suspicious_full`` case —
+                    # typically dense/heavy fills or pale print, not a
+                    # misaligned warp — so fall back to the full fit and warn.
+                    # Synthetic/recovered markers stay fail-closed here.
+                    logger.warning(
+                        file_path,
+                        "\nArUco: no leave-one-out subset cleared the bubble-"
+                        "alignment gate; falling back to the geometrically-"
+                        "sane fully-decoded full-marker warp (full "
+                        f"score={_score(conf_full):.2f}, best LOO "
+                        f"score={best_conf.score:.2f}, "
+                        f"coverage={best_conf.coverage:.2f}). "
+                        "Verify sheet alignment.",
+                    )
+                    return warped_full, conf_full, list(available_ids)
                 logger.error(
                     file_path,
                     "\nArUco: rejected warp because bubble alignment "

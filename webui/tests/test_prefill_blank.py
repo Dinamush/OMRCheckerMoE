@@ -309,7 +309,8 @@ def test_blank_variants_endpoint_lists_registered_options(
     body = res.json()
     keys = {v["key"] for v in body["variants"]}
     assert "MoE-April-2026-Landscape-NNQ25-0" in keys
-    assert body["default"] == "MoE-April-2026-Landscape-NNQ25-0"
+    assert "MoE-July-2026-Letter-Landscape-SMQ60-0" in keys
+    assert body["default"] == "MoE-July-2026-Letter-Landscape-SMQ60-0"
 
 
 def test_blank_post_returns_token_and_downloads_pdf(client: TestClient) -> None:
